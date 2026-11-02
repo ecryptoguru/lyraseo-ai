@@ -15,6 +15,7 @@ test-results/
 packages/db/generated/
 .serena/
 output/
+tmp/
 .impeccable/
 # Local operational receipts can contain account and deployment metadata.
 docs/evidence/

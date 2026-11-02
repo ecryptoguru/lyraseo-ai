@@ -15,6 +15,7 @@ model ProductUser {
   id String @id @default(cuid())
   suspended Boolean @default(false)
   securityVersion Int @default(0)
+  auditRuns AuditRun[]
   quotes OperationQuote[]
   operations Operation[]
   createdAt DateTime @default(now())
@@ -47,6 +48,16 @@ model Membership {
   @@id([workspaceId,userId])
 }
 model Site {
+  analyticsStates AnalyticsOAuthState[]
+  analyticsConnection AnalyticsConnection?
+  analyticsImports AnalyticsImport[]
+  googleStates GoogleOAuthState[]
+  googleConnection GoogleConnection?
+  searchSnapshots SearchSnapshot[]
+  searchImports SearchImport[]
+  contextRevisions SiteContextRevision[]
+  verificationChallenges SiteVerificationChallenge[]
+  auditRuns AuditRun[]
   quotes OperationQuote[]
   operations Operation[]
   id String @id @default(cuid())
@@ -187,4 +198,311 @@ model OperationQuote {
   site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
   consumedOperation Operation? @relation(fields:[consumedOperationId],references:[id],onDelete:Restrict)
   @@index([userId,expiresAt])
+}
+
+model AuditRun {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ userId String
+ securityVersion Int
+ idempotencyKey String
+ inputHash String
+ manifest Json
+ profile String
+ declarations Json
+ methodologyVersion String
+ status String @default("QUEUED")
+ fence Int @default(0)
+ leaseOwner String?
+ leaseUntil DateTime?
+ createdAt DateTime @default(now())
+ completedAt DateTime?
+ evaluation Json?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
+ pages AuditPage[]
+ actions IssueAction[]
+ @@unique([workspaceId,id])
+ @@unique([workspaceId,siteId,userId,idempotencyKey])
+ @@index([workspaceId,siteId,createdAt,id])
+}
+model AuditPage {
+ id String @id @default(cuid())
+ workspaceId String
+ auditId String
+ requestedUrl String
+ evidence Json
+ provenance Json
+ createdAt DateTime @default(now())
+ audit AuditRun @relation(fields:[workspaceId,auditId],references:[workspaceId,id],onDelete:Restrict)
+ @@unique([auditId,requestedUrl])
+}
+model IssueAction {
+ id String @id @default(cuid())
+ workspaceId String
+ auditId String
+ userId String
+ ruleId String
+ scopeKey String
+ disposition String
+ reason String
+ createdAt DateTime @default(now())
+ audit AuditRun @relation(fields:[workspaceId,auditId],references:[workspaceId,id],onDelete:Restrict)
+ @@index([workspaceId,auditId,createdAt])
+}
+
+model SiteVerificationChallenge {
+ sessionId String
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ tokenHash String
+ issuedBy String
+ securityVersion Int
+ expiresAt DateTime
+ createdAt DateTime @default(now())
+ consumedAt DateTime?
+ revokedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ @@index([workspaceId,siteId,createdAt])
+}
+model SiteContextRevision {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ revision Int
+ content Json
+ reviewedBy String
+ reviewedAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ @@unique([workspaceId,siteId,revision])
+}
+
+model GoogleOAuthState {
+ id String @id
+ workspaceId String
+ siteId String
+ userId String
+ sessionId String
+ securityVersion Int
+ verifier String
+ expiresAt DateTime
+ consumedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId])
+}
+model GoogleConnection {
+ @@unique([workspaceId,siteId])
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String @unique
+ encryptedRefreshToken String
+ property String?
+ generation Int @default(0)
+ createdAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+}
+model SearchSnapshot {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ property String
+ startDate String
+ endDate String
+ shape String
+ status String
+ rows Json
+ importedAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@unique([workspaceId,siteId,property,startDate,endDate,shape])
+ @@index([workspaceId,siteId,importedAt])
+}
+
+model ContentDraft {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ kind String
+ revision Int @default(1)
+ snapshot Json
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,siteId,id])
+ @@index([workspaceId,siteId,createdAt])
+}
+model ContentRevision {
+ id String @id @default(cuid())
+ workspaceId String
+ draftId String
+ revision Int
+ content Json
+ userId String
+ createdAt DateTime @default(now())
+ @@unique([draftId,revision])
+}
+model EvidenceReport {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ title String
+ snapshot Json
+ pdf Bytes
+ csv String
+ createdAt DateTime @default(now())
+ @@index([workspaceId,siteId,createdAt])
+}
+
+model VisibilityPanel {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ version Int
+ prompts Json
+ brands Json
+ createdBy String
+ reviewedBy String?
+ reviewedAt DateTime?
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,siteId,version])
+}
+model VisibilityRun {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ panelId String
+ profile String
+ cohort String
+ provenance Json
+ slots Json
+ rawAnswers Json?
+ rawExpiresAt DateTime
+ createdAt DateTime @default(now())
+ @@index([workspaceId,siteId,createdAt])
+}
+
+model ApiToken {
+ id String @id @default(cuid())
+ workspaceId String
+ createdBy String
+ name String
+ tokenHash String @unique
+ securityVersion Int
+ accessPolicyHash String
+ siteIds String[]
+ scopes String[]
+ requestKey String
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ revokedAt DateTime?
+ @@unique([createdBy,workspaceId,requestKey])
+ @@index([createdBy,workspaceId,createdAt])
+}
+model ApiThrottle {
+ key String @id
+ count Int
+ expiresAt DateTime
+}
+
+model PageIdentity {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ originalUrl String
+ normalizedUrl String
+ revision Int @default(1)
+ assignedTo String?
+ createdBy String
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,siteId,normalizedUrl])
+ @@unique([workspaceId,siteId,id])
+ @@index([workspaceId,siteId,createdAt,id])
+}
+model PageJournal {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ pageId String
+ revision Int
+ action String
+ note String
+ userId String
+ idempotencyKey String
+ inputHash String
+ contentDraftId String?
+ contentDraftRevision Int?
+ createdAt DateTime @default(now())
+ @@unique([pageId,revision])
+ @@unique([workspaceId,pageId,userId,idempotencyKey])
+ @@index([workspaceId,siteId,pageId,revision])
+}
+
+model AnalyticsOAuthState {
+ id String @id
+ workspaceId String
+ siteId String
+ userId String
+ sessionId String
+ securityVersion Int
+ verifier String
+ expiresAt DateTime
+ consumedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId])
+}
+model AnalyticsConnection {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String @unique
+ encryptedRefreshToken String
+ property String?
+ streamId String?
+ timeZone String?
+ status String @default("connected")
+ catalog Json @default("[]")
+ generation Int @default(0)
+ createdAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@unique([workspaceId,siteId])
+}
+model AnalyticsImport {
+ id String @id
+ workspaceId String
+ siteId String
+ property String
+ streamId String
+ timeZone String
+ origin String
+ startDate String
+ endDate String
+ shape String
+ generation Int
+ status String
+ failure String?
+ rows Json @default("[]")
+ diagnostics Json @default("{}")
+ startedAt DateTime @default(now())
+ importedAt DateTime?
+ leaseUntil DateTime
+ attempt String
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId,startedAt])
+}
+
+model SearchImport {
+ id String @id
+ workspaceId String
+ siteId String
+ property String
+ startDate String
+ endDate String
+ shape String
+ generation Int
+ status String
+ attempt String
+ leaseUntil DateTime
+ failure String?
+ startedAt DateTime @default(now())
+ completedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId,status])
 }

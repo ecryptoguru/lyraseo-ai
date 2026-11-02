@@ -1,3 +1,4 @@
+import { capabilityEnabled } from "@/server/capabilities";
 export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -6,6 +7,7 @@ import { authSettings } from "@/server/auth/settings";
 import { resolveActor, database } from "@/server/auth/server";
 import { listWorkspaces, listSites } from "@lyraseo/db/tenants";
 import { budgetSnapshot } from "@lyraseo/db/accounting";
+import { CreateSite } from "@/components/site-settings";
 import { signOut } from "@/app/sign-in/actions";
 export default async function Workspaces({
   searchParams,
@@ -81,11 +83,61 @@ export default async function Workspaces({
         {selected && (
           <>
             <h3>Sites in {selected.name}</h3>
+            {!capabilityEnabled("context") && (
+              <p className="notice">
+                Site creation and context changes are paused. Saved sites and
+                evidence remain readable.
+              </p>
+            )}
+            <Link
+              href={`/app/access?workspaceId=${encodeURIComponent(selected.id)}`}
+            >
+              API and MCP credentials
+            </Link>
+            {capabilityEnabled("context") &&
+              ["OWNER", "ADMIN"].includes(selected.role) && (
+                <CreateSite key={selected.id} workspaceId={selected.id} />
+              )}
             {sites.length ? (
               <ul className="pilot-sites">
                 {sites.map((s) => (
                   <li key={s.id}>
                     <strong>{s.origin}</strong>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/audits?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      Open saved audits
+                    </Link>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/pages?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      Page workspaces
+                    </Link>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/search?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      Search performance
+                    </Link>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/analytics?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      Organic landing-page outcomes
+                    </Link>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/content?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      Content and reports
+                    </Link>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/visibility?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      AI observations
+                    </Link>
+                    <Link
+                      href={`/app/sites/${encodeURIComponent(s.id)}/settings?workspaceId=${encodeURIComponent(selected.id)}`}
+                    >
+                      Site settings
+                    </Link>
                     <span>
                       {s.verifiedAt
                         ? "Ownership evidence recorded"

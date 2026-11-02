@@ -5,6 +5,10 @@ const require = createRequire(
 );
 const { Client } = require("pg");
 const tables = [
+  "PageIdentity",
+  "PageJournal",
+  "ApiToken",
+  "ApiThrottle",
   "ProductUser",
   "ProviderIdentity",
   "Workspace",
@@ -18,6 +22,22 @@ const tables = [
   "OutboxEvent",
   "UsageReceipt",
   "OperationQuote",
+  "AuditRun",
+  "AuditPage",
+  "IssueAction",
+  "SiteContextRevision",
+  "SiteVerificationChallenge",
+  "AnalyticsOAuthState",
+  "AnalyticsConnection",
+  "AnalyticsImport",
+  "GoogleOAuthState",
+  "GoogleConnection",
+  "SearchSnapshot",
+  "VisibilityPanel",
+  "VisibilityRun",
+  "ContentDraft",
+  "ContentRevision",
+  "EvidenceReport",
   "AuthThrottle",
   "ProductSession",
 ];
@@ -118,6 +138,9 @@ export async function checkDatabase(url, identity) {
         "Product migrations are missing or runtime role owns product tables",
       );
     const scoped = [
+      "PageIdentity",
+      "PageJournal",
+      "ApiToken",
       "Workspace",
       "Membership",
       "Site",
@@ -129,6 +152,22 @@ export async function checkDatabase(url, identity) {
       "OutboxEvent",
       "UsageReceipt",
       "OperationQuote",
+      "AuditRun",
+      "AuditPage",
+      "IssueAction",
+      "SiteContextRevision",
+      "SiteVerificationChallenge",
+      "AnalyticsOAuthState",
+      "AnalyticsConnection",
+      "AnalyticsImport",
+      "GoogleOAuthState",
+      "GoogleConnection",
+      "SearchSnapshot",
+      "VisibilityPanel",
+      "VisibilityRun",
+      "ContentDraft",
+      "ContentRevision",
+      "EvidenceReport",
     ];
     if (
       catalog.some(
@@ -192,15 +231,14 @@ export async function main(env = process.env) {
       `Supabase public settings request failed (${response.status})`,
     );
   const settings = await response.json();
-  if (
-    !settings.external?.email ||
-    !settings.external?.google ||
-    settings.disable_signup !== true ||
-    settings.external?.anonymous === true
-  )
-    throw new Error(
-      "Provider settings must enable email/Google, disable public signup and disable anonymous auth",
-    );
+  const missing = [
+    !settings.external?.email && "enable email sign-in",
+    !settings.external?.google && "enable Google sign-in",
+    settings.disable_signup !== true && "disable public signup",
+    settings.external?.anonymous === true && "disable anonymous auth",
+  ].filter(Boolean);
+  if (missing.length)
+    throw new Error(`Provider setup required: ${missing.join("; ")}.`);
   console.log(
     "PASS: dedicated provider reachable; email/Google enabled; public signup disabled",
   );
@@ -225,11 +263,13 @@ if (
   } catch (error) {
     // Driver messages may contain private connection details. Emit only safe failure categories.
     console.error(
-      error?.code
-        ? `Auth preflight failed (${String(error.code).replace(/[^A-Z0-9_]/g, "")}). Check configuration privately.`
-        : error instanceof Error && !error.message.includes("://")
-          ? error.message
-          : "Auth preflight failed. Check configuration privately.",
+      error?.cause?.code === "ENOTFOUND"
+        ? "Supabase settings host does not resolve. Check the configured project URL and whether the project is paused."
+        : error?.code
+          ? `Auth preflight failed (${String(error.code).replace(/[^A-Z0-9_]/g, "")}). Check configuration privately.`
+          : error instanceof Error && !error.message.includes("://")
+            ? error.message
+            : "Auth preflight failed. Check configuration privately.",
     );
     process.exitCode = 1;
   }
