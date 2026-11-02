@@ -28,6 +28,6 @@ pnpm build
 
 A new machine may need `pnpm --filter @lyraseo/web exec playwright install chromium` for browser tests. Tests cover desktop/mobile interactions and bounded automated accessibility checks; these are not a full accessibility-conformance claim. Generated Prisma client files are reproduced by `db:local` and excluded from source tracking. For a plain type check after a fresh checkout without Docker, run `pnpm --filter @lyraseo/db exec prisma generate` first.
 
-The approved plan and policies are indexed in [docs](docs/README.md). Actual evidence and unfinished work are recorded in [phase-one progress](docs/evidence/phase-one-progress.md). Free-first remains in force; paid upgrades need approval. Phase two and business decisions stay deferred.
+The approved plan and policies are indexed in [docs](docs/README.md). The [build roadmap](docs/build-roadmap.md) records delivered capabilities and remaining milestones. Local operational receipts are retained in the ignored `docs/evidence/` directory. Free-first remains in force; paid upgrades need approval. Phase-two implementation follows its domain and release prerequisites.
 
 See the [private-pilot auth and ledger runbook](docs/runbooks/private-pilot-auth.md) for required configuration, restricted roles and unverified live gates. Do not enable authentication just by adding provider credentials; complete the explicit prerequisites and verify the actual project first.

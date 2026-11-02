@@ -6,6 +6,8 @@ The [consolidated planning review](./product-quality-and-optimization.md#8-conso
 
 ## Engineering handoff
 
+- [Current build roadmap](./build-roadmap.md) — approved private-pilot milestones, hosted OpenSEO breadth and verification gates.
+
 - [Private-pilot authentication and ledger setup](./runbooks/private-pilot-auth.md) — implemented local boundaries, dedicated role configuration and unverified live acceptance.
 
 - [Finalized engineering contracts](./engineering-contracts.md) — runtime, identity/tenancy, API/jobs/cost, integrations, privacy/recovery and UI states.
