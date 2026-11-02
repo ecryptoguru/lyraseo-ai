@@ -33,11 +33,26 @@ if (inspect.status === 0) {
     "POSTGRES_DB=lyraseo_test",
     "postgres:17-alpine",
   ]);
+// The image starts a socket-only server during initdb. Wait for the final TCP listener.
 for (let attempt = 0; attempt < 30; attempt++) {
   const ready = spawnSync(
     "docker",
-    ["exec", name, "pg_isready", "-U", "postgres"],
-    { stdio: "ignore" },
+    [
+      "exec",
+      name,
+      "pg_isready",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "5432",
+      "-U",
+      "postgres",
+      "-d",
+      "lyraseo_test",
+      "-t",
+      "1",
+    ],
+    { stdio: "ignore", timeout: 3000 },
   );
   if (ready.status === 0) break;
   if (attempt === 29) throw new Error("Local PostgreSQL did not become ready.");
