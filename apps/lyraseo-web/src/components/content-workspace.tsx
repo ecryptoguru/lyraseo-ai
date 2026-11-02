@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useClientReady } from "./use-client-ready";
 type Source = { id: string; label: string; kind: "audit" | "gsc" };
 type DraftBody = {
   title: string;
@@ -33,6 +34,7 @@ export function ContentWorkspace({
   siteId: string;
   editable: boolean;
 }) {
+  const clientReady = useClientReady();
   const [drafts, setDrafts] = useState<Draft[]>([]),
     [reports, setReports] = useState<Report[]>([]),
     [sources, setSources] = useState<Source[]>([]);
@@ -42,6 +44,10 @@ export function ContentWorkspace({
   const [reportChosen, setReportChosen] = useState<string[]>([]),
     [reportTitle, setReportTitle] = useState(""),
     [kind, setKind] = useState<"brief" | "draft">("draft");
+  const [reportMessage, setReportMessage] = useState("");
+  const [comparisonEnabled, setComparisonEnabled] = useState(false),
+    [beforeAuditId, setBeforeAuditId] = useState(""),
+    [afterAuditId, setAfterAuditId] = useState("");
   const [title, setTitle] = useState(""),
     [body, setBody] = useState(""),
     [assumptions, setAssumptions] = useState("");
@@ -94,7 +100,7 @@ export function ContentWorkspace({
             .filter((audit: { status: string }) => audit.status === "COMPLETED")
             .map((audit: { id: string; createdAt: string }) => ({
               id: audit.id,
-              label: `Audit ${new Date(audit.createdAt).toLocaleString()}`,
+              label: `Audit ${new Date(audit.createdAt).toLocaleString()} · ${audit.id}`,
               kind: "audit" as const,
             })),
           ...search.snapshots.map(
@@ -122,12 +128,12 @@ export function ContentWorkspace({
       active = false;
     };
   }, [query]);
-  async function perform(work: () => Promise<void>) {
+  async function perform(work: () => Promise<void>, forReport = false) {
     setBusy(true);
     try {
       await work();
     } catch (error) {
-      setMessage(
+      (forReport ? setReportMessage : setMessage)(
         error instanceof Error
           ? error.message
           : "Unable to save. Your draft remains in the editor.",
@@ -185,8 +191,11 @@ export function ContentWorkspace({
         </p>
         {editable && collectionEnabled && (
           <>
+            {!clientReady && (
+              <p role="status">Preparing draft and report controls…</p>
+            )}
             {!selected && (
-              <fieldset disabled={busy}>
+              <fieldset disabled={!clientReady || busy}>
                 <legend>
                   Select up to five audits and five search imports
                 </legend>
@@ -263,7 +272,7 @@ export function ContentWorkspace({
                   <select
                     className="audit-input"
                     value={kind}
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                     onChange={(event) =>
                       setKind(event.target.value as "brief" | "draft")
                     }
@@ -281,7 +290,7 @@ export function ContentWorkspace({
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 required
-                disabled={busy}
+                disabled={!clientReady || busy}
               />
               <label htmlFor="draft-body">Editable Markdown draft</label>
               <textarea
@@ -291,7 +300,7 @@ export function ContentWorkspace({
                 maxLength={100000}
                 value={body}
                 onChange={(event) => setBody(event.target.value)}
-                disabled={busy}
+                disabled={!clientReady || busy}
               />
               <label htmlFor="draft-assumptions">
                 Assumptions to verify, one per line
@@ -302,7 +311,7 @@ export function ContentWorkspace({
                 rows={3}
                 value={assumptions}
                 onChange={(event) => setAssumptions(event.target.value)}
-                disabled={busy}
+                disabled={!clientReady || busy}
               />
               {citations.map((citation, index) => (
                 <div key={citation.sourceId}>
@@ -321,14 +330,16 @@ export function ContentWorkspace({
                       })
                     }
                     required
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                   />
                 </div>
               ))}
               <div className="pilot-tabs">
                 <button
                   className="button button-primary"
-                  disabled={busy || (!selected && !chosen.length)}
+                  disabled={
+                    !clientReady || busy || (!selected && !chosen.length)
+                  }
                 >
                   {busy
                     ? "Saving…"
@@ -340,7 +351,7 @@ export function ContentWorkspace({
                   <button
                     className="button button-secondary"
                     type="button"
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                     onClick={() => {
                       setSelected(null);
                       setTitle("");
@@ -451,10 +462,10 @@ export function ContentWorkspace({
               className="audit-input"
               value={reportTitle}
               maxLength={200}
-              disabled={busy}
+              disabled={!clientReady || busy}
               onChange={(event) => setReportTitle(event.target.value)}
             />
-            <fieldset disabled={busy}>
+            <fieldset disabled={!clientReady || busy}>
               <legend>
                 Report evidence: select up to five audits and five search
                 imports
@@ -483,25 +494,119 @@ export function ContentWorkspace({
                 <p>No saved evidence is available yet.</p>
               )}
             </fieldset>
+            <fieldset
+              disabled={!clientReady || busy}
+              aria-describedby="report-comparison-help"
+            >
+              <legend>Optional audit comparison</legend>
+              <p id="report-comparison-help">
+                Choose two distinct completed audits from the report evidence
+                above. Explicitly choose their direction: before must be no
+                newer than after. Missing or incompatible evidence remains
+                unevaluated and cannot prove a fix.
+              </p>
+              <label className="audit-source">
+                <input
+                  type="checkbox"
+                  checked={comparisonEnabled}
+                  onChange={(event) =>
+                    setComparisonEnabled(event.target.checked)
+                  }
+                />{" "}
+                Include a frozen before/after comparison
+              </label>
+              {comparisonEnabled && (
+                <>
+                  <label htmlFor="report-before">Before audit</label>
+                  <select
+                    id="report-before"
+                    className="audit-input"
+                    value={beforeAuditId}
+                    onChange={(event) => setBeforeAuditId(event.target.value)}
+                  >
+                    <option value="">Choose before audit</option>
+                    {sources
+                      .filter(
+                        (source) =>
+                          source.kind === "audit" &&
+                          (reportChosen.includes(source.id) ||
+                            source.id === beforeAuditId),
+                      )
+                      .map((source) => (
+                        <option key={source.id} value={source.id}>
+                          {source.label}
+                        </option>
+                      ))}
+                  </select>
+                  <label htmlFor="report-after">After audit</label>
+                  <select
+                    id="report-after"
+                    className="audit-input"
+                    value={afterAuditId}
+                    onChange={(event) => setAfterAuditId(event.target.value)}
+                  >
+                    <option value="">Choose after audit</option>
+                    {sources
+                      .filter(
+                        (source) =>
+                          source.kind === "audit" &&
+                          (reportChosen.includes(source.id) ||
+                            source.id === afterAuditId),
+                      )
+                      .map((source) => (
+                        <option key={source.id} value={source.id}>
+                          {source.label}
+                        </option>
+                      ))}
+                  </select>
+                </>
+              )}
+            </fieldset>
             <button
               className="button button-primary"
-              disabled={busy || !reportChosen.length || !reportTitle.trim()}
+              disabled={
+                !clientReady ||
+                busy ||
+                !reportChosen.length ||
+                !reportTitle.trim()
+              }
               onClick={() =>
                 void perform(async () => {
+                  setReportMessage("");
+                  if (
+                    comparisonEnabled &&
+                    (!beforeAuditId ||
+                      !afterAuditId ||
+                      beforeAuditId === afterAuditId ||
+                      !reportChosen.includes(beforeAuditId) ||
+                      !reportChosen.includes(afterAuditId))
+                  ) {
+                    throw new Error(
+                      "Choose two distinct before and after audits included in the report evidence. Your selections have been preserved.",
+                    );
+                  }
                   await request("/api/reports", {
                     title: reportTitle,
+                    ...(comparisonEnabled
+                      ? { comparison: { beforeAuditId, afterAuditId } }
+                      : {}),
                     ...selectionFor(reportChosen),
                   });
                   await refresh();
-                  setMessage(
+                  setReportMessage(
                     "Private report saved. PDF and CSV downloads are ready.",
                   );
-                })
+                }, true)
               }
             >
               Create report from selected evidence
             </button>
           </>
+        )}
+        {reportMessage && (
+          <p role="status" aria-live="polite">
+            {reportMessage}
+          </p>
         )}
         {!reports.length && <p>No saved reports yet.</p>}
         <ul className="audit-history">

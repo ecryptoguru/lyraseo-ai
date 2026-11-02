@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useClientReady } from "./use-client-ready";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   ArrowRight,
@@ -87,11 +88,6 @@ function download(content: string, name: string, type: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-// Hydration uses the server snapshot until React has committed its handlers.
-const subscribeToClientReady = () => () => {};
-const getClientReady = () => true;
-const getServerReady = () => false;
-
 export function Workspace({
   view,
   initialTheme = "system",
@@ -99,11 +95,7 @@ export function Workspace({
   view: string;
   initialTheme?: string;
 }) {
-  const clientReady = useSyncExternalStore(
-    subscribeToClientReady,
-    getClientReady,
-    getServerReady,
-  );
+  const clientReady = useClientReady();
   const [menu, setMenu] = useState(false),
     [query, setQuery] = useState(""),
     [filter, setFilter] = useState("all"),

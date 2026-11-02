@@ -2,7 +2,12 @@ import { siteScope } from "./sites";
 import { boundedRawAnchorText } from "@lyraseo/visibility/acquisition";
 /** Persisted manual editorial work. Source data is evidence, never executable instructions. */
 import type { Prisma, PrismaClient } from "../generated/client";
-import type { PageEvidence } from "@lyraseo/visibility";
+import {
+  compareAudits,
+  type AuditComparison,
+  type AuditEvaluation,
+  type PageEvidence,
+} from "@lyraseo/visibility";
 import { withActor, authorizeSiteIn, type Actor, type Tx } from "./context";
 export type ContentScope = { workspaceId: string; siteId: string };
 export type Citation = { sourceId: string; note: string };
@@ -16,7 +21,30 @@ export type SourceSelection = {
   auditIds: string[];
   searchSnapshotIds: string[];
 };
+export type ReportComparisonSelection = {
+  beforeAuditId: string;
+  afterAuditId: string;
+};
+export type FrozenAuditReference = {
+  auditId: string;
+  createdAt: string;
+  methodologyVersion: string;
+  profile: string;
+  manifest: string[];
+  declarations: unknown;
+  contextRevisionId?: string;
+  contextRevision?: number;
+};
+export type FrozenAuditComparison = {
+  before: FrozenAuditReference;
+  after: FrozenAuditReference;
+  compatible: boolean;
+  profileComparable: boolean;
+  result: AuditComparison;
+  counts: Record<Exclude<keyof AuditComparison, "scoreDelta">, number>;
+};
 export type EvidenceSnapshot = {
+  comparison?: FrozenAuditComparison;
   capturedAt: string;
   scope: ContentScope;
   methodology: string;
@@ -69,6 +97,7 @@ async function capture(
   tx: Tx,
   scope: ContentScope,
   selection: SourceSelection,
+  pair?: ReportComparisonSelection,
 ): Promise<EvidenceSnapshot> {
   if (
     !Array.isArray(selection.auditIds) ||
@@ -78,6 +107,20 @@ async function capture(
     (!selection.auditIds.length && !selection.searchSnapshotIds.length)
   )
     throw new Error("INVALID_SOURCES");
+  if (
+    pair &&
+    (pair.beforeAuditId === pair.afterAuditId ||
+      !selection.auditIds.includes(pair.beforeAuditId) ||
+      !selection.auditIds.includes(pair.afterAuditId) ||
+      new Set(selection.auditIds).size !== selection.auditIds.length ||
+      new Set(selection.searchSnapshotIds).size !==
+        selection.searchSnapshotIds.length)
+  )
+    throw new Error("INVALID_COMPARISON");
+  const comparisons = new Map<
+    string,
+    { reference: FrozenAuditReference; evaluation: AuditEvaluation }
+  >();
   const sources: EvidenceSnapshot["sources"] = [],
     links: EvidenceSnapshot["internalLinks"] = [];
   for (const id of new Set(selection.auditIds)) {
@@ -91,6 +134,26 @@ async function capture(
       where: { workspaceId: scope.workspaceId, auditId: id },
       orderBy: { requestedUrl: "asc" },
     });
+    if (pair && [pair.beforeAuditId, pair.afterAuditId].includes(run.id)) {
+      const evaluation = {
+        ...(run.evaluation as unknown as AuditEvaluation),
+        profile: run.profile,
+        declarations: run.declarations as AuditEvaluation["declarations"],
+      };
+      comparisons.set(run.id, {
+        evaluation,
+        reference: {
+          auditId: run.id,
+          createdAt: run.createdAt.toISOString(),
+          methodologyVersion: run.methodologyVersion,
+          profile: run.profile,
+          manifest: run.manifest as string[],
+          declarations: run.declarations,
+          contextRevisionId: evaluation.contextRevisionId,
+          contextRevision: evaluation.contextRevision,
+        },
+      });
+    }
     sources.push({
       sourceId: `audit:${run.id}`,
       kind: "raw-http-audit",
@@ -171,7 +234,40 @@ async function capture(
     where: siteScope(scope),
     orderBy: { revision: "desc" },
   });
+  let comparison: FrozenAuditComparison | undefined;
+  if (pair) {
+    const before = comparisons.get(pair.beforeAuditId),
+      after = comparisons.get(pair.afterAuditId);
+    if (
+      !before ||
+      !after ||
+      before.reference.createdAt > after.reference.createdAt
+    )
+      throw new Error("INVALID_COMPARISON");
+    const result = compareAudits(before.evaluation, after.evaluation);
+    const profileComparable =
+      before.reference.profile === after.reference.profile;
+    if (!profileComparable) result.scoreDelta = null;
+    comparison = {
+      before: before.reference,
+      after: after.reference,
+      result,
+      profileComparable,
+      compatible:
+        before.reference.methodologyVersion ===
+          after.reference.methodologyVersion && profileComparable,
+      counts: {
+        resolved: result.resolved.length,
+        new: result.new.length,
+        persistent: result.persistent.length,
+        improved: result.improved.length,
+        worsened: result.worsened.length,
+        unevaluated: result.unevaluated.length,
+      },
+    };
+  }
   const result = {
+    ...(comparison ? { comparison } : {}),
     capturedAt: new Date().toISOString(),
     scope: siteScope(scope),
     methodology:
@@ -193,6 +289,25 @@ export async function captureEditorialEvidence(
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     return capture(tx, scope, selection);
+  });
+}
+/** Report capture authorizes both creation and export before reading saved evidence. */
+export async function captureEvidenceReport(
+  db: PrismaClient,
+  actor: Actor,
+  scope: ContentScope,
+  selection: SourceSelection & { comparison?: ReportComparisonSelection },
+) {
+  return withActor(db, actor, scope.workspaceId, async (tx) => {
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
+    if (
+      new Set(selection.auditIds).size !== selection.auditIds.length ||
+      new Set(selection.searchSnapshotIds).size !==
+        selection.searchSnapshotIds.length
+    )
+      throw new Error("INVALID_SOURCES");
+    return capture(tx, scope, selection, selection.comparison);
   });
 }
 export async function createContentDraft(
@@ -304,6 +419,7 @@ export async function storeEvidenceReport(
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
     if (
       !input.title.trim() ||
       input.title.length > 200 ||

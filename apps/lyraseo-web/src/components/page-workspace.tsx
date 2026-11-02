@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useClientReady } from "./use-client-ready";
 type Page = {
   id: string;
   originalUrl: string;
@@ -81,6 +82,7 @@ export function PageWorkspace({
   editable: boolean;
   pageId?: string;
 }) {
+  const clientReady = useClientReady();
   const [pages, setPages] = useState<Page[]>([]),
     [detail, setDetail] = useState<Detail | null>(null);
   const [url, setUrl] = useState(`${origin}/`),
@@ -216,6 +218,7 @@ export function PageWorkspace({
               });
             }}
           >
+            {!clientReady && <p role="status">Preparing page registration…</p>}
             <label htmlFor="registered-url">Exact page URL</label>
             <input
               id="registered-url"
@@ -225,9 +228,12 @@ export function PageWorkspace({
               required
               maxLength={2048}
               onChange={(event) => setUrl(event.target.value)}
-              disabled={busy}
+              disabled={!clientReady || busy}
             />
-            <button className="button button-primary" disabled={busy}>
+            <button
+              className="button button-primary"
+              disabled={!clientReady || busy}
+            >
               Register page
             </button>
           </form>

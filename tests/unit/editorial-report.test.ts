@@ -31,6 +31,8 @@ it("renders local structured private evidence to valid PDF and CSV without execu
   expect(Buffer.from(output.pdf).subarray(0, 5).toString()).toBe("%PDF-");
   expect(output.csv).toContain('"\'=Private evidence"');
   expect(output.csv).toContain("partial");
+  expect(output.csv.split("\r\n")).toHaveLength(2);
+  expect(output.csv).not.toContain("Immutable audit comparison");
   expect(output.pdf.length).toBeGreaterThan(1000);
 });
 
@@ -79,4 +81,126 @@ it("exports frozen v2 rule versions, category coverage and receipt provenance wi
   const report = await renderEvidenceReport("Readiness", snapshot);
   expect(report.csv).toContain(csvCell(JSON.stringify(source)));
   expect(Buffer.from(report.pdf).subarray(0, 5).toString()).toBe("%PDF-");
+});
+
+it("exports the frozen comparison in full and visibly distinguishes resolved from unevaluated evidence", async () => {
+  const { comparisonReportLines } =
+    await import("../../apps/lyraseo-web/src/server/editorial/reports");
+  const rule = {
+    ruleId: "D01",
+    ruleVersion: "2",
+    scopeKey: "https://example.com/missing",
+    category: "discovery" as const,
+    outcome: "FAIL" as const,
+    priority: "high" as const,
+    reasonCode: "HTTP_ERROR",
+    evidenceRefs: [
+      {
+        source: "receipt" as const,
+        requestedUrl: "https://example.com/missing",
+        fields: ["status"],
+      },
+    ],
+  };
+  const run = {
+    auditId: "before",
+    createdAt: "2026-11-01T00:00:00Z",
+    methodologyVersion: "readiness-v2",
+    profile: "LOCAL_RAW_V1",
+    manifest: [rule.scopeKey],
+    declarations: { contextRevision: 2 },
+  };
+  const comparison = {
+    before: run,
+    after: { ...run, auditId: "after", createdAt: "2026-11-02T00:00:00Z" },
+    compatible: true,
+    profileComparable: true,
+    result: {
+      resolved: [rule],
+      new: [],
+      persistent: [],
+      improved: [],
+      worsened: [],
+      unevaluated: [
+        {
+          ...rule,
+          scopeKey: "https://example.com/unreadable",
+          outcome: "UNKNOWN" as const,
+          reasonCode: "ACQUISITION_UNAVAILABLE",
+        },
+      ],
+      scoreDelta: null,
+    },
+    counts: {
+      resolved: 1,
+      new: 0,
+      persistent: 0,
+      improved: 0,
+      worsened: 0,
+      unevaluated: 1,
+    },
+  };
+  const snapshot = {
+    capturedAt: run.createdAt,
+    scope: { workspaceId: "a", siteId: "s" },
+    methodology: "saved",
+    context: null,
+    internalLinks: [],
+    sources: [],
+    comparison,
+  } as EvidenceSnapshot;
+  const sources = [
+    {
+      sourceId: "audit:before",
+      kind: "raw-http-audit",
+      data: { evaluation: { rules: [rule] } },
+    },
+    {
+      sourceId: "audit:after",
+      kind: "raw-http-audit",
+      data: {
+        evaluation: {
+          rules: [{ ...rule, outcome: "PASS", reasonCode: "HTML_ACQUIRED" }],
+        },
+      },
+    },
+  ];
+  const lines = comparisonReportLines(comparison, sources).join("\n");
+  expect(lines).toContain(
+    "Before: FAIL (HTTP_ERROR) -> After: PASS (HTML_ACQUIRED)",
+  );
+  expect(lines).toContain("HTTP receipt (status)");
+  expect(lines).toContain("Before: audit:before");
+  expect(lines).toContain("After: audit:after");
+  expect(lines).toContain("Resolved: 1");
+  expect(lines).toContain("Unevaluated: 1");
+  expect(lines).toContain("Resolved | D01 v2 | https://example.com/missing");
+  expect(lines).toContain("HTTP_ERROR");
+  expect(lines).toContain(
+    "Unevaluated | D01 v2 | https://example.com/unreadable",
+  );
+  expect(lines).toContain("Before sources:");
+  expect(lines).toContain("cannot prove a fix");
+  expect(lines).toContain("not available");
+  const report = await renderEvidenceReport("Private", snapshot);
+  expect(report.csv).toContain(csvCell("Immutable audit comparison"));
+  expect(report.csv).toContain(csvCell(JSON.stringify(comparison)));
+  expect(comparisonReportLines(undefined)).toEqual([]);
+  const large = {
+    ...comparison,
+    result: {
+      ...comparison.result,
+      resolved: Array.from({ length: 101 }, (_, index) => ({
+        ...rule,
+        scopeKey: `https://example.com/${index}`,
+      })),
+    },
+    counts: { ...comparison.counts, resolved: 101 },
+  };
+  expect(comparisonReportLines(large).join("\n")).toContain("100 of 102");
+  const full = await renderEvidenceReport("Large", {
+    ...snapshot,
+    comparison: large,
+  });
+  expect(full.csv).toContain("https://example.com/100");
 });

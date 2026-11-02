@@ -2,7 +2,7 @@ import { capabilityPause } from "@/server/capabilities";
 import { z } from "zod";
 import { database, resolveActor } from "@/server/auth/server";
 import {
-  captureEditorialEvidence,
+  captureEvidenceReport,
   storeEvidenceReport,
   readEvidenceReports,
 } from "@lyraseo/db/content";
@@ -18,17 +18,31 @@ export async function POST(request: Request) {
   try {
     const actor = await resolveActor(),
       input = scopeSchema
-        .extend({ title: z.string().min(1).max(200), ...selectionSchema })
+        .extend({
+          title: z.string().min(1).max(200),
+          ...selectionSchema,
+          comparison: z
+            .object({
+              beforeAuditId: z.string().min(1).max(128),
+              afterAuditId: z.string().min(1).max(128),
+            })
+            .strict()
+            .optional(),
+        })
         .strict()
         .parse(await privateBody(request));
     const paused = capabilityPause("content");
     if (paused) return paused;
 
-    const snapshot = await captureEditorialEvidence(
+    const snapshot = await captureEvidenceReport(
       database(),
       actor,
       scopeSchema.parse(input),
-      { auditIds: input.auditIds, searchSnapshotIds: input.searchSnapshotIds },
+      {
+        auditIds: input.auditIds,
+        searchSnapshotIds: input.searchSnapshotIds,
+        comparison: input.comparison,
+      },
     );
     const output = await renderEvidenceReport(input.title, snapshot);
     return Response.json(

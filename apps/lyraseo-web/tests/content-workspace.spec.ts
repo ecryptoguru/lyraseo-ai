@@ -9,10 +9,10 @@ const viteRequire = createRequire(
   ),
 );
 const { build } = viteRequire("esbuild");
-async function bundle(editable: boolean) {
+async function bundle(editable: boolean, collectionEnabled = true) {
   const result = await build({
     stdin: {
-      contents: `import {createRoot} from 'react-dom/client';import {ContentWorkspace} from './src/components/content-workspace';createRoot(document.querySelector('#content-fixture')).render(<ContentWorkspace workspaceId="a" siteId="site" editable={${editable}}/>);`,
+      contents: `import {createRoot} from 'react-dom/client';import {ContentWorkspace} from './src/components/content-workspace';createRoot(document.querySelector('#content-fixture')).render(<ContentWorkspace workspaceId="a" siteId="site" editable={${editable}} collectionEnabled={${collectionEnabled}}/>);`,
       resolveDir: process.cwd(),
       loader: "tsx",
     },
@@ -251,4 +251,157 @@ test("saved draft loads complete history and reports use their visible independe
     auditIds: ["audit-b"],
     searchSnapshotIds: [],
   });
+});
+
+test("explicit report comparison preserves independent selections on validation and server errors", async ({
+  page,
+}, testInfo) => {
+  let reportCommand: unknown;
+  let releaseReport!: () => void;
+  const reportResponse = new Promise<void>((resolve) => {
+    releaseReport = resolve;
+  });
+  await page.route("**/api/content**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/reports**", async (route) => {
+    if (route.request().method() === "POST") {
+      reportCommand = route.request().postDataJSON();
+      await reportResponse;
+      return route.fulfill({
+        status: 409,
+        json: {
+          error:
+            "Before audit must not be newer than after. Your selections are preserved.",
+        },
+      });
+    }
+    return route.fulfill({ json: [] });
+  });
+  await page.route("**/api/audits**", (route) =>
+    route.fulfill({
+      json: [
+        {
+          id: "before",
+          status: "COMPLETED",
+          createdAt: "2026-11-01T00:00:00Z",
+        },
+        { id: "after", status: "COMPLETED", createdAt: "2026-11-02T00:00:00Z" },
+      ],
+    }),
+  );
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Controlled comparison report</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  await expect(page.getByRole("status")).toContainText("Choose saved evidence");
+  await page
+    .getByLabel("Report title", { exact: true })
+    .fill("Immutable comparison acceptance");
+  await page
+    .getByLabel("Draft title", { exact: true })
+    .fill("Unsaved manual draft remains independent");
+  const evidence = page.getByRole("group", {
+    name: "Report evidence: select up to five audits and five search imports",
+    exact: true,
+  });
+  await evidence.getByRole("checkbox").nth(0).check();
+  await evidence.getByRole("checkbox").nth(1).check();
+  await page.getByLabel("Include a frozen before/after comparison").check();
+  await page.getByLabel("Before audit", { exact: true }).selectOption("before");
+  const create = page.getByRole("button", {
+    name: "Create report from selected evidence",
+  });
+  await create.click();
+  await expect(
+    page
+      .getByRole("region", { name: "Private evidence reports" })
+      .getByRole("status"),
+  ).toContainText("two distinct");
+  expect(reportCommand).toBeUndefined();
+  await page.getByLabel("After audit", { exact: true }).selectOption("after");
+  await page.getByLabel("Before audit", { exact: true }).focus();
+  await expect(page.getByLabel("Before audit", { exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("After audit", { exact: true })).toBeFocused();
+  await create.click();
+  await expect(create).toBeDisabled();
+  await expect(page.getByLabel("Before audit", { exact: true })).toBeDisabled();
+  releaseReport();
+  await expect(
+    page
+      .getByRole("region", { name: "Private evidence reports" })
+      .getByRole("status"),
+  ).toContainText("must not be newer");
+  expect(reportCommand).toEqual({
+    workspaceId: "a",
+    siteId: "site",
+    title: "Immutable comparison acceptance",
+    auditIds: ["before", "after"],
+    searchSnapshotIds: [],
+    comparison: { beforeAuditId: "before", afterAuditId: "after" },
+  });
+  await expect(page.getByLabel("Before audit", { exact: true })).toHaveValue(
+    "before",
+  );
+  await expect(page.getByLabel("After audit", { exact: true })).toHaveValue(
+    "after",
+  );
+  await expect(page.getByLabel("Report title", { exact: true })).toHaveValue(
+    "Immutable comparison acceptance",
+  );
+  await expect(page.getByLabel("Draft title", { exact: true })).toHaveValue(
+    "Unsaved manual draft remains independent",
+  );
+  await expect(evidence.getByRole("checkbox").nth(0)).toBeChecked();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/build-2026-11-02/comparison-controls-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
+
+test("report comparison respects loading, empty and paused states", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const loaded = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/content**", async (route) => {
+    await loaded;
+    await route.fulfill({ json: [] });
+  });
+  await page.route("**/api/reports**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/audits**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Paused report fixture</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true, false) });
+  await expect(
+    page.getByText("Loading saved work…", { exact: true }),
+  ).toBeVisible();
+  release();
+  await expect(page.getByText("No saved reports yet.")).toBeVisible();
+  await expect(
+    page.getByLabel("Include a frozen before/after comparison"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Paused", { exact: false }).first(),
+  ).toBeVisible();
 });

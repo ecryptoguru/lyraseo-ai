@@ -58,7 +58,9 @@ export function editorialFailure(error: unknown) {
     {
       error:
         status === 409
-          ? "Check the selected sources and fields, or reload the latest revision."
+          ? code === "INVALID_COMPARISON"
+            ? "Choose two distinct completed audits included in this report. Before must be no newer than after. Your selections are preserved."
+            : "Check the selected sources and fields, or reload the latest revision."
           : status === 404
             ? "Resource unavailable."
             : status === 401

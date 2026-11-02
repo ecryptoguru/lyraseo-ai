@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   createContentDraft: vi.fn(),
   saveContentDraft: vi.fn(),
   readContentDrafts: vi.fn(),
-  captureEditorialEvidence: vi.fn(),
+  captureEvidenceReport: vi.fn(),
   storeEvidenceReport: vi.fn(),
   readEvidenceReports: vi.fn(),
 }));
@@ -58,7 +58,7 @@ it("never dispatches paid generation without qualified tariffs and authorizes ac
   ).toBe(404);
 });
 it("rejects report capture before renderer when grants were revoked", async () => {
-  mocks.captureEditorialEvidence.mockRejectedValue(new Error("FORBIDDEN"));
+  mocks.captureEvidenceReport.mockRejectedValue(new Error("FORBIDDEN"));
   const response = await reportPost(
     request({
       ...scope,
@@ -93,4 +93,39 @@ it("returns only persisted PDF bytes with attachment and private cache controls"
     scope,
     "report",
   );
+});
+it("rejects client-supplied comparison evaluations before authorized source capture", async () => {
+  const response = await reportPost(
+    request({
+      ...scope,
+      title: "Forged",
+      auditIds: ["before", "after"],
+      searchSnapshotIds: [],
+      comparison: {
+        beforeAuditId: "before",
+        afterAuditId: "after",
+        evaluation: { resolved: ["D01"] },
+      },
+    }),
+  );
+  expect(response.status).toBe(409);
+  expect(mocks.captureEvidenceReport).not.toHaveBeenCalled();
+  expect(mocks.storeEvidenceReport).not.toHaveBeenCalled();
+});
+it("explains invalid comparison direction without disclosing source existence", async () => {
+  mocks.captureEvidenceReport.mockRejectedValue(
+    new Error("INVALID_COMPARISON"),
+  );
+  const response = await reportPost(
+    request({
+      ...scope,
+      title: "Private",
+      auditIds: ["before", "after"],
+      searchSnapshotIds: [],
+      comparison: { beforeAuditId: "after", afterAuditId: "before" },
+    }),
+  );
+  expect(response.status).toBe(409);
+  expect(await response.text()).toContain("Before must be no newer than after");
+  expect(mocks.storeEvidenceReport).not.toHaveBeenCalled();
 });
