@@ -25,6 +25,7 @@
     "./accounting": "./src/accounting.ts",
     "./tenants": "./src/tenants.ts",
     "./identity": "./src/identity.ts",
+    "./dispatch": "./src/dispatch.ts",
     "./execution": "./src/execution.ts",
     "./audits": "./src/audits.ts",
     "./sites": "./src/sites.ts",

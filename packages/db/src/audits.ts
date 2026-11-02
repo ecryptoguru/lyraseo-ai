@@ -274,6 +274,7 @@ export async function claimAuditRun(
       await tx.site.findUniqueOrThrow({ where: { id: scope.siteId } }),
     );
     if (
+      run.profile !== "LOCAL_RAW_V1" ||
       run.userId !== actor.userId ||
       run.securityVersion !== actor.securityVersion
     )

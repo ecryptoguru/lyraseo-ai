@@ -47,6 +47,19 @@ it("persists trusted scope and exact cost and replays one reservation/outbox", a
   await expect(admit(quote.id, "changed")).rejects.toThrow("QUOTE_CONSUMED");
   expect(await admin.operation.count()).toBe(1);
   expect(await admin.outboxEvent.count()).toBe(1);
+  const archive = await admin.outboxEvent.findUniqueOrThrow({
+    where: { operationId: op.id },
+  });
+  expect(
+    await admin.workDispatch.findUniqueOrThrow({
+      where: { operationId: op.id },
+    }),
+  ).toMatchObject({
+    archiveId: archive.id,
+    eligibility: "QUARANTINED",
+    disposition: "INERT",
+    nextAttemptAt: null,
+  });
   expect(
     (await budgetSnapshot(db, actor))
       .find((x) => x.bucket === "AZURE")

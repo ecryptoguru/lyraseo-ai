@@ -136,12 +136,15 @@ model Operation {
   user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
   quote OperationQuote?
   outbox OutboxEvent?
+  dispatchRecords WorkDispatch[]
+  @@unique([workspaceId,siteId,userId,id])
   receipts UsageReceipt[]
   @@unique([userId,workspaceId,route,idempotencyKey])
   @@index([workspaceId,createdAt,id])
   @@index([status,leaseUntil])
 }
 model OutboxEvent {
+  dispatch WorkDispatch?
   id String @id @default(cuid())
   operationId String @unique
   workspaceId String
@@ -221,6 +224,8 @@ model AuditRun {
  evaluation Json?
  site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
  user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
+ dispatchRecords WorkDispatch[]
+ @@unique([workspaceId,siteId,userId,id])
  pages AuditPage[]
  actions IssueAction[]
  @@unique([workspaceId,id])
@@ -505,4 +510,69 @@ model SearchImport {
  completedAt DateTime?
  site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
  @@index([workspaceId,siteId,status])
+}
+
+model RuntimePolicy {
+  key String @id
+  enabled Boolean @default(false)
+  revision Int @default(0)
+  changedAt DateTime @default(now()) @db.Timestamptz(6)
+  changes RuntimePolicyChange[]
+}
+model RuntimePolicyChange {
+  key String
+  revision Int
+  enabled Boolean
+  operatorId String
+  changedAt DateTime @db.Timestamptz(6)
+  policy RuntimePolicy @relation(fields:[key],references:[key],onDelete:NoAction,onUpdate:NoAction)
+  @@id([key,revision])
+}
+model WorkDispatch {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String
+  siteId String
+  userId String
+  admittedSecurityVersion Int
+  initiatedSessionId String?
+  targetKind String
+  operationId String? @unique
+  auditId String? @unique
+  archiveId String? @unique
+  capability String
+  profile String
+  eligibility String
+  ledgerHandoff String @default("NONE")
+  admittedAt DateTime @db.Timestamptz(6)
+  expiresAt DateTime @db.Timestamptz(6)
+  revokedAt DateTime? @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  disposition String
+  generation Int @default(1)
+  nextAttemptAt DateTime? @db.Timestamptz(6)
+  deliveredAt DateTime? @db.Timestamptz(6)
+  claimToken String? @db.Uuid
+  leaseUntil DateTime? @db.Timestamptz(6)
+  sendAttempts Int @default(0)
+  lastErrorCode String?
+  audit AuditRun? @relation(fields:[workspaceId,siteId,userId,auditId],references:[workspaceId,siteId,userId,id],onDelete:Restrict,onUpdate:Restrict)
+  operation Operation? @relation(fields:[workspaceId,siteId,userId,operationId],references:[workspaceId,siteId,userId,id],onDelete:Restrict,onUpdate:Restrict)
+  archive OutboxEvent? @relation(fields:[archiveId],references:[id],onDelete:Restrict,onUpdate:Restrict)
+  @@index([workspaceId,siteId,userId],map:"dispatch_scope")
+}
+model InternalRequest {
+  servicePrincipalId String
+  requestId String @db.Uuid
+  fingerprint Bytes
+  issuedAt DateTime @db.Timestamptz(6)
+  expiresAt DateTime @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  state String
+  ownerToken String? @db.Uuid
+  fence Int
+  leaseUntil DateTime? @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+  result Json?
+  @@id([servicePrincipalId,requestId])
+  @@index([expiresAt,requestId],map:"request_cleanup")
 }

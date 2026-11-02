@@ -225,15 +225,12 @@ it("permits one running expensive job per user across workspaces", async () => {
   ]);
   expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
 });
-it("retries outbox delivery without duplicating admission or provider dispatch", async () => {
-  const { pendingOutbox, acknowledgeOutbox } =
-    await import("../../packages/db/src/accounting");
+it("blocks legacy archive reads and acknowledgements while fencing duplicate execution", async () => {
   const op = await admitOperation(db, actor, request("outbox"));
-  const first = await pendingOutbox(db, actor);
-  expect(first).toHaveLength(1);
-  expect((await pendingOutbox(db, actor))[0]!.id).toBe(first[0]!.id);
-  await acknowledgeOutbox(db, actor, first[0]!.id);
-  expect(await pendingOutbox(db, actor)).toEqual([]);
+  await expect(db.outboxEvent.findMany()).rejects.toThrow(/denied/);
+  await expect(
+    db.outboxEvent.updateMany({ data: { deliveredAt: new Date() } }),
+  ).rejects.toThrow(/denied/);
   await claimOperation(db, actor, op.id, "worker");
   await expect(claimOperation(db, actor, op.id, "duplicate")).rejects.toThrow(
     "LEASE_BUSY",
@@ -288,14 +285,54 @@ it("records known acceptance after lease expiry and revocation without redispatc
   });
   await admin.productUser.update({
     where: { id: actor.userId },
-    data: { suspended: true },
+    data: { suspended: true, securityVersion: 1 },
+  });
+  await admin.site.update({
+    where: { id: op.siteId },
+    data: { deletedAt: new Date() },
   });
   await acceptAttempt(db, actor, op.id, lease.fence, "late-task");
-  await settleOperation(db, actor, op.id, lease.fence, {
+  const receipt = {
     receiptId: "late-receipt",
     amount: "0.1",
     acceptedOutput: false,
+  };
+  const saved = await settleOperation(db, actor, op.id, lease.fence, receipt);
+  expect(await settleOperation(db, actor, op.id, lease.fence, receipt)).toEqual(
+    saved,
+  );
+  for (const change of [
+    { receiptId: "different" },
+    { acceptedOutput: true },
+    { amount: "0.2" },
+  ])
+    await expect(
+      settleOperation(db, actor, op.id, lease.fence, { ...receipt, ...change }),
+    ).rejects.toThrow("CONFLICT");
+  await expect(
+    admin.usageReceipt.update({
+      where: { id: saved.id },
+      data: { amount: "0" },
+    }),
+  ).rejects.toThrow("IMMUTABLE_HISTORY");
+  await expect(
+    admin.usageReceipt.delete({ where: { id: saved.id } }),
+  ).rejects.toThrow("IMMUTABLE_HISTORY");
+  const balances = await admin.budgetPeriod.findMany({
+    where: { bucket: { in: ["COMBINED", "AZURE"] } },
   });
+  expect(
+    balances.map((b) => [b.spent.toFixed(9), b.reserved.toFixed(9)]),
+  ).toEqual([
+    ["0.100000000", "0.000000000"],
+    ["0.100000000", "0.000000000"],
+  ]);
+  expect(await admin.usageReceipt.count()).toBe(1);
+  expect(
+    await admin.workDispatch.findUniqueOrThrow({
+      where: { operationId: op.id },
+    }),
+  ).toMatchObject({ disposition: "SUPPRESSED" });
   expect(
     (await admin.operation.findUniqueOrThrow({ where: { id: op.id } }))
       .providerTaskId,

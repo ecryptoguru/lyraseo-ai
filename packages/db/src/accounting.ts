@@ -269,9 +269,6 @@ async function admitOperationIn(
       reservedCost: cost,
       createdAt: now,
       expiresAt: new Date(now.getTime() + 86400000),
-      outbox: {
-        create: { workspaceId: input.workspaceId, userId: actor.userId },
-      },
     },
   });
 }
@@ -690,45 +687,6 @@ export async function settleOperation(
     return saved;
   });
 }
-/** Internal publisher: send only persisted operation IDs. At-least-once delivery is safe. */
-export async function pendingOutbox(db: PrismaClient, actor: Actor) {
-  return withActor(db, actor, "", (tx) =>
-    tx.outboxEvent.findMany({
-      where: {
-        userId: actor.userId,
-        deliveredAt: null,
-        operation: { status: "QUEUED" },
-      },
-      take: 20,
-      orderBy: { createdAt: "asc" },
-    }),
-  );
-}
-export async function acknowledgeOutbox(
-  db: PrismaClient,
-  actor: Actor,
-  id: string,
-  expectedFence?: number,
-) {
-  return withActor(db, actor, "", async (tx) => {
-    // Match recovery's operation-before-outbox lock order. The following update
-    // reads the fence after this lock, including when recovery was concurrent.
-    if (expectedFence !== undefined)
-      await tx.$queryRaw`SELECT op.id FROM "Operation" op JOIN "OutboxEvent" event ON event."operationId"=op.id WHERE event.id=${id} AND op."userId"=${actor.userId} FOR UPDATE OF op`;
-    return tx.outboxEvent.updateMany({
-      where: {
-        id,
-        userId: actor.userId,
-        deliveredAt: null,
-        ...(expectedFence === undefined
-          ? {}
-          : { operation: { fence: expectedFence, status: "QUEUED" } }),
-      },
-      data: { deliveredAt: new Date(), attempts: { increment: 1 } },
-    });
-  });
-}
-
 /** Internal rejection of definitively invalid, unstarted queued work. Never releases uncertain charges. */
 export async function cancelInvalidQueuedOperation(
   db: PrismaClient,
