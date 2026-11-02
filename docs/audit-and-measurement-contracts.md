@@ -1,8 +1,8 @@
 # Audit and measurement contracts
 
-Version: 1.0 · Finalized for planning: 2026-10-23 · Methodology key: `readiness-v1`.
+Planning contract finalized 2026-10-23. New audit runs use `readiness-v2` from 2026-11-02. Stored `readiness-v1` runs retain their original evaluator, numbers and reports.
 
-This is the engineering completion of the rule/measurement proposals in the [full-version specification](./full-version-spec.md). It does not claim implemented rules, validated ranking factors or live observations. Product budgets, phases and data lifecycles remain governed by their approved policies. [Engineering contracts](./engineering-contracts.md) own acquisition, auth and execution.
+The readiness catalogue below defines the v2 deterministic evaluator. The local raw HTTP acquisition profile cannot establish computed visibility or rendered metadata. Complete rendered fixtures exercise the pure evaluator. AI-answer measurement and readiness are separate contracts. See the [full-version specification](./full-version-spec.md). Product budgets, phases and data lifecycles remain governed by their approved policies. [Engineering contracts](./engineering-contracts.md) own acquisition, auth and execution.
 
 ## 1. Inputs, normalization and evidence
 
@@ -54,6 +54,14 @@ Overall coverage uses category weights, so it aligns with scoring: sum(categoryW
 Explicit non-indexable override: score0 only when every page in a fully acquired manifest has conclusive Google-search noindex and was declared intended indexable. It requires complete directive evidence, not robots disallow or external canonical. Findings and coverage remain visible. Otherwise use normal eligibility/math. A known error status may produce findings while preventing an eligible overall score through insufficient acquired-page coverage.
 
 Comparison key `(ruleId,compatibleRuleVersion,scopeKey)`. FAIL/WARNING → PASS is resolved; new FAIL/WARNING after PASS is new; unchanged issue is persistent; removed page, UNKNOWN, changed scope or incompatible version is unevaluated. WARNING→FAIL is worsened; FAIL→WARNING is improved but unresolved. Dismiss/review/assignment never changes technical outcomes. Only same manifest/profile/methodology gives a headline score delta; other comparisons show overlapping evidence with explicit scope changes and no aggregate improvement claim.
+
+V2 stores the acquisition profile, frozen declarations and business-context revision with each evaluation. Rule version `2` is compatible only with itself under the same methodology and profile. Compare each rule against the declarations it consumes. Changes to indexing intent, expected canonical, page type, identity or declared link targets make dependent rules unevaluated and suppress the headline delta. D05 and T03 also depend on the sampled manifest. Other rules on overlapping requested URLs remain comparable. A changed business-context revision with equivalent relevant facts retains comparison eligibility.
+
+Declared indexing intent is explicit for each page. An applicable, certain Google noindex can establish D02 failure before all sources are complete. A zero override requires every selected page to have usable acquired HTML, confirmed indexable intent and complete header, original and rendered directive observations. A shared canonical element present before and after rendering counts once. An independent HTTP Link or second DOM element counts separately. An article date channel recorded as empty was inspected without a date. An omitted channel is unavailable. Calendar comparison uses the written local date without shifting to UTC.
+
+E04 evaluates accessible names for visible HTTP(S), in-document, email and telephone links. Only HTTP(S) targets can establish sampled incoming links or satisfy declared homepage link requirements. D04's receipt reference resolves to a separate robots observation holding the policy URL, response status, observation time, exact byte digest when available, requested/final Google decisions and the complete effective Google group. A missing policy file, unavailable transport, malformed policy and oversized group remain distinguishable. Both the original decision and its replay use the same robots parser. The group is capped at 128 rules and 8 KiB; exceeding the cap withholds the scored D04 verdict. Compact reports retain this observation without copying the raw policy body or unrelated groups.
+
+Each v2 rule contains bounded logical references. Page references select immutable evidence fields by requested URL within the saved run. Receipt references locate acquisition time, source digest and applicable transport fields. Declaration references select the frozen site fields or the matching requested URL's page declaration. Acquisition time does not enter rule decisions. V1 snapshots predate these references and category coverage.
 
 ## 4. Rule fixture matrix and reproducibility
 

@@ -1,3 +1,4 @@
+import { validRawRobotsReceipt } from "@lyraseo/visibility/robots-source";
 import { siteScope } from "./sites";
 /** Local, unmetered raw acquisition lifecycle. Never admits a paid provider call. */
 import { createHash } from "node:crypto";
@@ -6,6 +7,9 @@ import {
   normalizeUrl,
   evaluateAudit,
   compareAudits,
+  validateDeclarations,
+  type ReadinessDeclarations,
+  type Methodology,
   type PageEvidence,
   type AuditEvaluation,
 } from "@lyraseo/visibility";
@@ -22,9 +26,7 @@ export type AuditScope = {
   siteId: string;
   auditId: string;
 };
-export type AuditDeclarations = {
-  brandName?: string;
-  approvedAliases?: string[];
+export type AuditDeclarations = ReadinessDeclarations & {
   contextRevisionId?: string;
   contextRevision?: number;
 };
@@ -137,32 +139,6 @@ export async function createAuditRun(
       manifest.some((url) => new URL(url).origin !== site.origin)
     )
       throw new Error("INVALID_MANIFEST");
-    const declarations = input.declarations ?? {};
-    if (
-      Object.keys(declarations).some(
-        (key) => !["brandName", "approvedAliases"].includes(key),
-      )
-    )
-      throw new Error("INVALID_AUDIT_INPUT");
-    if (
-      (declarations.brandName !== undefined &&
-        (typeof declarations.brandName !== "string" ||
-          declarations.brandName.length > 512)) ||
-      (declarations.approvedAliases !== undefined &&
-        (!Array.isArray(declarations.approvedAliases) ||
-          declarations.approvedAliases.length > 20 ||
-          declarations.approvedAliases.some(
-            (alias) => typeof alias !== "string" || alias.length > 512,
-          )))
-    )
-      throw new Error("INVALID_AUDIT_INPUT");
-    if (JSON.stringify(declarations).length > 8192)
-      throw new Error("INVALID_AUDIT_INPUT");
-    const inputHash = fingerprint({
-      manifest,
-      profile: input.profile,
-      declarations,
-    });
     const previous = await tx.auditRun.findUnique({
       where: {
         workspaceId_siteId_userId_idempotencyKey: {
@@ -172,6 +148,26 @@ export async function createAuditRun(
           idempotencyKey: input.idempotencyKey,
         },
       },
+    });
+    if (previous?.methodologyVersion === "readiness-v1") {
+      const historicalHash = fingerprint({
+        manifest,
+        profile: input.profile,
+        declarations: input.declarations ?? {},
+      });
+      if (previous.inputHash !== historicalHash)
+        throw new Error("IDEMPOTENCY_CONFLICT");
+      return previous;
+    }
+    const declarations = validateDeclarations(
+      input.declarations ?? {},
+      manifest,
+      site.origin,
+    );
+    const inputHash = fingerprint({
+      manifest,
+      profile: input.profile,
+      declarations,
     });
     if (previous) {
       if (previous.inputHash !== inputHash)
@@ -213,7 +209,7 @@ export async function createAuditRun(
         manifest: json(manifest),
         profile: input.profile,
         declarations: json(frozenDeclarations),
-        methodologyVersion: "readiness-v1",
+        methodologyVersion: "readiness-v2",
       },
     });
   });
@@ -339,6 +335,34 @@ export async function checkpointAuditPage(
         Buffer.byteLength(provenance.rawHtml, "utf8") > 5 * 1024 * 1024)
     )
       throw new Error("EVIDENCE_TOO_LARGE");
+    // LOCAL_RAW_V1 has no renderer. Even trusted internal writers cannot
+    // promote raw anchors, headings or metadata to rendered observations.
+    if (
+      run.methodologyVersion === "readiness-v2" &&
+      run.profile === "LOCAL_RAW_V1" &&
+      (!validRawRobotsReceipt(evidence, provenance.robotsPolicy) ||
+        (evidence.acquired &&
+          (typeof provenance.rawHtml !== "string" ||
+            !provenance.rawHtml.length)) ||
+        evidence.headComplete ||
+        evidence.bodyComplete ||
+        evidence.metadata?.rendered !== undefined ||
+        evidence.jsonLdComplete ||
+        evidence.mainMediaNames !== undefined ||
+        evidence.logoNames !== undefined ||
+        evidence.visibleText !== undefined ||
+        evidence.mainText !== undefined ||
+        evidence.populatedSections !== undefined ||
+        evidence.articleDates !== undefined ||
+        evidence.headingLevels.length ||
+        evidence.h1Texts.length ||
+        evidence.headingTexts !== undefined ||
+        evidence.pageType !== undefined ||
+        evidence.indexingIntent !== undefined ||
+        evidence.intendedCanonical !== undefined ||
+        evidence.intentionallyExcluded !== undefined)
+    )
+      throw new Error("INVALID_PAGE_EVIDENCE");
     const existing = await tx.auditPage.findUnique({
       where: {
         auditId_requestedUrl: {
@@ -403,7 +427,8 @@ export async function finishAuditRun(
       siteOrigin: site.origin,
       manifest: run.manifest as string[],
       pages: pages.map((p) => p.evidence as unknown as PageEvidence),
-      methodologyVersion: "readiness-v1",
+      methodologyVersion: run.methodologyVersion as Methodology,
+      profile: run.profile,
     });
     return tx.auditRun.update({
       where: { id: run.id },
@@ -435,8 +460,16 @@ export async function compareAuditRuns(
     if (!before.evaluation || !after.evaluation)
       throw new Error("AUDIT_INCOMPLETE");
     const result = compareAudits(
-      before.evaluation as unknown as AuditEvaluation,
-      after.evaluation as unknown as AuditEvaluation,
+      {
+        ...(before.evaluation as unknown as AuditEvaluation),
+        profile: before.profile,
+        declarations: before.declarations as AuditDeclarations,
+      },
+      {
+        ...(after.evaluation as unknown as AuditEvaluation),
+        profile: after.profile,
+        declarations: after.declarations as AuditDeclarations,
+      },
     );
     if (before.profile !== after.profile) result.scoreDelta = null;
     return { ...result, profileComparable: before.profile === after.profile };

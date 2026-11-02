@@ -139,6 +139,35 @@ it("checkpoints NUL as an unreadable receipt, resumes, and captures real raw anc
       auditIds: [run.id],
       searchSnapshotIds: [],
     });
+    const source = capture.sources[0]!.data as {
+      methodologyVersion: string;
+      pages: Array<{ url: string; receipt: Record<string, unknown> }>;
+    };
+    expect(source.methodologyVersion).toBe("readiness-v2");
+    const reportReceipt = source.pages.find(
+      (p) => p.url === nul.requestedUrl,
+    )!.receipt;
+    expect(reportReceipt).toMatchObject({
+      acquiredAt: nul.provenance.acquiredAt,
+      sha256: nul.provenance.sha256,
+      error: "BODY_UNREPRESENTABLE",
+    });
+    expect(reportReceipt).not.toHaveProperty("rawHtml");
+    expect(reportReceipt.robotsPolicy).toEqual(nul.provenance.robotsPolicy);
+    const { replayGoogleRobots } =
+      await import("../../packages/visibility/src/acquisition");
+    const policy =
+      reportReceipt.robotsPolicy as import("../../packages/visibility/src/types").RobotsPolicyObservation;
+    expect(policy.sha256).toBe(
+      createHash("sha256")
+        .update("User-agent: *\nDisallow: /blocked\n")
+        .digest("hex"),
+    );
+    expect(replayGoogleRobots(policy, nul.requestedUrl)).toBe(true);
+    expect(replayGoogleRobots(policy, "https://example.com/blocked")).toBe(
+      false,
+    );
+
     expect(capture.internalLinks).toContainEqual(
       expect.objectContaining({
         url: "https://example.com/about",

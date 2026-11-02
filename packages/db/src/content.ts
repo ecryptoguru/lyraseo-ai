@@ -52,6 +52,19 @@ function validate(content: DraftContent, snapshot: EvidenceSnapshot) {
   )
     throw new Error("INVALID_CONTENT");
 }
+// Keep the immutable references resolvable in a saved report without duplicating the response body.
+function compactReceipt(value: unknown) {
+  const p = value as Record<string, unknown>;
+  return {
+    acquiredAt: p.acquiredAt,
+    sha256: p.sha256,
+    finalUrl: p.finalUrl,
+    status: p.status,
+    redirects: p.redirects,
+    error: p.error,
+    robotsPolicy: p.robotsPolicy,
+  };
+}
 async function capture(
   tx: Tx,
   scope: ContentScope,
@@ -93,6 +106,9 @@ async function capture(
           url: p.requestedUrl,
           evidence: p.evidence,
           channel: "raw-http",
+          ...(run.methodologyVersion === "readiness-v2"
+            ? { receipt: compactReceipt(p.provenance) }
+            : {}),
         })),
       },
     });

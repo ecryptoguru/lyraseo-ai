@@ -33,3 +33,50 @@ it("renders local structured private evidence to valid PDF and CSV without execu
   expect(output.csv).toContain("partial");
   expect(output.pdf.length).toBeGreaterThan(1000);
 });
+
+it("exports frozen v2 rule versions, category coverage and receipt provenance with the report", async () => {
+  const source = {
+    methodologyVersion: "readiness-v2",
+    profile: "LOCAL_RAW_V1",
+    declarations: { contextRevision: 3 },
+    evaluation: {
+      score: null,
+      coverage: 0.25,
+      categoryCoverage: { discovery: 0.25, entity: null },
+      rules: [
+        {
+          ruleId: "D01",
+          ruleVersion: "2",
+          scopeKey: "https://example.com/",
+          outcome: "FAIL",
+          reasonCode: "HTTP_ERROR",
+          evidence: "404",
+          evidenceRefs: [
+            {
+              source: "receipt",
+              requestedUrl: "https://example.com/",
+              fields: ["acquiredAt"],
+            },
+          ],
+        },
+      ],
+    },
+    pages: [
+      {
+        url: "https://example.com/",
+        receipt: { acquiredAt: "2026-11-01T00:00:00Z", status: 404 },
+      },
+    ],
+  };
+  const snapshot: EvidenceSnapshot = {
+    capturedAt: "2026-11-02T00:00:00Z",
+    scope: { workspaceId: "a", siteId: "s" },
+    methodology: "Saved original HTTP",
+    context: { revision: 4 },
+    internalLinks: [],
+    sources: [{ sourceId: "audit:1", kind: "raw-http-audit", data: source }],
+  };
+  const report = await renderEvidenceReport("Readiness", snapshot);
+  expect(report.csv).toContain(csvCell(JSON.stringify(source)));
+  expect(Buffer.from(report.pdf).subarray(0, 5).toString()).toBe("%PDF-");
+});

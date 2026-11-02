@@ -14,7 +14,7 @@ import {
   consumeApiLimit,
 } from "../../packages/db/src/tokens";
 import { listSites } from "../../packages/db/src/tenants";
-import { listAuditRuns } from "../../packages/db/src/audits";
+import { listAuditRuns, createAuditRun } from "../../packages/db/src/audits";
 import { handleMcpRequest } from "../../apps/lyraseo-web/src/server/mcp/server";
 import {
   actor,
@@ -59,6 +59,7 @@ beforeEach(async () => {
       siteId: "a-site",
       userId: "owner",
       securityVersion: 0,
+      status: "COMPLETED",
       idempotencyKey: "saved",
       inputHash: "hash",
       manifest: ["https://example.com/"],
@@ -298,6 +299,53 @@ it("uses the official SDK client for initialization, tool discovery and real sta
     expect(findings.structuredContent).toMatchObject({
       data: { items: [{ outcome: "UNKNOWN" }] },
     });
+    const { crawlerSite } = await import("../fixtures/crawler-site");
+    const { runRawAuditStep } =
+      await import("../../apps/lyraseo-web/src/server/acquisition/runner");
+    const fixture = await crawlerSite();
+    try {
+      const scope = { workspaceId: "a", siteId: "a-site" };
+      const fresh = await createAuditRun(db, actor, {
+        ...scope,
+        manifest: ["https://example.com/"],
+        profile: "LOCAL_RAW_V1",
+        idempotencyKey: "sdk-v2-read",
+      });
+      await runRawAuditStep(
+        db,
+        actor,
+        { ...scope, auditId: fresh.id },
+        fixture.transport,
+      );
+      const v2 = await client.callTool({
+        name: "lyraseo_read_audit",
+        arguments: { siteId: scope.siteId, auditId: fresh.id },
+      });
+      expect(v2.structuredContent).toMatchObject({
+        data: {
+          methodologyVersion: "readiness-v2",
+          evaluation: { categoryCoverage: { answer: 0 }, score: null },
+        },
+      });
+      const rules = await client.callTool({
+        name: "lyraseo_list_findings",
+        arguments: { siteId: scope.siteId, auditId: fresh.id, limit: 1 },
+      });
+      expect(rules.structuredContent).toMatchObject({
+        data: {
+          items: [
+            {
+              ruleId: "D01",
+              ruleVersion: "2",
+              evidenceRefs: [{ source: "page" }, { source: "receipt" }],
+              totalEvidenceRefs: 2,
+            },
+          ],
+        },
+      });
+    } finally {
+      await fixture.close();
+    }
     const compare = await client.callTool({
       name: "lyraseo_compare_audits",
       arguments: {

@@ -14,7 +14,7 @@ export const siteOriginSchema = z.url().refine((value) => {
 export const auditRequestSchema = z.strictObject({
   siteId: z.string().min(1),
   urls: z.array(siteOriginSchema).min(1).max(25),
-  methodologyVersion: z.literal("readiness-v1"),
+  methodologyVersion: z.literal("readiness-v2").default("readiness-v2"),
 });
 
 export const operationStatusSchema = z.enum([

@@ -11,6 +11,8 @@ const seams = vi.hoisted(() => ({
   db: null as unknown,
   actor: null as unknown,
   proof: "",
+  transport: null as
+    null | import("../../packages/visibility/src/acquisition").PublicTransport,
   configured: null as unknown,
 }));
 vi.mock("@/server/auth/server", () => ({
@@ -19,6 +21,12 @@ vi.mock("@/server/auth/server", () => ({
 }));
 vi.mock("@/server/auth/settings", () => ({
   authSettings: () => ({ origin: "http://localhost:3000" }),
+}));
+vi.mock("@/server/acquisition/transport", () => ({
+  publicHttpsTransport: (url: string, signal: AbortSignal) => {
+    if (!seams.transport) throw new Error("No local transport fixture");
+    return seams.transport(url, signal);
+  },
 }));
 vi.mock("@/server/acquisition/proof", () => ({
   observeSiteProof: async (url: string) => ({
@@ -269,4 +277,148 @@ it("removes both management catalog forms from real analytics GET for a single-s
   expect(response.properties).toEqual([]);
   expect(response.connection).not.toHaveProperty("catalog");
   expect(JSON.stringify(response)).not.toContain("Private client B");
+});
+
+it("admits reviewed declarations through actual handlers, freezes evidence and exports before/after runs", async () => {
+  const { crawlerSite } = await import("../fixtures/crawler-site");
+  const site = await crawlerSite();
+  seams.transport = site.transport;
+  const home = "https://example.com/",
+    missing = home + "missing";
+  const manifest = [home, missing, home + "unreadable"];
+  const declarations = {
+    officialUrls: [home],
+    contactUrl: home + "contact",
+    requiredPolicyUrls: [home + "privacy"],
+    pageDeclarations: [
+      {
+        requestedUrl: home,
+        pageType: "marketing",
+        indexingIntent: "indexable",
+        intendedCanonical: home,
+      },
+    ],
+  };
+  const create = (key: string, d: unknown) =>
+    audits.POST(
+      post({
+        action: "create",
+        idempotencyKey: key,
+        manifest,
+        declarations: d,
+      }),
+    );
+  try {
+    await json(
+      await create("bad", { ...declarations, headComplete: true }),
+      409,
+    );
+    await json(
+      await create("bad", {
+        pageDeclarations: [
+          { requestedUrl: home, intendedCanonical: "file:///tmp/private" },
+        ],
+      }),
+      409,
+    );
+    const before = await json(await create("first", declarations), 201);
+    for (const url of manifest) {
+      void url;
+      await json(
+        await audits.POST(post({ action: "step", auditId: before.id })),
+      );
+    }
+    const saved = await json(await audits.GET(get("&auditId=" + before.id)));
+    expect(saved).toMatchObject({
+      methodologyVersion: "readiness-v2",
+      declarations,
+      evaluation: { methodologyVersion: "readiness-v2", score: null },
+    });
+    await json(
+      await audits.POST(
+        post({
+          action: "review",
+          auditId: before.id,
+          ruleId: "D01",
+          scopeKey: missing,
+          disposition: "REVIEWED",
+          reason: "Verified the saved 404 receipt.",
+        }),
+      ),
+    );
+    expect(
+      (await json(await audits.GET(get("&auditId=" + before.id)))).evaluation,
+    ).toEqual(saved.evaluation);
+    site.fix();
+    const next = await json(
+      await create("second", {
+        ...declarations,
+        pageDeclarations: [
+          {
+            requestedUrl: home,
+            intendedCanonical: missing,
+            pageType: "marketing",
+            indexingIntent: "indexable",
+          },
+        ],
+      }),
+      201,
+    );
+    for (let i = 0; i < manifest.length; i++)
+      await json(await audits.POST(post({ action: "step", auditId: next.id })));
+    const delta = await json(
+      await audits.GET(get("&auditId=" + next.id + "&before=" + before.id)),
+    );
+    expect(delta.resolved).toContainEqual(
+      expect.objectContaining({ ruleId: "D01", scopeKey: missing }),
+    );
+    expect(delta.unevaluated).toContainEqual(
+      expect.objectContaining({ ruleId: "D03", scopeKey: home }),
+    );
+    expect(delta.scoreDelta).toBeNull();
+    expect(
+      (await json(await audits.GET(get("&auditId=" + before.id)))).declarations,
+    ).toEqual(saved.declarations);
+    const csv = await audits.GET(get("&auditId=" + before.id + "&format=csv"));
+    expect(csv.status).toBe(200);
+    const body = await csv.text();
+    expect(body).toContain("readiness-v2");
+    expect(body).toContain("Evidence references");
+    const { createHash } = await import("node:crypto");
+    const policyHash = createHash("sha256")
+      .update("User-agent: *\nDisallow: /blocked\n")
+      .digest("hex");
+    const savedPage = saved.pages.find(
+      (p: { requestedUrl: string }) => p.requestedUrl === home,
+    );
+    const finding = saved.evaluation.rules.find(
+      (r: { ruleId: string; scopeKey: string }) =>
+        r.ruleId === "D04" && r.scopeKey === home,
+    );
+    expect(finding.evidenceRefs).toContainEqual({
+      source: "receipt",
+      requestedUrl: home,
+      fields: ["robotsPolicy"],
+    });
+    expect(savedPage.provenance.robotsPolicy).toMatchObject({
+      sha256: policyHash,
+      state: "available",
+      googleGroup: {
+        agent: "*",
+        rules: [{ directive: "disallow", pattern: "/blocked" }],
+      },
+    });
+    expect(savedPage.provenance.robotsPolicy.sha256).not.toBe(
+      savedPage.provenance.sha256,
+    );
+    expect(body.split("\r\n").find((line) => line.includes('"D04"'))).toContain(
+      policyHash,
+    );
+    expect(
+      body.split("\r\n").find((line) => line.includes('"D01"')),
+    ).not.toContain(policyHash);
+  } finally {
+    seams.transport = null;
+    await site.close();
+  }
 });
