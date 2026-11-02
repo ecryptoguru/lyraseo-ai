@@ -30,6 +30,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Prepare isolated PostgreSQL and generated client
         run: pnpm db:local
+      - name: Generate Next.js route and environment types
+        run: pnpm --filter @lyraseo/web exec next typegen
       - run: pnpm check
       - run: pnpm format:check
       - run: pnpm test:unit

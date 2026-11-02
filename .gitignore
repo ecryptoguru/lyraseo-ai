@@ -18,3 +18,4 @@ output/
 .impeccable/
 # Local operational receipts can contain account and deployment metadata.
 docs/evidence/
+**/next-env.d.ts
