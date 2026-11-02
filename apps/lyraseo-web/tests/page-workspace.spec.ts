@@ -140,10 +140,30 @@ test("viewer reads a stable page without mutation controls", async ({
 }) => {
   await page.route("**/api/pages**", (route) =>
     route.fulfill({
-      json: { ...detail, actor: { ...detail.actor, canEdit: false } },
+      json: {
+        ...detail,
+        actor: { ...detail.actor, canEdit: false },
+        history: [
+          {
+            id: "entry",
+            revision: 2,
+            action: "change",
+            note: "Original journal note",
+            userId: "owner",
+            createdAt: "2025-01-01T12:00:00Z",
+            contentDraftId: "draft",
+            contentDraftRevision: 1,
+          },
+        ],
+        drafts: [{ id: "draft", kind: "draft", revision: 2, history: [] }],
+      },
     }),
   );
   await mount(page, false);
+  await expect(
+    page.getByText("Linked draft revision 1 · historical revision unavailable"),
+  ).toBeVisible();
+  await expect(page.getByText("Original journal note")).toBeVisible();
   await expect(
     page.getByRole("heading", {
       name: "Audit evidence for this URL",

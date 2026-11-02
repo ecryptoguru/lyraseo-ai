@@ -1,3 +1,4 @@
+import { revisionEligibility } from "./content";
 import { siteScope } from "./sites";
 /** Stable, explicitly registered URLs and an append-only workflow journal. No acquisition or scoring side effects. */
 import { createHash } from "node:crypto";
@@ -142,6 +143,7 @@ export async function changePage(
     if (input.action === "change" && input.contentDraftId) {
       const draft = await tx.contentDraft.findFirst({
         where: { ...siteScope(scope), id: input.contentDraftId },
+        select: { id: true, revision: true },
       });
       if (!draft) throw new Error("INVALID_DRAFT");
       const revision = await tx.contentRevision.findFirst({
@@ -202,22 +204,13 @@ export async function listPages(
   });
 }
 // Compact evidence only: raw HTML is omitted at every nesting level, even inside historic provenance.
-function compact(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(compact);
-  if (value && typeof value === "object" && !(value instanceof Date))
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([key]) => key !== "rawHtml")
-        .map(([key, v]) => [key, compact(v)]),
-    );
-  return value;
-}
 export async function readPage(
   db: PrismaClient,
   actor: Actor,
   scope: PageScope,
   pageId: string,
 ) {
+  const now = new Date();
   const base = await withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorize(tx, actor, scope);
     const page = await tx.pageIdentity.findFirst({
@@ -232,6 +225,7 @@ export async function readPage(
     const runs = await tx.auditRun.findMany({
       where: {
         ...siteScope(scope),
+        resultExpiresAt: { gt: now },
         manifest: { array_contains: [page.normalizedUrl] },
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -259,6 +253,7 @@ export async function readPage(
             where: {
               workspaceId: scope.workspaceId,
               draftId: id,
+              ...revisionEligibility(draft.revision, now),
               revision: {
                 in: history
                   .filter((h) => h.contentDraftId === id)
@@ -284,7 +279,7 @@ export async function readPage(
           ],
         },
       },
-      select: { id: true, title: true, createdAt: true },
+      select: { id: true, title: true, createdAt: true, evidenceFormat: true },
       orderBy: { createdAt: "desc" },
       take: 20,
     });
@@ -309,10 +304,16 @@ export async function readPage(
   });
   const audits = [];
   for (const run of base.runs) {
-    const evidence = await readAuditRun(db, actor, {
-      ...siteScope(scope),
-      auditId: run.id,
-    });
+    const evidence = await readAuditRun(
+      db,
+      actor,
+      {
+        ...siteScope(scope),
+        auditId: run.id,
+      },
+      "read",
+      now,
+    );
     const evaluation = evidence.evaluation as {
       rules?: Array<{ scopeKey?: string }>;
     } | null;
@@ -327,20 +328,19 @@ export async function readPage(
         .filter((p) => p.requestedUrl === base.page.normalizedUrl)
         .map((p) => ({
           requestedUrl: p.requestedUrl,
-          evidence: compact(p.evidence),
-          provenance: compact(p.provenance),
+          evidence: p.evidence,
+          provenance: p.provenance,
         })),
-      findings: compact(
+      findings:
         evaluation?.rules?.filter(
           (r) => r.scopeKey === base.page.normalizedUrl,
         ) ?? [],
-      ),
       actions: evidence.actions.filter(
         (a) => a.scopeKey === base.page.normalizedUrl,
       ),
     });
   }
-  const search = await readGoogleSearch(db, actor, scope);
+  const search = await readGoogleSearch(db, actor, scope, now);
   // Recheck current authorization after composing independently authorized evidence services.
   await withActor(db, actor, scope.workspaceId, (tx) =>
     authorize(tx, actor, scope),

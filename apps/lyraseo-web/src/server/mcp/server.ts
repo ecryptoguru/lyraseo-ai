@@ -96,9 +96,11 @@ async function result(work: () => Promise<unknown>) {
           text:
             code === "RESPONSE_TOO_LARGE"
               ? "Result exceeds the response limit. Reduce limit and read a smaller page."
-              : code === "AUDIT_INCOMPLETE"
-                ? "A comparison requires two completed saved audits from this site."
-                : "Resource unavailable. Check the selected site, token scope and current issuer access.",
+              : code === "SOURCE_EXPIRED"
+                ? "This saved evidence has expired."
+                : code === "AUDIT_INCOMPLETE"
+                  ? "A comparison requires two completed saved audits from this site."
+                  : "Resource unavailable. Check the selected site, token scope and current issuer access.",
         },
       ],
     };

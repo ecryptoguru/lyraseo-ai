@@ -338,11 +338,13 @@ test("paused content preserves readable draft revisions and report downloads", a
     ],
     snapshot: { internalLinks: [] },
   };
-  const mutations: string[] = [];
+  const mutations: string[] = [],
+    readPaths = new Set<string>();
   await page.route("**/api/**", (route) => {
     if (route.request().method() !== "GET")
       mutations.push(route.request().url());
     const path = new URL(route.request().url()).pathname;
+    readPaths.add(path);
     return route.fulfill({
       json:
         path === "/api/content"
@@ -353,6 +355,13 @@ test("paused content preserves readable draft revisions and report downloads", a
                   id: "report",
                   title: "Retained report",
                   createdAt: "2026-11-02T00:00:00Z",
+                  evidenceFormat: "saved-evidence-v2",
+                },
+                {
+                  id: "legacy",
+                  title: "Historical report",
+                  createdAt: "2025-11-02T00:00:00Z",
+                  evidenceFormat: null,
                 },
               ]
             : path === "/api/search"
@@ -384,9 +393,46 @@ test("paused content preserves readable draft revisions and report downloads", a
       exact: true,
     }),
   ).toHaveCount(0);
+  const retained = page.getByRole("listitem").filter({
+    has: page.getByRole("heading", { name: "Retained report", exact: true }),
+  });
+  const legacy = page.getByRole("listitem").filter({
+    has: page.getByRole("heading", {
+      name: "Historical report",
+      exact: true,
+    }),
+  });
+  for (const format of ["PDF", "CSV"]) {
+    const link = retained.getByRole("link", {
+      name: "Download " + format,
+      exact: true,
+    });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute(
+      "href",
+      `/api/reports?workspaceId=a&siteId=site&reportId=report&format=${format.toLowerCase()}`,
+    );
+    await expect(
+      legacy.getByRole("link", { name: "Download " + format, exact: true }),
+    ).toHaveCount(0);
+  }
   await expect(
-    page.getByRole("link", { name: "Download CSV", exact: true }),
+    legacy.getByText("Original downloads unavailable pending legacy review.", {
+      exact: true,
+    }),
   ).toBeVisible();
+  await expect(
+    legacy.getByRole("button", {
+      name: "Preview Historical report",
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect([...readPaths].sort()).toEqual([
+    "/api/audits",
+    "/api/content",
+    "/api/reports",
+    "/api/search",
+  ]);
   expect(mutations).toEqual([]);
   await accessible(page);
 });

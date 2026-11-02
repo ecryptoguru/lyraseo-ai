@@ -234,7 +234,7 @@ it("freezes a real HTTP fix and unreadable D01 in authorized immutable compariso
     const oldRun = await admin.auditRun.findUniqueOrThrow({
       where: { id: before.id },
     });
-    const { id: _oldId, ...oldData } = oldRun;
+    const { id: _oldId, resultExpiresAt: _generatedClock, ...oldData } = oldRun;
     const expired = await admin.auditRun.create({
       data: {
         ...oldData,
@@ -251,7 +251,7 @@ it("freezes a real HTTP fix and unreadable D01 in authorized immutable compariso
           comparison: { beforeAuditId: expired.id, afterAuditId: after.id },
         }),
       ),
-      409,
+      410,
     );
     const legacyEvaluation = {
       ...(oldData.evaluation as object),

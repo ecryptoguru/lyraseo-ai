@@ -5,6 +5,7 @@ import {
   createContentDraft,
   saveContentDraft,
   readContentDrafts,
+  setRevisionPin,
 } from "@lyraseo/db/content";
 import {
   privateBody,
@@ -45,6 +46,14 @@ const command = z.discriminatedUnion("action", [
       ...fields,
     })
     .strict(),
+  scopeSchema
+    .extend({
+      action: z.literal("pin"),
+      draftId: z.string().min(1).max(128),
+      revision: z.number().int().positive(),
+      pinned: z.boolean(),
+    })
+    .strict(),
   scopeSchema.extend({ action: z.literal("generate") }).strict(),
 ]);
 export async function GET(request: Request) {
@@ -52,12 +61,21 @@ export async function GET(request: Request) {
     const actor = await resolveActor(),
       query = new URL(request.url).searchParams;
     const scope = scopeSchema.parse(Object.fromEntries(query));
+    const cursor = query.get("beforeRevision");
+    if (
+      cursor !== null &&
+      (!query.get("draftId") ||
+        !/^[1-9][0-9]{0,9}$/.test(cursor) ||
+        Number(cursor) > 2147483647)
+    )
+      throw new Error("INVALID_REVISION_CURSOR");
     return Response.json(
       await readContentDrafts(
         database(),
         actor,
         scope,
         query.get("draftId") ?? undefined,
+        cursor === null ? undefined : Number(cursor),
       ),
       { headers: privateHeaders },
     );
@@ -83,6 +101,18 @@ export async function POST(request: Request) {
         { status: 503, headers: privateHeaders },
       );
     }
+    if (input.action === "pin")
+      return Response.json(
+        await setRevisionPin(
+          database(),
+          actor,
+          scopeSchema.parse(input),
+          input.draftId,
+          input.revision,
+          input.pinned,
+        ),
+        { headers: privateHeaders },
+      );
     const result =
       input.action === "create"
         ? await createContentDraft(

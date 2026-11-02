@@ -1,3 +1,4 @@
+export const SEARCH_KEY_MAX_UNITS = 8192;
 export type SearchEvidenceRow = {
   keys: string[];
   clicks: number;
@@ -91,7 +92,11 @@ function rows(snapshot: SearchSnapshot): SearchEvidenceRow[] {
       if (
         !value ||
         !Array.isArray(value.keys) ||
-        !value.keys.every((key: unknown) => typeof key === "string") ||
+        value.keys.length !== (snapshot.shape === "query,page" ? 2 : 1) ||
+        !value.keys.every(
+          (key: unknown) =>
+            typeof key === "string" && key.length <= SEARCH_KEY_MAX_UNITS,
+        ) ||
         !Number.isFinite(value.clicks) ||
         value.clicks < 0 ||
         !Number.isFinite(value.impressions) ||
@@ -106,7 +111,9 @@ function rows(snapshot: SearchSnapshot): SearchEvidenceRow[] {
       return true;
     })
     .map((row) => ({
-      ...row,
+      keys: row.keys,
+      clicks: row.clicks,
+      impressions: row.impressions,
       ctr: row.impressions ? row.clicks / row.impressions : null,
       position: row.impressions ? row.position : null,
     }));

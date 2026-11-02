@@ -1,6 +1,8 @@
+import { withEvidenceRead } from "./context";
 import { siteScope } from "./sites";
 import {
   buildSearchOpportunities,
+  SEARCH_KEY_MAX_UNITS,
   buildSearchAuditOpportunities,
 } from "@lyraseo/visibility";
 /** Shared authorization/persistence boundary for web and future MCP consumers. */
@@ -11,7 +13,6 @@ import {
   authorizeSiteIn,
   type Actor,
   type ReadActor,
-  requireReadScope,
   isTokenActor,
   type Tx,
 } from "./context";
@@ -46,11 +47,6 @@ export type SecretBox = {
   open(value: string, aad: string): string;
 };
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
-const retentionCutoff = () => {
-  const date = new Date();
-  date.setUTCMonth(date.getUTCMonth() - 13);
-  return date;
-};
 const aad = (s: SiteScope) => `${s.workspaceId}:${s.siteId}`;
 async function authorize(tx: Tx, actor: ReadActor, s: SiteScope, edit = false) {
   const site = await authorizeSiteIn(
@@ -291,12 +287,13 @@ export async function importGoogleSearch(
       },
     });
     if (!current) throw new Error("GOOGLE_CONNECTION_CHANGED");
+    const now = new Date();
     const cached = await tx.searchSnapshot.findFirst({
-      where: { ...key, importedAt: { gte: retentionCutoff() } },
+      where: { ...key, resultExpiresAt: { gt: now } },
     });
     if (cached) return cached;
     await tx.searchImport.deleteMany({
-      where: { ...siteScope(s), startedAt: { lt: retentionCutoff() } },
+      where: { ...siteScope(s), resultExpiresAt: { lte: now } },
     });
     await tx.searchImport.updateMany({
       where: {
@@ -326,7 +323,6 @@ export async function importGoogleSearch(
       attempt,
       leaseUntil: new Date(Date.now() + 300000),
       failure: null,
-      startedAt: new Date(),
       completedAt: null,
     };
     await tx.searchImport.upsert({
@@ -411,8 +407,9 @@ export async function importGoogleSearch(
         data: { status: "complete", completedAt: new Date() },
       });
       if (completed.count !== 1) throw new Error("GOOGLE_CONNECTION_CHANGED");
+      const now = new Date();
       await tx.searchSnapshot.deleteMany({
-        where: { ...siteScope(s), importedAt: { lt: retentionCutoff() } },
+        where: { ...siteScope(s), resultExpiresAt: { lte: now } },
       });
       const key = {
         ...siteScope(s),
@@ -425,17 +422,11 @@ export async function importGoogleSearch(
         where: { workspaceId_siteId_property_startDate_endDate_shape: key },
       });
       if (existing) return { ...existing, cached: true };
-      return tx.searchSnapshot.upsert({
-        where: { workspaceId_siteId_property_startDate_endDate_shape: key },
-        create: {
+      return tx.searchSnapshot.create({
+        data: {
           ...key,
           status: capped ? "partial" : "complete",
           rows: rows as unknown as Prisma.InputJsonValue,
-        },
-        update: {
-          rows: rows as unknown as Prisma.InputJsonValue,
-          status: capped ? "partial" : "complete",
-          importedAt: new Date(),
         },
       });
     });
@@ -470,21 +461,45 @@ export async function disconnectGoogle(
     return { disconnected: true, purged: true };
   });
 }
+function displayRows(value: unknown, shape: string) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((r) => {
+    if (
+      !r ||
+      !Array.isArray(r.keys) ||
+      r.keys.length !== (shape === "query,page" ? 2 : 1) ||
+      !r.keys.every(
+        (k: unknown) =>
+          typeof k === "string" && k.length <= SEARCH_KEY_MAX_UNITS,
+      )
+    )
+      return [];
+    const measure = (v: unknown) =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    return [
+      {
+        keys: r.keys as string[],
+        clicks: measure(r.clicks),
+        impressions: measure(r.impressions),
+        position: measure(r.position),
+        ctr: measure(r.ctr),
+      },
+    ];
+  });
+}
 export async function readGoogleSearch(
   db: PrismaClient,
   actor: ReadActor,
   s: SiteScope,
+  now = new Date(),
 ) {
-  return withActor(db, actor, s.workspaceId, async (tx) => {
-    await requireReadScope(tx, actor, "search:read");
-    await authorize(tx, actor, s);
+  return withEvidenceRead(db, actor, s, "read", "search:read", async (tx) => {
     const c = await tx.googleConnection.findFirst({
       where: siteScope(s),
       select: { property: true, createdAt: true },
     });
-    const cutoff = retentionCutoff();
     const imports = await tx.searchImport.findMany({
-      where: { ...siteScope(s), startedAt: { gte: cutoff } },
+      where: { ...siteScope(s), resultExpiresAt: { gt: now } },
       select: {
         id: true,
         property: true,
@@ -504,7 +519,7 @@ export async function readGoogleSearch(
       ? await tx.searchSnapshot.findMany({
           where: {
             ...siteScope(s),
-            importedAt: { gte: cutoff },
+            resultExpiresAt: { gt: now },
             OR: imports.map(({ property, startDate, endDate, shape }) => ({
               property,
               startDate,
@@ -537,9 +552,9 @@ export async function readGoogleSearch(
         rowCount: number;
         rowsTruncated: boolean;
       }>
-    >`SELECT id,"workspaceId","siteId",property,"startDate","endDate",shape,status,"importedAt",jsonb_path_query_array(rows,'$[0 to 99]') AS rows,jsonb_array_length(rows) AS "rowCount",jsonb_array_length(rows)>100 AS "rowsTruncated" FROM "SearchSnapshot" WHERE "workspaceId"=${s.workspaceId} AND "siteId"=${s.siteId} AND "importedAt">=${cutoff} ORDER BY "importedAt" DESC LIMIT 20`;
+    >`SELECT id,"workspaceId","siteId",property,"startDate","endDate",shape,status,"importedAt",jsonb_path_query_array(rows,'$[0 to 99]') AS rows,jsonb_array_length(rows) AS "rowCount",jsonb_array_length(rows)>100 AS "rowsTruncated" FROM "SearchSnapshot" WHERE "workspaceId"=${s.workspaceId} AND "siteId"=${s.siteId} AND "resultExpiresAt">${now} ORDER BY "importedAt" DESC LIMIT 20`;
     const metadata = await tx.searchSnapshot.findMany({
-      where: { ...siteScope(s), importedAt: { gte: cutoff } },
+      where: { ...siteScope(s), resultExpiresAt: { gt: now } },
       select: {
         id: true,
         shape: true,
@@ -568,7 +583,11 @@ export async function readGoogleSearch(
       (id): id is string => !!id,
     );
     const evidence = await tx.searchSnapshot.findMany({
-      where: { ...siteScope(s), id: { in: evidenceIds } },
+      where: {
+        ...siteScope(s),
+        resultExpiresAt: { gt: now },
+        id: { in: evidenceIds },
+      },
     });
     // Search-only credentials must not reveal audit evidence through a derived opportunity.
     const includeAudits =
@@ -584,7 +603,7 @@ export async function readGoogleSearch(
           where: {
             ...siteScope(s),
             status: "COMPLETED",
-            createdAt: { gte: cutoff },
+            resultExpiresAt: { gt: now },
           },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 20,
@@ -628,6 +647,7 @@ export async function readGoogleSearch(
       })),
       snapshots: snapshots.map((snapshot) => ({
         ...snapshot,
+        rows: displayRows(snapshot.rows, snapshot.shape),
         displayLimited: snapshot.rowsTruncated,
       })),
       coverage:

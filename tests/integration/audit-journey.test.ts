@@ -3,24 +3,28 @@ import { createDatabase } from "../../packages/db/src";
 import {
   createAuditRun,
   readAuditRun,
+  readAuditSource,
   compareAuditRuns,
 } from "../../packages/db/src/audits";
 import { runRawAuditStep } from "../../apps/lyraseo-web/src/server/acquisition/runner";
 import {
   actor,
   runtimeUrl,
+  adminUrl,
   resetDatabase,
   seedTenants,
 } from "../helpers/database";
 import { crawlerSite } from "../fixtures/crawler-site";
 
-const db = createDatabase(runtimeUrl);
+const db = createDatabase(runtimeUrl),
+  admin = createDatabase(adminUrl);
 beforeEach(async () => {
   await resetDatabase();
   await seedTenants();
 });
 afterAll(async () => {
   await db.$disconnect();
+  await admin.$disconnect();
 });
 it("persists real controlled HTTP evidence, resumes checkpoints and verifies an HTTP status fix", async () => {
   const site = await crawlerSite();
@@ -82,7 +86,17 @@ it("persists real controlled HTTP evidence, resumes checkpoints and verifies an 
       ...scope,
       auditId: after.id,
     });
-    expect(saved.pages.some((page) => page.provenance.rawHtml)).toBe(true);
+    expect(JSON.stringify(saved)).not.toContain("rawHtml");
+    expect(
+      (
+        await readAuditSource(
+          db,
+          actor,
+          { ...scope, auditId: after.id },
+          "https://example.com/",
+        )
+      ).length,
+    ).toBeGreaterThan(0);
     expect(
       saved.evaluation?.rules.find(
         (rule) =>
@@ -123,7 +137,7 @@ it("checkpoints NUL as an unreadable receipt, resumes, and captures real raw anc
     expect(saved.status).toBe("COMPLETED");
     const nul = saved.pages.find((p) => p.requestedUrl.endsWith("/nul"))!;
     expect(nul.provenance.error).toBe("BODY_UNREPRESENTABLE");
-    expect(nul.provenance.rawHtml).toBeUndefined();
+    expect(nul.provenance).not.toHaveProperty("rawHtml");
     expect(nul.provenance.sha256).toBe(
       createHash("sha256")
         .update("<html><head><title>NUL</title></head><!--\u0000--></html>")
@@ -156,8 +170,15 @@ it("checkpoints NUL as an unreadable receipt, resumes, and captures real raw anc
     expect(reportReceipt.robotsPolicy).toEqual(nul.provenance.robotsPolicy);
     const { replayGoogleRobots } =
       await import("../../packages/visibility/src/acquisition");
-    const policy =
-      reportReceipt.robotsPolicy as import("../../packages/visibility/src/types").RobotsPolicyObservation;
+    expect(reportReceipt.robotsPolicy).toMatchObject({
+      groupAgent: "*",
+      ruleCount: 1,
+    });
+    const immutable = await admin.auditPage.findUniqueOrThrow({
+      where: { id: nul.id },
+    });
+    const policy = (immutable.provenance as Record<string, unknown>)
+      .robotsPolicy as import("../../packages/visibility/src/types").RobotsPolicyObservation;
     expect(policy.sha256).toBe(
       createHash("sha256")
         .update("User-agent: *\nDisallow: /blocked\n")
@@ -209,10 +230,17 @@ it("persists a valid UTF-8 anchor crossing the text cap and its editorial snapsh
       p.requestedUrl.endsWith("/unicode"),
     )!;
     expect(unicode.evidence.acquired).toBe(true);
-    expect(unicode.evidence.linkNames).toEqual([
+    const immutable = await admin.auditPage.findUniqueOrThrow({
+      where: { id: unicode.id },
+    });
+    expect((immutable.evidence as Record<string, unknown>).linkNames).toEqual([
       { href: "https://example.com/about", name: "a".repeat(499) },
     ]);
-    expect(unicode.provenance.rawHtml).toContain(`${"a".repeat(499)}😀`);
+    expect(
+      Buffer.from(
+        await readAuditSource(db, actor, resource, unicode.requestedUrl),
+      ).toString("utf8"),
+    ).toContain(`${"a".repeat(499)}😀`);
     const draft = await createContentDraft(db, actor, scope, {
       kind: "draft",
       title: "Unicode evidence",
@@ -270,7 +298,7 @@ it("checkpoints empty HTML 200/204/205 as unavailable with observed status/diges
         error: "EMPTY_HTML_BODY",
         sha256: createHash("sha256").update("").digest("hex"),
       });
-      expect(page.provenance.rawHtml).toBeUndefined();
+      expect(page.provenance).not.toHaveProperty("rawHtml");
       expect(
         saved.evaluation?.rules.find(
           (r) => r.ruleId === "D01" && r.scopeKey === page.requestedUrl,

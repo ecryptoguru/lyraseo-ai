@@ -5,6 +5,7 @@ import {
   captureEvidenceReport,
   storeEvidenceReport,
   readEvidenceReports,
+  previewEvidenceReport,
 } from "@lyraseo/db/content";
 import { renderEvidenceReport } from "@/server/editorial/reports";
 import {
@@ -44,12 +45,11 @@ export async function POST(request: Request) {
         comparison: input.comparison,
       },
     );
-    const output = await renderEvidenceReport(input.title, snapshot);
     return Response.json(
       await storeEvidenceReport(database(), actor, scopeSchema.parse(input), {
         title: input.title,
         snapshot,
-        ...output,
+        render: renderEvidenceReport,
       }),
       { status: 201, headers: privateHeaders },
     );
@@ -63,18 +63,29 @@ export async function GET(request: Request) {
       query = new URL(request.url).searchParams,
       scope = scopeSchema.parse(Object.fromEntries(query));
     const reportId = query.get("reportId") ?? undefined;
+    if (reportId && query.get("format") === "preview")
+      return Response.json(
+        await previewEvidenceReport(database(), actor, scope, reportId),
+        { headers: privateHeaders },
+      );
+    const format = query.get("format");
+    if (reportId && format !== "pdf" && format !== "csv")
+      throw new Error("INVALID_FORMAT");
     const result = await readEvidenceReports(
       database(),
       actor,
       scope,
       reportId,
+      format === "pdf" || format === "csv" ? format : undefined,
     );
     if (!Array.isArray(result) && reportId) {
-      const format = query.get("format");
-      if (format !== "pdf" && format !== "csv")
+      if (
+        (format === "pdf" && !result.pdf) ||
+        (format === "csv" && result.csv === undefined)
+      )
         throw new Error("INVALID_FORMAT");
       return new Response(
-        format === "pdf" ? new Uint8Array(result.pdf) : result.csv,
+        format === "pdf" ? new Uint8Array(result.pdf!) : result.csv,
         {
           headers: {
             ...privateHeaders,

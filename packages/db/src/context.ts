@@ -34,6 +34,61 @@ export async function requireReadScope(
   }
 }
 export type Tx = Prisma.TransactionClient;
+async function verifyActorIn(tx: Tx, actor: ReadActor, workspaceId: string) {
+  const user = await tx.productUser.findUnique({
+    where: { id: actor.userId },
+  });
+  if (!user || user.suspended || user.securityVersion !== actor.securityVersion)
+    throw new Error("FORBIDDEN");
+  if (isTokenActor(actor)) {
+    const token = await tx.apiToken.findUnique({
+      where: { id: actor.tokenId },
+    });
+    const member = await tx.membership.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId: actor.userId } },
+    });
+    const workspace = await tx.workspace.findUnique({
+      where: { id: workspaceId },
+    });
+    if (
+      !token ||
+      token.tokenHash !== actor.tokenHash ||
+      token.createdBy !== actor.userId ||
+      token.workspaceId !== workspaceId ||
+      actor.workspaceId !== workspaceId ||
+      token.revokedAt ||
+      token.expiresAt.getTime() <= Date.now() ||
+      token.securityVersion !== user.securityVersion ||
+      !member ||
+      !workspace ||
+      workspace.deletedAt
+    )
+      throw new Error("FORBIDDEN");
+  }
+}
+/** Recheck scope after composing stored evidence under READ COMMITTED, before returning any rows or bytes. */
+export async function withEvidenceRead<T>(
+  db: PrismaClient,
+  actor: ReadActor,
+  s: { workspaceId: string; siteId: string },
+  access: "read" | "export",
+  credentialScope: ReadScope | undefined,
+  read: (tx: Tx) => Promise<T>,
+) {
+  return withActor(db, actor, s.workspaceId, async (tx) => {
+    async function verify() {
+      if (credentialScope) await requireReadScope(tx, actor, credentialScope);
+      await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, access);
+    }
+    await verify();
+    try {
+      return await read(tx);
+    } finally {
+      await verifyActorIn(tx, actor, s.workspaceId);
+      await verify();
+    }
+  });
+}
 export async function withActor<T>(
   db: PrismaClient,
   actor: ReadActor,
@@ -43,40 +98,7 @@ export async function withActor<T>(
   return db.$transaction(
     async (tx) => {
       await tx.$queryRaw`SELECT set_config('app.actor_id',${actor.userId},true),set_config('app.workspace_id',${workspaceId},true)`;
-      const user = await tx.productUser.findUnique({
-        where: { id: actor.userId },
-      });
-      if (
-        !user ||
-        user.suspended ||
-        user.securityVersion !== actor.securityVersion
-      )
-        throw new Error("FORBIDDEN");
-      if (isTokenActor(actor)) {
-        const token = await tx.apiToken.findUnique({
-          where: { id: actor.tokenId },
-        });
-        const member = await tx.membership.findUnique({
-          where: { workspaceId_userId: { workspaceId, userId: actor.userId } },
-        });
-        const workspace = await tx.workspace.findUnique({
-          where: { id: workspaceId },
-        });
-        if (
-          !token ||
-          token.tokenHash !== actor.tokenHash ||
-          token.createdBy !== actor.userId ||
-          token.workspaceId !== workspaceId ||
-          actor.workspaceId !== workspaceId ||
-          token.revokedAt ||
-          token.expiresAt.getTime() <= Date.now() ||
-          token.securityVersion !== user.securityVersion ||
-          !member ||
-          !workspace ||
-          workspace.deletedAt
-        )
-          throw new Error("FORBIDDEN");
-      }
+      await verifyActorIn(tx, actor, workspaceId);
       return work(tx);
     },
     { maxWait: 10000, timeout: 15000 },

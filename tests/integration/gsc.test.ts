@@ -120,6 +120,7 @@ it("reads bounded retained import receipts with safe metadata and observes expir
   await admin.searchImport.createMany({
     data: Array.from({ length: 24 }, (_, i) => ({
       ...before[0],
+      resultExpiresAt: undefined,
       id: `bounded-${i}`,
       startedAt: new Date(Date.now() + i * 1000),
     })),
@@ -681,4 +682,80 @@ it("fences an import when consent/selection generation changes during provider H
     status: "failed",
     failure: "GOOGLE_CONNECTION_CHANGED",
   });
+});
+it("omits expired snapshot evidence and publishes a new stable ID when the same import key is explicitly acquired again", async () => {
+  await connect();
+  const input = {
+    startDate: "2026-01-01",
+    endDate: "2026-01-02",
+    shape: "page" as const,
+  };
+  const first = await importGoogleSearch(
+    db,
+    actor,
+    scope,
+    input,
+    provider,
+    box,
+  );
+  const clock = await admin.searchSnapshot.update({
+    where: { id: first.id },
+    data: { importedAt: new Date("2024-10-31T12:00:00.001Z") },
+  });
+  const boundary = clock.resultExpiresAt;
+  for (const delta of [-1, 0, 1]) {
+    const view = await readGoogleSearch(
+      db,
+      actor,
+      scope,
+      new Date(+boundary + delta),
+    );
+    expect(view.snapshots.map((x) => x.id)).toEqual(
+      delta < 0 ? [first.id] : [],
+    );
+    if (delta >= 0) expect(view.opportunities).toEqual([]);
+  }
+  const next = await importGoogleSearch(db, actor, scope, input, provider, box);
+  expect(next.id).not.toBe(first.id);
+  const again = await importGoogleSearch(
+    db,
+    actor,
+    scope,
+    input,
+    provider,
+    box,
+  );
+  expect(again.id).toBe(next.id);
+  expect(again.importedAt).toEqual(next.importedAt);
+});
+it("displays provider-admitted long keys without altering observed identities or forwarding opaque fields", async () => {
+  const pageKey =
+    "https://example.com/" + "x".repeat(8192 - "https://example.com/".length);
+  await admin.searchSnapshot.create({
+    data: {
+      ...scope,
+      property: "https://example.com/",
+      startDate: "2026-01-01",
+      endDate: "2026-01-02",
+      shape: "page",
+      status: "complete",
+      rows: [
+        {
+          keys: [pageKey],
+          clicks: 1,
+          impressions: 200,
+          position: 4,
+          ctr: 0.005,
+          opaque: "should-not-leave-postgres-api",
+        },
+      ],
+    },
+  });
+  const view = await readGoogleSearch(db, actor, scope);
+  expect(view.snapshots[0]).toMatchObject({
+    rowCount: 1,
+    rows: [{ keys: [pageKey], impressions: 200 }],
+  });
+  expect(view.opportunities.some((o) => o.page === pageKey)).toBe(true);
+  expect(JSON.stringify(view)).not.toContain("should-not-leave-postgres-api");
 });

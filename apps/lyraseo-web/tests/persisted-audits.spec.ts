@@ -32,6 +32,7 @@ const run = {
   pages: [
     {
       requestedUrl: "https://example.com/",
+      sourceAvailability: "expired",
       provenance: {
         sha256: "a".repeat(64),
         acquiredAt: "2026-11-02T00:00:00Z",
@@ -202,6 +203,14 @@ test("viewer can inspect saved audits without mutation controls", async ({
     ),
   ).toBeVisible();
   await page.getByRole("button", { name: /completed/i }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: "https://example.com/" })
+    .click();
+  await expect(page.getByText("Original source expired.")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Download retained original source" }),
+  ).toHaveCount(0);
   await expect(page.getByText("readiness-v1", { exact: false })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Confirm pages and start audit" }),

@@ -249,7 +249,12 @@ it("returns at most five exact requested-page audits, retained UNKNOWN evidence 
         status: "COMPLETED",
         evaluation: {
           rules: [
-            { scopeKey: url, outcome: "UNKNOWN" },
+            {
+              ruleId: "D01",
+              reasonCode: "HTTP_UNAVAILABLE",
+              scopeKey: url,
+              outcome: "UNKNOWN",
+            },
             { scopeKey: "https://example.com/fr", outcome: "FAIL" },
           ],
         },
@@ -323,7 +328,12 @@ it("returns at most five exact requested-page audits, retained UNKNOWN evidence 
   const result = await readPage(db, actor, scope, page.id);
   expect(result.audits).toHaveLength(5);
   expect(result.audits[0].findings).toEqual([
-    { scopeKey: url, outcome: "UNKNOWN" },
+    {
+      ruleId: "D01",
+      reasonCode: "HTTP_UNAVAILABLE",
+      scopeKey: url,
+      outcome: "UNKNOWN",
+    },
   ]);
   expect(JSON.stringify(result)).not.toContain("rawHtml");
   expect(result.reports.map((r) => r.id)).toEqual(["matching"]);

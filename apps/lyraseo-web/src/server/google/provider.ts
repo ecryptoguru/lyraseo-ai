@@ -1,3 +1,4 @@
+import { SEARCH_KEY_MAX_UNITS } from "@lyraseo/visibility";
 import {
   createCipheriv,
   createDecipheriv,
@@ -176,7 +177,9 @@ export function googleProvider(
         if (
           !Array.isArray(x.keys) ||
           x.keys.length !== input.shape.split(",").length ||
-          x.keys.some((k) => typeof k !== "string" || k.length > 8192) ||
+          x.keys.some(
+            (k) => typeof k !== "string" || k.length > SEARCH_KEY_MAX_UNITS,
+          ) ||
           ![x.clicks, x.impressions, x.position].every(
             (v) => typeof v === "number" && Number.isFinite(v) && v >= 0,
           ) ||

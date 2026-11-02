@@ -30,7 +30,7 @@ it("renders local structured private evidence to valid PDF and CSV without execu
   const output = await renderEvidenceReport("=Private evidence", snapshot);
   expect(Buffer.from(output.pdf).subarray(0, 5).toString()).toBe("%PDF-");
   expect(output.csv).toContain('"\'=Private evidence"');
-  expect(output.csv).toContain("partial");
+  expect(output.csv).not.toContain("<script>");
   expect(output.csv.split("\r\n")).toHaveLength(2);
   expect(output.csv).not.toContain("Immutable audit comparison");
   expect(output.pdf.length).toBeGreaterThan(1000);
@@ -79,7 +79,16 @@ it("exports frozen v2 rule versions, category coverage and receipt provenance wi
     sources: [{ sourceId: "audit:1", kind: "raw-http-audit", data: source }],
   };
   const report = await renderEvidenceReport("Readiness", snapshot);
-  expect(report.csv).toContain(csvCell(JSON.stringify(source)));
+  for (const key of [
+    "readiness-v2",
+    "LOCAL_RAW_V1",
+    "HTTP_ERROR",
+    "acquiredAt",
+    "categoryCoverage",
+    "ruleVersion",
+    "2026-11-01T00:00:00Z",
+  ])
+    expect(report.csv).toContain(key);
   expect(Buffer.from(report.pdf).subarray(0, 5).toString()).toBe("%PDF-");
 });
 
@@ -184,7 +193,15 @@ it("exports the frozen comparison in full and visibly distinguishes resolved fro
   expect(lines).toContain("not available");
   const report = await renderEvidenceReport("Private", snapshot);
   expect(report.csv).toContain(csvCell("Immutable audit comparison"));
-  expect(report.csv).toContain(csvCell(JSON.stringify(comparison)));
+  for (const key of [
+    "audit:before",
+    "audit:after",
+    "resolved",
+    "unevaluated",
+    "HTTP_ERROR",
+    "contextRevision",
+  ])
+    expect(report.csv).toContain(key);
   expect(comparisonReportLines(undefined)).toEqual([]);
   const large = {
     ...comparison,
@@ -203,4 +220,33 @@ it("exports the frozen comparison in full and visibly distinguishes resolved fro
     comparison: large,
   });
   expect(full.csv).toContain("https://example.com/100");
+});
+it("omits opaque nested page and provider data from report transport", async () => {
+  const marker = "RAW_JSON_LD_SHOULD_NEVER_BE_EXPORTED";
+  const snapshot: EvidenceSnapshot = {
+    capturedAt: "2026-11-02T00:00:00.000Z",
+    scope: { workspaceId: "a", siteId: "s" },
+    methodology: "readiness-v2",
+    context: null,
+    internalLinks: [],
+    sources: [
+      {
+        sourceId: "audit:1",
+        kind: "raw-http-audit",
+        data: {
+          pages: [
+            { url: "https://example.com/", evidence: { jsonLd: [marker] } },
+          ],
+        },
+      },
+      {
+        sourceId: "gsc:2",
+        kind: "google-search-console",
+        data: { rows: [{ keys: [marker], clicks: 1 }] },
+      },
+    ],
+  };
+  expect((await renderEvidenceReport("Saved", snapshot)).csv).not.toContain(
+    marker,
+  );
 });

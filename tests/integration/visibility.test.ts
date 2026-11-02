@@ -100,17 +100,15 @@ it("retains synthetic provenance, hides list raw answers and expires detail on r
   expect(
     (await readVisibility(db, actor, scope, r.id)).runs[0]?.rawAnswers,
   ).toBeNull();
-  expect(
-    (
-      await readVisibility(
-        db,
-        actor,
-        scope,
-        r.id,
-        new Date(Date.now() + 400 * 86400000),
-      )
-    ).runs,
-  ).toHaveLength(0);
+  await expect(
+    readVisibility(
+      db,
+      actor,
+      scope,
+      r.id,
+      new Date(Date.now() + 400 * 86400000),
+    ),
+  ).rejects.toThrow("SOURCE_EXPIRED");
 });
 it("rejects cross-site evidence, revoked grants and consumer API substitution", async () => {
   const p = await panel();

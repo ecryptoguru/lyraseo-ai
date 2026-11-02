@@ -8,7 +8,11 @@ import {
 } from "@/server/google/analytics";
 import { googleScope, googleHeaders, smallJson } from "@/server/google/http";
 import { analyticsFailure } from "@/server/google/analytics-http";
-import { readGa4LandingPages, importGa4LandingPages } from "@lyraseo/db/ga4";
+import {
+  readGa4LandingPages,
+  importGa4LandingPages,
+  analyticsDiagnostics,
+} from "@lyraseo/db/ga4";
 const command = googleScope
   .extend({ startDate: z.string().max(10), endDate: z.string().max(10) })
   .strict();
@@ -58,7 +62,11 @@ export async function POST(request: Request) {
     const { rows, attempt: _attempt, ...summary } = snapshot;
     void _attempt;
     return Response.json(
-      { ...summary, rowCount: Array.isArray(rows) ? rows.length : 0 },
+      {
+        ...summary,
+        diagnostics: analyticsDiagnostics(summary.diagnostics),
+        rowCount: Array.isArray(rows) ? rows.length : 0,
+      },
       { headers: googleHeaders },
     );
   } catch (e) {

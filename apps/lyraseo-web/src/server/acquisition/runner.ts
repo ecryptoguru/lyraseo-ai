@@ -6,6 +6,7 @@ import {
   claimAuditRun,
   finishAuditRun,
   readAuditRun,
+  readAuditProgress,
   yieldAuditRun,
   type AuditScope,
 } from "@lyraseo/db/audits";
@@ -22,7 +23,7 @@ export async function runRawAuditStep(
   transport: PublicTransport,
 ) {
   const lease = await claimAuditRun(db, actor, scope, randomUUID());
-  const stored = await readAuditRun(db, actor, scope);
+  const stored = await readAuditProgress(db, actor, scope);
   const captured = new Set(stored.pages.map((page) => page.requestedUrl));
   const next = (stored.manifest as string[]).find((url) => !captured.has(url));
   if (next) {

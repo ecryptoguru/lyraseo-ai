@@ -41,6 +41,20 @@ export async function privateBody(request: Request) {
 }
 export function editorialFailure(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (
+    ["LEGACY_REVIEW", "SOURCE_EXPIRED", "REVISION_UNAVAILABLE"].includes(code)
+  )
+    return Response.json(
+      {
+        error:
+          code === "LEGACY_REVIEW"
+            ? "Original download unavailable pending review. The saved preview is available."
+            : code === "REVISION_UNAVAILABLE"
+              ? "This historical revision is no longer available."
+              : "This source has expired or disconnected.",
+      },
+      { status: 410, headers: privateHeaders },
+    );
   const status =
     code === "ORIGIN_REJECTED"
       ? 403

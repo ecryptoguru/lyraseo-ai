@@ -92,6 +92,7 @@ it("returns only persisted PDF bytes with attachment and private cache controls"
     { userId: "verified" },
     scope,
     "report",
+    "pdf",
   );
 });
 it("rejects client-supplied comparison evaluations before authorized source capture", async () => {

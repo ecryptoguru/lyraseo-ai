@@ -64,7 +64,12 @@ type Detail = {
       content: { title: string; body: string };
     }>;
   }>;
-  reports: Array<{ id: string; title: string; createdAt: string }>;
+  reports: Array<{
+    id: string;
+    title: string;
+    createdAt: string;
+    evidenceFormat?: string | null;
+  }>;
   ai: { message: string };
 };
 export function PageWorkspace({
@@ -375,7 +380,16 @@ export function PageWorkspace({
                   </p>
                   {entry.note && <p className="audit-url">{entry.note}</p>}
                   {entry.contentDraftId && (
-                    <p>Linked draft revision {entry.contentDraftRevision}</p>
+                    <p>
+                      Linked draft revision {entry.contentDraftRevision}
+                      {detail.drafts.some(
+                        (d) =>
+                          d.id === entry.contentDraftId &&
+                          !d.history.some(
+                            (r) => r.revision === entry.contentDraftRevision,
+                          ),
+                      ) && " · historical revision unavailable"}
+                    </p>
                   )}
                 </li>
               ))}
@@ -482,11 +496,17 @@ export function PageWorkspace({
               {detail.reports.map((report) => (
                 <li key={report.id}>
                   {report.title} ·{" "}
-                  <a
-                    href={`/api/reports?${query}&reportId=${encodeURIComponent(report.id)}&format=pdf`}
-                  >
-                    Download PDF
-                  </a>
+                  {report.evidenceFormat === "saved-evidence-v2" ? (
+                    <a
+                      href={`/api/reports?${query}&reportId=${encodeURIComponent(report.id)}&format=pdf`}
+                    >
+                      Download PDF
+                    </a>
+                  ) : (
+                    <span>
+                      Original download unavailable pending legacy review.
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>

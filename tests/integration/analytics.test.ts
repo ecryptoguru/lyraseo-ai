@@ -686,3 +686,50 @@ it("keeps the agency-wide catalog manager-only for viewers and editors granted o
     ).rejects.toThrow("FORBIDDEN");
   }
 });
+it("keeps a cached terminal measurement from its import time when its administrative start is older than 13 months", async () => {
+  const { p } = provider();
+  await connect(p);
+  const result = await importGa4LandingPages(db, actor, scope, window, p, box);
+  const row = await admin.analyticsImport.findUniqueOrThrow({
+    where: { id: result.id },
+  });
+  const { resultExpiresAt: _generated, ...original } = row;
+  await admin.analyticsImport.delete({ where: { id: result.id } });
+  await admin.analyticsImport.create({
+    data: {
+      ...original,
+      rows: original.rows!,
+      diagnostics: original.diagnostics!,
+      startedAt: new Date(0),
+    },
+  });
+  const blocked = {
+    ...p,
+    properties: vi.fn(() => {
+      throw Error("Unexpected provider call");
+    }),
+    report: vi.fn(() => {
+      throw Error("Unexpected provider call");
+    }),
+  };
+  const cached = await importGa4LandingPages(
+    db,
+    actor,
+    scope,
+    window,
+    blocked,
+    box,
+  );
+  expect(cached).toMatchObject({
+    id: row.id,
+    importedAt: row.importedAt,
+    resultExpiresAt: row.resultExpiresAt,
+  });
+  expect(blocked.properties).not.toHaveBeenCalled();
+  expect(blocked.report).not.toHaveBeenCalled();
+  expect(
+    (await readGa4LandingPages(db, actor, scope)).snapshots.some(
+      (x) => x.id === row.id,
+    ),
+  ).toBe(true);
+});

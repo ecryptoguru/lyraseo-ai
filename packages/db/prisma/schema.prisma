@@ -16,6 +16,7 @@ model ProductUser {
   suspended Boolean @default(false)
   securityVersion Int @default(0)
   auditRuns AuditRun[]
+  revisionPins ContentRevisionPin[]
   quotes OperationQuote[]
   operations Operation[]
   createdAt DateTime @default(now())
@@ -204,6 +205,8 @@ model OperationQuote {
 }
 
 model AuditRun {
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
  id String @id @default(cuid())
  workspaceId String
  siteId String
@@ -241,6 +244,8 @@ model AuditPage {
  provenance Json
  createdAt DateTime @default(now())
  audit AuditRun @relation(fields:[workspaceId,auditId],references:[workspaceId,id],onDelete:Restrict)
+ retention AuditPageRetention?
+ @@unique([workspaceId,auditId,id])
  @@unique([auditId,requestedUrl])
 }
 model IssueAction {
@@ -309,6 +314,8 @@ model GoogleConnection {
  site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
 }
 model SearchSnapshot {
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
  id String @id @default(cuid())
  workspaceId String
  siteId String
@@ -330,6 +337,7 @@ model ContentDraft {
  siteId String
  kind String
  revision Int @default(1)
+ evidenceFormat String?
  snapshot Json
  createdAt DateTime @default(now())
  @@unique([workspaceId,siteId,id])
@@ -343,6 +351,8 @@ model ContentRevision {
  content Json
  userId String
  createdAt DateTime @default(now())
+ pin ContentRevisionPin?
+ @@unique([workspaceId,draftId,revision])
  @@unique([draftId,revision])
 }
 model EvidenceReport {
@@ -350,6 +360,7 @@ model EvidenceReport {
  workspaceId String
  siteId String
  title String
+ evidenceFormat String?
  snapshot Json
  pdf Bytes
  csv String
@@ -371,6 +382,8 @@ model VisibilityPanel {
  @@unique([workspaceId,siteId,version])
 }
 model VisibilityRun {
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
  id String @id @default(cuid())
  workspaceId String
  siteId String
@@ -470,6 +483,8 @@ model AnalyticsConnection {
  @@unique([workspaceId,siteId])
 }
 model AnalyticsImport {
+ resultExpiresAt DateTime? @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
  id String @id
  workspaceId String
  siteId String
@@ -494,6 +509,8 @@ model AnalyticsImport {
 }
 
 model SearchImport {
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
  id String @id
  workspaceId String
  siteId String
@@ -575,4 +592,26 @@ model InternalRequest {
   result Json?
   @@id([servicePrincipalId,requestId])
   @@index([expiresAt,requestId],map:"request_cleanup")
+}
+
+model AuditPageRetention {
+ pageId String @id
+ workspaceId String
+ auditId String
+ capturedAt DateTime?
+ rawExpiresAt DateTime?
+ clockStatus String
+ page AuditPage @relation(fields:[workspaceId,auditId,pageId],references:[workspaceId,auditId,id],onDelete:Cascade)
+ @@unique([workspaceId,auditId,pageId])
+ @@index([workspaceId,auditId,rawExpiresAt])
+}
+model ContentRevisionPin {
+ workspaceId String
+ draftId String
+ revision Int
+ pinnedAt DateTime @default(now())
+ pinnedBy String
+ pinner ProductUser @relation(fields:[pinnedBy], references:[id], onDelete:NoAction, onUpdate:NoAction)
+ entry ContentRevision @relation(fields:[workspaceId,draftId,revision],references:[workspaceId,draftId,revision],onDelete:Cascade)
+ @@id([workspaceId,draftId,revision])
 }

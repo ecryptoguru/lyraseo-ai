@@ -12,7 +12,13 @@ type Draft = {
   id: string;
   revision: number;
   kind: string;
-  history: Array<{ revision: number; content: DraftBody }>;
+  history: Array<{
+    revision: number;
+    content: DraftBody;
+    pin?: { pinnedAt: string } | null;
+  }>;
+  nextHistoryBefore?: number | null;
+  sourceAvailability?: Array<{ sourceId: string; status: string }>;
   snapshot: {
     internalLinks: Array<{
       sourceUrl?: string;
@@ -22,7 +28,29 @@ type Draft = {
     }>;
   };
 };
-type Report = { id: string; title: string; createdAt: string };
+type Report = {
+  id: string;
+  title: string;
+  createdAt: string;
+  evidenceFormat?: string | null;
+};
+type ReportPreview = Report & {
+  sourceAvailability: Array<{ sourceId: string; status: string }>;
+  snapshot: {
+    comparisonUnavailable?: boolean;
+    historicalComparisonCounts?: Record<string, number>;
+    comparison?: { counts: Record<string, number> };
+    sources: Array<{
+      sourceId: string;
+      data: {
+        createdAt?: string;
+        importedAt?: string;
+        metrics?: { clicks?: number; impressions?: number };
+        evaluation?: { score: number | null; coverage: number | null };
+      };
+    }>;
+  };
+};
 export function ContentWorkspace({
   workspaceId,
   siteId,
@@ -34,10 +62,13 @@ export function ContentWorkspace({
   siteId: string;
   editable: boolean;
 }) {
+  const [preview, setPreview] = useState<ReportPreview | null>(null);
   const clientReady = useClientReady();
   const [drafts, setDrafts] = useState<Draft[]>([]),
     [reports, setReports] = useState<Report[]>([]),
     [sources, setSources] = useState<Source[]>([]);
+  const [history, setHistory] = useState<Draft["history"]>([]),
+    [historyBefore, setHistoryBefore] = useState<number | null>(null);
   const [selected, setSelected] = useState<Draft | null>(null),
     [chosen, setChosen] = useState<string[]>([]),
     [notes, setNotes] = useState<Record<string, string>>({});
@@ -146,6 +177,8 @@ export function ContentWorkspace({
     const content = draft.history[0]?.content;
     if (!content) return;
     setSelected(draft);
+    setHistory(draft.history);
+    setHistoryBefore(draft.nextHistoryBefore ?? null);
     setTitle(content.title);
     setBody(content.body);
     setAssumptions(content.assumptions.join("\n"));
@@ -410,18 +443,84 @@ export function ContentWorkspace({
                 {selected.history[0]?.content.body}
               </pre>
             )}
+            {selected.sourceAvailability?.map((source) => (
+              <p key={source.sourceId} className="audit-url">
+                {source.sourceId} · source {source.status}
+              </p>
+            ))}
+            {selected.history[0]?.content.citations.map((c, i) => (
+              <p key={i} className="audit-url">
+                Saved citation · {c.note}
+              </p>
+            ))}
             <details>
               <summary>Saved revision history</summary>
+              <p>
+                The current revision and pinned revisions stay available. Other
+                revisions are available for 90 days.
+              </p>
               <ul>
-                {selected.history.map((revision) => (
+                {history.map((revision) => (
                   <li key={revision.revision}>
                     <strong>
                       Revision {revision.revision} · {revision.content.title}
                     </strong>
                     <pre className="audit-url">{revision.content.body}</pre>
+                    {revision.pin && <span>Pinned revision</span>}
+                    {editable && collectionEnabled && (
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        disabled={busy}
+                        onClick={() =>
+                          void perform(async () => {
+                            const updated = await request("/api/content", {
+                              action: "pin",
+                              draftId: selected.id,
+                              revision: revision.revision,
+                              pinned: !revision.pin,
+                            });
+                            // Pinning changes retention only; preserve the editing base, including its citations.
+                            setHistory((current) =>
+                              current.flatMap((r) =>
+                                r.revision !== revision.revision
+                                  ? [r]
+                                  : updated.available === false
+                                    ? []
+                                    : [{ ...r, pin: updated.pin }],
+                              ),
+                            );
+                            setMessage(
+                              `Revision ${revision.revision} ${revision.pin ? "unpinned" : "pinned"}.`,
+                            );
+                          })
+                        }
+                      >
+                        {revision.pin ? "Unpin" : "Pin"} revision{" "}
+                        {revision.revision}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
+              {historyBefore !== null && (
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={busy}
+                  onClick={() =>
+                    void perform(async () => {
+                      const [older] = await request(
+                        `/api/content?${query}&draftId=${encodeURIComponent(selected.id)}&beforeRevision=${historyBefore}`,
+                      );
+                      setHistory((current) => [...current, ...older.history]);
+                      setHistoryBefore(older.nextHistoryBefore ?? null);
+                    })
+                  }
+                >
+                  Load older revisions
+                </button>
+              )}
             </details>
             <details>
               <summary>Observed internal-link evidence</summary>
@@ -614,20 +713,96 @@ export function ContentWorkspace({
             <li key={report.id}>
               <h3>{report.title}</h3>
               <p>{new Date(report.createdAt).toLocaleString()}</p>
-              <div className="pilot-tabs">
-                <a
-                  className="button button-secondary"
-                  href={`/api/reports?${query}&reportId=${report.id}&format=pdf`}
-                >
-                  Download PDF
-                </a>
-                <a
-                  className="button button-secondary"
-                  href={`/api/reports?${query}&reportId=${report.id}&format=csv`}
-                >
-                  Download CSV
-                </a>
-              </div>
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() =>
+                  void perform(
+                    async () =>
+                      setPreview(
+                        await request(
+                          `/api/reports?${query}&reportId=${encodeURIComponent(report.id)}&format=preview`,
+                        ),
+                      ),
+                    true,
+                  )
+                }
+              >
+                Preview {report.title}
+              </button>
+              {preview?.id === report.id && (
+                <section aria-label="Saved report preview">
+                  {preview.snapshot.sources.map((source) => (
+                    <p key={source.sourceId} className="audit-url">
+                      {source.sourceId} · source{" "}
+                      {preview.sourceAvailability.find(
+                        (s) => s.sourceId === source.sourceId,
+                      )?.status ?? "unavailable"}{" "}
+                      ·{" "}
+                      {source.data.createdAt ??
+                        source.data.importedAt ??
+                        "Capture date unavailable"}
+                      {source.data.metrics && (
+                        <>
+                          {" "}
+                          · Saved clicks{" "}
+                          {source.data.metrics.clicks ?? "unavailable"},
+                          impressions{" "}
+                          {source.data.metrics.impressions ?? "unavailable"}
+                        </>
+                      )}
+                      {source.data.evaluation && (
+                        <>
+                          {" "}
+                          · Saved score{" "}
+                          {source.data.evaluation.score ?? "unavailable"},
+                          coverage{" "}
+                          {source.data.evaluation.coverage ?? "unavailable"}
+                        </>
+                      )}
+                    </p>
+                  ))}
+                  {preview.snapshot.comparison && (
+                    <p>
+                      {Object.entries(preview.snapshot.comparison.counts)
+                        .map(([key, count]) => key + " " + count)
+                        .join(" · ")}
+                    </p>
+                  )}
+                  {preview.snapshot.comparisonUnavailable && (
+                    <p>
+                      Historical classifications unavailable.{" "}
+                      {Object.entries(
+                        preview.snapshot.historicalComparisonCounts ?? {},
+                      )
+                        .map(([key, count]) => key + " " + count)
+                        .join(" · ")}
+                    </p>
+                  )}
+                </section>
+              )}
+              {report.evidenceFormat === "saved-evidence-v2" ? (
+                <>
+                  {" "}
+                  <div className="pilot-tabs">
+                    <a
+                      className="button button-secondary"
+                      href={`/api/reports?${query}&reportId=${report.id}&format=pdf`}
+                    >
+                      Download PDF
+                    </a>
+                    <a
+                      className="button button-secondary"
+                      href={`/api/reports?${query}&reportId=${report.id}&format=csv`}
+                    >
+                      Download CSV
+                    </a>
+                  </div>
+                </>
+              ) : (
+                <p>Original downloads unavailable pending legacy review.</p>
+              )}
             </li>
           ))}
         </ul>

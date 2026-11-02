@@ -44,6 +44,8 @@ const tables = [
   "VisibilityRun",
   "ContentDraft",
   "ContentRevision",
+  "ContentRevisionPin",
+  "AuditPageRetention",
   "EvidenceReport",
   "AuthThrottle",
   "ProductSession",
@@ -175,6 +177,8 @@ export async function checkDatabase(url, identity) {
       "VisibilityRun",
       "ContentDraft",
       "ContentRevision",
+      "ContentRevisionPin",
+      "AuditPageRetention",
       "EvidenceReport",
     ];
     if (

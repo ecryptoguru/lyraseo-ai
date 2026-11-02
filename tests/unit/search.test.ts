@@ -142,3 +142,27 @@ it("correlates demand with exact latest-manifest failures without turning missin
     evidence: { auditId: "old", ruleIds: ["title"], snapshotId: "current" },
   });
 });
+it.each([2049, 8192])(
+  "preserves the exact provider-admitted %i-unit matching identity",
+  (length) => {
+    const prefix = "https://example.com/",
+      key = prefix + "x".repeat(length - prefix.length);
+    const result = buildSearchOpportunities([
+      snapshot(
+        [
+          {
+            keys: [key],
+            position: 4,
+            impressions: 200,
+            clicks: 1,
+            ctr: 0.005,
+            opaque: "private",
+          },
+        ],
+        { shape: "page" },
+      ),
+    ]);
+    expect(result.some((r) => r.page === key)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private");
+  },
+);

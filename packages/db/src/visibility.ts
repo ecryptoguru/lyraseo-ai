@@ -1,3 +1,6 @@
+import { withEvidenceRead } from "./context";
+import { obj } from "./saved-evidence";
+import { fixedDays, retention } from "./retention";
 import { createHash } from "node:crypto";
 import {
   EXTRACTION_VERSION,
@@ -105,6 +108,7 @@ export type ProviderEvidence = {
   synthetic: boolean;
   rawAnswerRights: boolean;
   observedAt: string;
+  rawRightsUntil?: string;
   slots: {
     promptId: string;
     state: Answer["state"];
@@ -115,6 +119,72 @@ export type ProviderEvidence = {
     failureReason?: string;
   }[];
 };
+function provenanceSummary(value: unknown) {
+  const p = obj(value);
+  const text = (v: unknown, max = 128) =>
+    typeof v === "string" && v.length <= max ? v : undefined;
+  const locale = (v: unknown) => ({
+    language: text(obj(v).language, 32) ?? null,
+    market: text(obj(v).market, 32) ?? null,
+  });
+  return {
+    profile: text(p.profile),
+    provider: text(p.provider),
+    model: text(p.model),
+    modelVersion: text(p.modelVersion),
+    retrievalMode: text(p.retrievalMode),
+    observedAt: text(p.observedAt, 40),
+    synthetic: typeof p.synthetic === "boolean" ? p.synthetic : undefined,
+    rawAnswerRights: p.rawAnswerRights === true,
+    rawRightsUntil: text(p.rawRightsUntil, 40),
+    requestedLocale: locale(p.requestedLocale),
+    confirmedLocale: locale(p.confirmedLocale),
+    extractionVersion: text(p.extractionVersion),
+  };
+}
+function observedSlots(value: unknown, brands: Brand[]) {
+  if (!Array.isArray(value)) return [];
+  const flag = (v: unknown) => (typeof v === "boolean" ? v : null);
+  return value.map((v) => {
+    const s = obj(v),
+      extraction = obj(s.extraction);
+    return {
+      promptId: typeof s.promptId === "string" ? s.promptId : "",
+      state: s.state as Answer["state"],
+      providerTaskId:
+        typeof s.providerTaskId === "string" && s.providerTaskId.length <= 256
+          ? s.providerTaskId
+          : undefined,
+      completedAt:
+        typeof s.completedAt === "string" && s.completedAt.length <= 40
+          ? s.completedAt
+          : undefined,
+      failureReason:
+        typeof s.failureReason === "string" && s.failureReason.length <= 128
+          ? s.failureReason
+          : undefined,
+      extraction: Object.fromEntries(
+        brands
+          .filter((b) => extraction[b.id] !== undefined)
+          .map((b) => {
+            const e = obj(extraction[b.id]);
+            return [
+              b.id,
+              {
+                mention: flag(e.mention),
+                citation: flag(e.citation),
+                recommendation: flag(e.recommendation),
+                reason:
+                  typeof e.reason === "string" && e.reason.length <= 128
+                    ? e.reason
+                    : null,
+              },
+            ];
+          }),
+      ),
+    };
+  });
+}
 export async function recordVisibilityEvidence(
   db: PrismaClient,
   actor: Actor,
@@ -139,8 +209,10 @@ export async function recordVisibilityEvidence(
       !evidence.retrievalMode ||
       typeof evidence.synthetic !== "boolean" ||
       evidence.rawAnswerRights !== true ||
-      Date.parse(evidence.observedAt) > Date.now() + 30000 ||
+      Date.parse(evidence.observedAt) > Date.now() ||
       !Number.isFinite(Date.parse(evidence.observedAt)) ||
+      (evidence.rawRightsUntil !== undefined &&
+        !Number.isFinite(Date.parse(evidence.rawRightsUntil))) ||
       evidence.requestedLocale.language !== "en" ||
       evidence.requestedLocale.market !== "IN" ||
       evidence.slots.length !== prompts.length ||
@@ -189,7 +261,7 @@ export async function recordVisibilityEvidence(
           : {},
       };
     });
-    const { slots: raw, ...provenance } = evidence;
+    const raw = evidence.slots;
     const cohort = createHash("sha256")
       .update(
         JSON.stringify({
@@ -213,13 +285,20 @@ export async function recordVisibilityEvidence(
         profile: evidence.profile,
         cohort,
         provenance: json({
-          ...provenance,
+          ...provenanceSummary(evidence),
           extractionVersion: EXTRACTION_VERSION,
         }),
         slots: json(slots),
         rawAnswers: json(raw),
         createdAt: new Date(evidence.observedAt),
-        rawExpiresAt: new Date(Date.parse(evidence.observedAt) + 90 * 86400000),
+        rawExpiresAt: new Date(
+          Math.min(
+            +fixedDays(new Date(evidence.observedAt), retention.answerDays),
+            evidence.rawRightsUntil === undefined
+              ? Infinity
+              : Date.parse(evidence.rawRightsUntil),
+          ),
+        ),
       },
     });
   });
@@ -232,10 +311,7 @@ export async function readVisibility(
   now = new Date(),
 ) {
   s = { workspaceId: s.workspaceId, siteId: s.siteId };
-  return withActor(db, actor, s.workspaceId, async (tx) => {
-    await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "read");
-    const cutoff = new Date(now);
-    cutoff.setUTCMonth(cutoff.getUTCMonth() - 13);
+  return withEvidenceRead(db, actor, s, "read", undefined, async (tx) => {
     const panels = await tx.visibilityPanel.findMany({
       where: s,
       orderBy: { version: "desc" },
@@ -245,7 +321,7 @@ export async function readVisibility(
       where: {
         ...s,
         ...(runId ? { id: runId } : {}),
-        createdAt: { gte: cutoff },
+        resultExpiresAt: { gt: now },
       },
       orderBy: { createdAt: "desc" },
       take: runId ? 1 : 20,
@@ -260,6 +336,12 @@ export async function readVisibility(
         rawExpiresAt: true,
       },
     });
+    if (runId && !runs.length)
+      throw new Error(
+        (await tx.visibilityRun.count({ where: { ...s, id: runId } }))
+          ? "SOURCE_EXPIRED"
+          : "NOT_FOUND",
+      );
     const results = [];
     for (const run of runs) {
       const panel = await tx.visibilityPanel.findFirst({
@@ -269,15 +351,23 @@ export async function readVisibility(
       const raw =
         runId && run.rawExpiresAt > now
           ? await tx.visibilityRun.findFirst({
-              where: { ...s, id: run.id },
+              where: {
+                ...s,
+                id: run.id,
+                rawExpiresAt: { gt: now },
+                resultExpiresAt: { gt: now },
+              },
               select: { rawAnswers: true },
             })
           : null;
+      const slots = observedSlots(run.slots, brands);
       results.push({
         ...run,
+        slots,
+        provenance: provenanceSummary(run.provenance),
         summary: brands.length
           ? summarizeAnswers(
-              run.slots as unknown as Answer[],
+              slots,
               brands.map((b) => b.id),
             )
           : null,

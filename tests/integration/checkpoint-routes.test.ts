@@ -1,5 +1,8 @@
 import { afterAll, beforeEach, expect, it, vi } from "vitest";
 import { createDatabase } from "../../packages/db/src";
+import { authorizeSiteIn, withActor } from "../../packages/db/src/context";
+import { replayGoogleRobots } from "../../packages/visibility/src/robots-source";
+import type { RobotsPolicyObservation } from "../../packages/visibility/src/types";
 import {
   actor,
   adminUrl,
@@ -403,10 +406,58 @@ it("admits reviewed declarations through actual handlers, freezes evidence and e
     expect(savedPage.provenance.robotsPolicy).toMatchObject({
       sha256: policyHash,
       state: "available",
+      groupAgent: "*",
+      ruleCount: 1,
+      requested: { url: home, allowed: true },
+    });
+    expect(savedPage.provenance.robotsPolicy).not.toHaveProperty("googleGroup");
+    expect(body).not.toContain("googleGroup");
+    const immutable = await withActor(
+      db,
+      actor,
+      scope.workspaceId,
+      async (tx) => {
+        await authorizeSiteIn(
+          tx,
+          actor,
+          scope.workspaceId,
+          scope.siteId,
+          "read",
+        );
+        return tx.auditPage.findFirstOrThrow({
+          where: {
+            id: savedPage.id,
+            auditId: before.id,
+            workspaceId: scope.workspaceId,
+            audit: { siteId: scope.siteId },
+          },
+          select: { provenance: true, audit: { select: { evaluation: true } } },
+        });
+      },
+    );
+    const policy = (immutable.provenance as { robotsPolicy: unknown })
+      .robotsPolicy as RobotsPolicyObservation;
+    expect(policy).toMatchObject({
+      sha256: policyHash,
+      state: "available",
       googleGroup: {
         agent: "*",
         rules: [{ directive: "disallow", pattern: "/blocked" }],
       },
+    });
+    expect(replayGoogleRobots(policy, home)).toBe(true);
+    expect(replayGoogleRobots(policy, home + "blocked")).toBe(false);
+    const result = {
+      ruleId: "D04",
+      scopeKey: home,
+      ruleVersion: "2",
+      outcome: "PASS",
+      reasonCode: "GOOGLEBOT_ALLOWED",
+    };
+    expect(finding).toMatchObject(result);
+    expect(immutable.audit.evaluation).toMatchObject({
+      methodologyVersion: "readiness-v2",
+      rules: expect.arrayContaining([expect.objectContaining(result)]),
     });
     expect(savedPage.provenance.robotsPolicy.sha256).not.toBe(
       savedPage.provenance.sha256,

@@ -1,3 +1,11 @@
+import { legacyProjection } from "./legacy-evidence";
+import { withEvidenceRead } from "./context";
+import { obj, projectSnapshot, SAVED_FORMAT } from "./saved-evidence";
+export { projectSnapshot } from "./saved-evidence";
+import { pageReceipts } from "./page-receipts";
+import { fixedDays, readable, retention } from "./retention";
+import { fingerprint } from "./audit-evidence";
+import { Prisma as Sql } from "../generated/client";
 import { siteScope } from "./sites";
 import { boundedRawAnchorText } from "@lyraseo/visibility/acquisition";
 /** Persisted manual editorial work. Source data is evidence, never executable instructions. */
@@ -6,7 +14,6 @@ import {
   compareAudits,
   type AuditComparison,
   type AuditEvaluation,
-  type PageEvidence,
 } from "@lyraseo/visibility";
 import { withActor, authorizeSiteIn, type Actor, type Tx } from "./context";
 export type ContentScope = { workspaceId: string; siteId: string };
@@ -44,6 +51,9 @@ export type FrozenAuditComparison = {
   counts: Record<Exclude<keyof AuditComparison, "scoreDelta">, number>;
 };
 export type EvidenceSnapshot = {
+  format?: string;
+  comparisonUnavailable?: boolean;
+  historicalComparisonCounts?: Partial<FrozenAuditComparison["counts"]>;
   comparison?: FrozenAuditComparison;
   capturedAt: string;
   scope: ContentScope;
@@ -54,12 +64,15 @@ export type EvidenceSnapshot = {
     url: string;
     sourceUrl: string;
     anchorText: string;
+    sourceId?: string;
+    sourcePageId?: string;
+    rawExpiresAt?: string;
     basis: string;
   }[];
 };
 const json = (v: unknown) =>
   JSON.parse(JSON.stringify(v)) as Prisma.InputJsonValue;
-function validate(content: DraftContent, snapshot: EvidenceSnapshot) {
+function validate(content: DraftContent, sourceIds: ReadonlySet<string>) {
   if (
     !content.title?.trim() ||
     content.title.length > 200 ||
@@ -72,26 +85,13 @@ function validate(content: DraftContent, snapshot: EvidenceSnapshot) {
     content.citations.length > 100 ||
     content.citations.some(
       (v) =>
-        !snapshot.sources.some((s) => s.sourceId === v.sourceId) ||
+        !sourceIds.has(v.sourceId) ||
         typeof v.note !== "string" ||
         !v.note.trim() ||
         v.note.length > 1000,
     )
   )
     throw new Error("INVALID_CONTENT");
-}
-// Keep the immutable references resolvable in a saved report without duplicating the response body.
-function compactReceipt(value: unknown) {
-  const p = value as Record<string, unknown>;
-  return {
-    acquiredAt: p.acquiredAt,
-    sha256: p.sha256,
-    finalUrl: p.finalUrl,
-    status: p.status,
-    redirects: p.redirects,
-    error: p.error,
-    robotsPolicy: p.robotsPolicy,
-  };
 }
 async function capture(
   tx: Tx,
@@ -117,6 +117,7 @@ async function capture(
         selection.searchSnapshotIds.length)
   )
     throw new Error("INVALID_COMPARISON");
+  const now = new Date();
   const comparisons = new Map<
     string,
     { reference: FrozenAuditReference; evaluation: AuditEvaluation }
@@ -128,12 +129,8 @@ async function capture(
       where: { ...siteScope(scope), id, status: "COMPLETED" },
     });
     if (!run || !run.evaluation) throw new Error("INVALID_SOURCE");
-    if (Date.now() - run.createdAt.getTime() >= 30 * 86400000)
-      throw new Error("SOURCE_EXPIRED");
-    const pages = await tx.auditPage.findMany({
-      where: { workspaceId: scope.workspaceId, auditId: id },
-      orderBy: { requestedUrl: "asc" },
-    });
+    if (!readable(now, run.resultExpiresAt)) throw new Error("SOURCE_EXPIRED");
+    const pages = await pageReceipts(tx, { ...scope, auditId: id }, now);
     if (pair && [pair.beforeAuditId, pair.afterAuditId].includes(run.id)) {
       const evaluation = {
         ...(run.evaluation as unknown as AuditEvaluation),
@@ -154,6 +151,40 @@ async function capture(
         },
       });
     }
+    // The extractor stores canonical absolute hrefs; accept only links between two acquired pages.
+    const anchors = await tx.$queryRaw<
+      Array<{
+        pageId: string;
+        rawExpiresAt: Date;
+        url: string;
+        href: string;
+        name: string;
+        total: number;
+      }>
+    >`
+      SELECT p.id AS "pageId",t."rawExpiresAt",p."requestedUrl" AS url,d."requestedUrl" AS href,left(link->>'name',512) AS name,(count(*) OVER())::integer AS total
+      FROM "AuditPage" p JOIN "AuditPageRetention" t ON t."pageId"=p.id AND t."auditId"=p."auditId" AND t."workspaceId"=p."workspaceId"
+      CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(p.evidence->'linkNames')='array'
+        THEN p.evidence->'linkNames' ELSE '[]'::jsonb END) WITH ORDINALITY a(link,ord)
+      JOIN "AuditPage" d ON d."auditId"=p."auditId" AND d."workspaceId"=p."workspaceId"
+        AND d."requestedUrl"=split_part(link->>'href','#',1) AND d.id<>p.id AND d.evidence->'acquired'='true'::jsonb
+      WHERE p."workspaceId"=${scope.workspaceId} AND p."auditId"=${id} AND t."rawExpiresAt">${now}
+        AND p.evidence->'acquired'='true'::jsonb AND jsonb_typeof(link->'name')='string' AND btrim(link->>'name')<>''
+      ORDER BY p."requestedUrl",ord LIMIT 100`;
+    for (const a of anchors) {
+      links.push({
+        url: a.href,
+        sourceUrl: a.url,
+        sourceId: "audit:" + id,
+        sourcePageId: a.pageId,
+        rawExpiresAt: a.rawExpiresAt.toISOString(),
+        anchorText: boundedRawAnchorText(a.name),
+        basis:
+          "audit:" +
+          id +
+          "; observed raw HTML anchor between acquired pages; rendered DOM unobserved",
+      });
+    }
     sources.push({
       sourceId: `audit:${run.id}`,
       kind: "raw-http-audit",
@@ -164,75 +195,62 @@ async function capture(
         profile: run.profile,
         declarations: run.declarations,
         evaluation: run.evaluation,
+        resultExpiresAt: run.resultExpiresAt,
+        manifest: run.manifest,
+        omittedLinks: (anchors[0]?.total ?? 0) - anchors.length,
         pages: pages.map((p) => ({
           id: p.id,
           url: p.requestedUrl,
-          evidence: p.evidence,
           channel: "raw-http",
-          ...(run.methodologyVersion === "readiness-v2"
-            ? { receipt: compactReceipt(p.provenance) }
-            : {}),
+          receipt: p.provenance,
         })),
       },
     });
-    const acquired = new Set(
-      pages
-        .filter((p) => (p.evidence as unknown as PageEvidence).acquired)
-        .map((p) => p.requestedUrl),
-    );
-    for (const p of pages) {
-      const evidence = p.evidence as unknown as PageEvidence;
-      if (!evidence.acquired) continue;
-      for (const anchor of evidence.linkNames ?? []) {
-        if (links.length >= 100) break;
-        try {
-          const target = new URL(anchor.href, p.requestedUrl);
-          target.hash = "";
-          if (
-            !acquired.has(target.href) ||
-            target.href === p.requestedUrl ||
-            !anchor.name.trim()
-          )
-            continue;
-          links.push({
-            url: target.href,
-            sourceUrl: p.requestedUrl,
-            anchorText: boundedRawAnchorText(anchor.name),
-            basis: `audit:${id}; observed raw HTML anchor between acquired pages; rendered DOM unobserved`,
-          });
-        } catch {
-          /* Invalid source links are not candidates. */
-        }
-      }
-    }
   }
   for (const id of new Set(selection.searchSnapshotIds)) {
     const snapshot = await tx.searchSnapshot.findFirst({
       where: { ...siteScope(scope), id },
+      select: {
+        id: true,
+        property: true,
+        startDate: true,
+        endDate: true,
+        status: true,
+        shape: true,
+        importedAt: true,
+        resultExpiresAt: true,
+      },
     });
     if (!snapshot) throw new Error("INVALID_SOURCE");
-    if (Date.now() - snapshot.importedAt.getTime() >= 30 * 86400000)
+    if (!readable(now, snapshot.resultExpiresAt))
       throw new Error("SOURCE_EXPIRED");
-    const rows = snapshot.rows as unknown[];
+    // Each group refers to exactly one provider shape and window. Unknown/empty values remain null.
+    const [metrics] = await tx.$queryRaw<
+      Array<{
+        importedRows: number;
+        clicks: number | null;
+        impressions: number | null;
+      }>
+    >`
+      SELECT count(*)::integer AS "importedRows",
+        CASE WHEN count(*)=count(*) FILTER(WHERE jsonb_typeof(r->'clicks')='number') THEN sum((r->>'clicks')::double precision) END AS clicks,
+        CASE WHEN count(*)=count(*) FILTER(WHERE jsonb_typeof(r->'impressions')='number') THEN sum((r->>'impressions')::double precision) END AS impressions
+      FROM "SearchSnapshot" s CROSS JOIN LATERAL jsonb_array_elements(s.rows) r
+      WHERE s."workspaceId"=${scope.workspaceId} AND s."siteId"=${scope.siteId} AND s.id=${id} AND s."resultExpiresAt">${now}`;
     sources.push({
-      sourceId: `gsc:${id}`,
+      sourceId: "gsc:" + id,
       kind: "google-search-console",
       data: {
         ...snapshot,
-        rows: rows.slice(0, 100),
-        reportCoverage: {
-          importedRows: rows.length,
-          includedRows: Math.min(rows.length, 100),
-          selection:
-            "first 100 saved rows; not the complete property or complete import",
-          importStatus: snapshot.status,
-        },
+        metrics: { clicks: metrics?.clicks, impressions: metrics?.impressions },
+        reportCoverage: { importedRows: metrics?.importedRows },
       },
     });
   }
   const context = await tx.siteContextRevision.findFirst({
     where: siteScope(scope),
     orderBy: { revision: "desc" },
+    select: { id: true, revision: true },
   });
   let comparison: FrozenAuditComparison | undefined;
   if (pair) {
@@ -276,9 +294,7 @@ async function capture(
     sources,
     internalLinks: links,
   };
-  if (Buffer.byteLength(JSON.stringify(result)) > 1000000)
-    throw new Error("INVALID_SOURCE_SIZE");
-  return json(result) as unknown as EvidenceSnapshot;
+  return projectSnapshot(result);
 }
 export async function captureEditorialEvidence(
   db: PrismaClient,
@@ -320,10 +336,17 @@ export async function createContentDraft(
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     if (!["brief", "draft"].includes(input.kind))
       throw new Error("INVALID_CONTENT");
+    await lockSite(tx, scope);
     const snapshot = await capture(tx, scope, input);
-    validate(input, snapshot);
+    await verifySources(tx, scope, snapshot, new Date());
+    validate(input, new Set(snapshot.sources.map((s) => s.sourceId)));
     const draft = await tx.contentDraft.create({
-      data: { ...siteScope(scope), kind: input.kind, snapshot: json(snapshot) },
+      data: {
+        ...siteScope(scope),
+        kind: input.kind,
+        evidenceFormat: SAVED_FORMAT,
+        snapshot: json(snapshot),
+      },
     });
     const revision = await tx.contentRevision.create({
       data: {
@@ -339,6 +362,7 @@ export async function createContentDraft(
         }),
       },
     });
+    await verifySources(tx, scope, snapshot, new Date());
     return { ...draft, history: [revision] };
   });
 }
@@ -352,9 +376,23 @@ export async function saveContentDraft(
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     const draft = await tx.contentDraft.findFirst({
       where: { ...siteScope(scope), id: input.draftId },
+      select: { id: true, evidenceFormat: true },
     });
     if (!draft) throw new Error("NOT_FOUND");
-    validate(input, draft.snapshot as unknown as EvidenceSnapshot);
+    // Editing authored text must not copy or require a readable historical source blob.
+    // Keep already-authored citations editable even for an undecodable legacy source.
+    const refs = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT src->>'sourceId' AS id FROM "ContentDraft" d
+      CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(d.snapshot->'sources')='array'
+        THEN d.snapshot->'sources' ELSE '[]'::jsonb END) src
+      WHERE d."workspaceId"=${scope.workspaceId} AND d."siteId"=${scope.siteId} AND d.id=${draft.id}
+        AND jsonb_typeof(src->'sourceId')='string' AND length(src->>'sourceId')<=256
+      UNION SELECT citation->>'sourceId' FROM "ContentDraft" d
+      JOIN "ContentRevision" r ON r."workspaceId"=d."workspaceId" AND r."draftId"=d.id AND r.revision=d.revision
+      CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(r.content->'citations')='array' THEN r.content->'citations' ELSE '[]'::jsonb END) citation
+      WHERE d."workspaceId"=${scope.workspaceId} AND d."siteId"=${scope.siteId} AND d.id=${draft.id}
+        AND jsonb_typeof(citation->'sourceId')='string' AND length(citation->>'sourceId')<=256`;
+    validate(input, new Set(refs.map((r) => r.id)));
     const updated = await tx.contentDraft.updateMany({
       where: {
         ...siteScope(scope),
@@ -380,29 +418,254 @@ export async function saveContentDraft(
     });
   });
 }
+async function lockSite(tx: Tx, s: ContentScope) {
+  await tx.$queryRaw`SELECT id FROM "Site" WHERE "workspaceId"=${s.workspaceId} AND id=${s.siteId} FOR SHARE`;
+}
+async function sourceAvailability(
+  tx: Tx,
+  s: ContentScope,
+  snapshot: EvidenceSnapshot,
+  now: Date,
+) {
+  return Promise.all(
+    snapshot.sources.map(async (source) => {
+      const data = obj(source.data),
+        isAudit =
+          source.kind === "raw-http-audit" || source.kind === "raw-http",
+        id = source.sourceId.slice(source.sourceId.indexOf(":") + 1);
+      const row = isAudit
+        ? await tx.auditRun.findFirst({
+            where: { ...siteScope(s), id },
+            select: { createdAt: true, resultExpiresAt: true },
+          })
+        : await tx.searchSnapshot.findFirst({
+            where: { ...siteScope(s), id },
+            select: { importedAt: true, resultExpiresAt: true },
+          });
+      const anchor = isAudit ? data.createdAt : data.importedAt;
+      const matches =
+        row &&
+        typeof anchor === "string" &&
+        +new Date(anchor) ===
+          +("createdAt" in row ? row.createdAt : row.importedAt);
+      let status: "current" | "expired" | "disconnected" | "unavailable" =
+        "unavailable";
+      if (matches && row)
+        status = readable(now, row.resultExpiresAt) ? "current" : "expired";
+      else if (
+        typeof data.resultExpiresAt === "string" &&
+        !readable(now, data.resultExpiresAt)
+      )
+        status = "expired";
+      else if (
+        !isAudit &&
+        !row &&
+        !(await tx.googleConnection.count({ where: siteScope(s) }))
+      )
+        status = "disconnected";
+      return { sourceId: source.sourceId, status };
+    }),
+  );
+}
+async function verifySources(
+  tx: Tx,
+  s: ContentScope,
+  snapshot: EvidenceSnapshot,
+  now: Date,
+) {
+  const states = await sourceAvailability(tx, s, snapshot, now);
+  if (!states.length || states.some((x) => x.status !== "current"))
+    throw new Error("SOURCE_EXPIRED");
+  if (!snapshot.internalLinks.length) return;
+  const pages = await tx.auditPageRetention.findMany({
+    where: {
+      workspaceId: s.workspaceId,
+      pageId: {
+        in: snapshot.internalLinks.flatMap((l) =>
+          l.sourcePageId ? [l.sourcePageId] : [],
+        ),
+      },
+      page: { audit: { siteId: s.siteId } },
+      rawExpiresAt: { gt: now },
+    },
+    select: {
+      pageId: true,
+      auditId: true,
+      rawExpiresAt: true,
+      page: { select: { requestedUrl: true } },
+    },
+  });
+  const byId = new Map(pages.map((p) => [p.pageId, p]));
+  for (const link of snapshot.internalLinks) {
+    const page = link.sourcePageId && byId.get(link.sourcePageId);
+    if (
+      !page ||
+      link.sourceId !== "audit:" + page.auditId ||
+      page.page.requestedUrl !== link.sourceUrl ||
+      page.rawExpiresAt?.toISOString() !== link.rawExpiresAt
+    )
+      throw new Error("SOURCE_EXPIRED");
+  }
+}
+export function revisionEligibility(
+  head: number,
+  now: Date,
+): Prisma.ContentRevisionWhereInput {
+  return {
+    OR: [
+      { revision: head },
+      { pin: { isNot: null } },
+      { createdAt: { gt: fixedDays(now, -retention.revisionDays) } },
+    ],
+  };
+}
+export async function setRevisionPin(
+  db: PrismaClient,
+  actor: Actor,
+  s: ContentScope,
+  draftId: string,
+  revision: number,
+  pinned: boolean,
+) {
+  return withActor(db, actor, s.workspaceId, async (tx) => {
+    if ("credential" in actor) throw new Error("FORBIDDEN");
+    await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "edit");
+    const [draft] = await tx.$queryRaw<
+      Array<{ revision: number }>
+    >`SELECT revision FROM "ContentDraft" WHERE "workspaceId"=${s.workspaceId} AND "siteId"=${s.siteId} AND id=${draftId} FOR UPDATE`;
+    if (!draft) throw new Error("NOT_FOUND");
+    const key = { workspaceId: s.workspaceId, draftId, revision };
+    if (
+      !(await tx.contentRevision.count({
+        where: { ...key, ...revisionEligibility(draft.revision, new Date()) },
+      }))
+    )
+      throw new Error("REVISION_UNAVAILABLE");
+    if (pinned)
+      await tx.contentRevisionPin.createMany({
+        data: { ...key, pinnedBy: actor.userId },
+        skipDuplicates: true,
+      });
+    else await tx.contentRevisionPin.deleteMany({ where: key });
+    const available =
+      pinned ||
+      !!(await tx.contentRevision.count({
+        where: { ...key, ...revisionEligibility(draft.revision, new Date()) },
+      }));
+    const pin = pinned
+      ? await tx.contentRevisionPin.findFirstOrThrow({
+          where: key,
+          select: { pinnedAt: true, pinnedBy: true },
+        })
+      : null;
+    return { revision, pinned, available, pin };
+  });
+}
+async function savedSnapshot(
+  tx: Tx,
+  s: ContentScope,
+  row: { id: string; evidenceFormat: string | null },
+  table: "ContentDraft" | "EvidenceReport",
+) {
+  const from =
+    table === "ContentDraft"
+      ? Sql.sql`"ContentDraft"`
+      : Sql.sql`"EvidenceReport"`;
+  const projection =
+    row.evidenceFormat === SAVED_FORMAT ? Sql.sql`snapshot` : legacyProjection;
+  // This point lookup walks bounded JSON paths. Compiling the field expressions with JIT
+  // costs far more than evaluating them once. The setting ends with this transaction.
+  if (row.evidenceFormat !== SAVED_FORMAT)
+    await tx.$executeRaw`SET LOCAL jit = off`;
+  const [record] = await tx.$queryRaw<Array<{ value: unknown }>>(Sql.sql`
+    SELECT ${projection} AS value FROM ${from} WHERE "workspaceId"=${s.workspaceId} AND "siteId"=${s.siteId} AND id=${row.id}`);
+  const projected: EvidenceSnapshot = projectSnapshot(
+    record?.value,
+    row.evidenceFormat === SAVED_FORMAT ? "saved" : "legacy-sql",
+  );
+  if (row.evidenceFormat === SAVED_FORMAT) {
+    if (
+      obj(record?.value).format !== SAVED_FORMAT ||
+      fingerprint(record?.value) !== fingerprint(projected)
+    )
+      throw new Error("INVALID_SAVED_FORMAT");
+  } else {
+    delete projected.format;
+    const old = obj(record?.value).comparison;
+    if (old && !projected.comparison) {
+      const counts = obj(obj(old).counts);
+      projected.historicalComparisonCounts = Object.fromEntries(
+        ["resolved", "new", "persistent", "improved", "worsened", "unevaluated"]
+          .filter(
+            (k) => Number.isSafeInteger(counts[k]) && Number(counts[k]) >= 0,
+          )
+          .map((k) => [k, counts[k]]),
+      );
+    }
+  }
+  return projected;
+}
 export async function readContentDrafts(
   db: PrismaClient,
   actor: Actor,
   scope: ContentScope,
   draftId?: string,
+  beforeRevision?: number,
 ) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "read");
+  return withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
     const drafts = await tx.contentDraft.findMany({
       where: { ...siteScope(scope), ...(draftId ? { id: draftId } : {}) },
+      select: {
+        id: true,
+        workspaceId: true,
+        siteId: true,
+        kind: true,
+        revision: true,
+        evidenceFormat: true,
+        createdAt: true,
+      },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
     if (draftId && !drafts.length) throw new Error("NOT_FOUND");
+    const now = new Date();
     return Promise.all(
-      drafts.map(async (draft) => ({
-        ...draft,
-        history: await tx.contentRevision.findMany({
-          where: { workspaceId: scope.workspaceId, draftId: draft.id },
+      drafts.map(async (draft) => {
+        const snapshot =
+          draftId && beforeRevision === undefined
+            ? await savedSnapshot(tx, scope, draft, "ContentDraft")
+            : undefined;
+        const history = await tx.contentRevision.findMany({
+          where: {
+            workspaceId: scope.workspaceId,
+            draftId: draft.id,
+            ...(beforeRevision !== undefined
+              ? { revision: { lt: beforeRevision } }
+              : {}),
+            ...revisionEligibility(draft.revision, now),
+          },
+          include: { pin: { select: { pinnedAt: true, pinnedBy: true } } },
           orderBy: { revision: "desc" },
-          take: draftId ? 100 : 1,
-        }),
-      })),
+          take: draftId ? 101 : 1,
+        });
+        return {
+          ...draft,
+          ...(snapshot
+            ? {
+                snapshot,
+                sourceAvailability: await sourceAvailability(
+                  tx,
+                  scope,
+                  snapshot,
+                  now,
+                ),
+              }
+            : {}),
+          history: history.slice(0, 100),
+          nextHistoryBefore:
+            history.length > 100 ? history[99]!.revision : null,
+        };
+      }),
     );
   });
 }
@@ -413,32 +676,75 @@ export async function storeEvidenceReport(
   input: {
     title: string;
     snapshot: EvidenceSnapshot;
-    pdf: Uint8Array;
-    csv: string;
+    render: (
+      title: string,
+      snapshot: EvidenceSnapshot,
+    ) => Promise<{ pdf: Uint8Array; csv: string }>;
   },
 ) {
+  const snapshot = projectSnapshot(input.snapshot);
+  if (
+    input.snapshot.format !== SAVED_FORMAT ||
+    fingerprint(input.snapshot) !== fingerprint(snapshot) ||
+    !input.title.trim() ||
+    input.title.length > 200 ||
+    snapshot.scope.workspaceId !== scope.workspaceId ||
+    snapshot.scope.siteId !== scope.siteId
+  )
+    throw new Error("INVALID_REPORT");
+  await withActor(db, actor, scope.workspaceId, async (tx) => {
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
+    await verifySources(tx, scope, snapshot, new Date());
+  });
+  const output = await input.render(input.title, snapshot);
+  if (
+    output.pdf.length > 10 * 1024 * 1024 ||
+    Buffer.byteLength(output.csv) > 10 * 1024 * 1024
+  )
+    throw new Error("INVALID_REPORT");
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
+    await lockSite(tx, scope);
+    await verifySources(tx, scope, snapshot, new Date());
+    const original = await capture(
+      tx,
+      scope,
+      {
+        auditIds: snapshot.sources
+          .filter((s) => s.kind === "raw-http-audit")
+          .map((s) => s.sourceId.slice(6)),
+        searchSnapshotIds: snapshot.sources
+          .filter((s) => s.kind === "google-search-console")
+          .map((s) => s.sourceId.slice(4)),
+      },
+      snapshot.comparison
+        ? {
+            beforeAuditId: snapshot.comparison.before.auditId,
+            afterAuditId: snapshot.comparison.after.auditId,
+          }
+        : undefined,
+    );
     if (
-      !input.title.trim() ||
-      input.title.length > 200 ||
-      input.snapshot.scope.workspaceId !== scope.workspaceId ||
-      input.snapshot.scope.siteId !== scope.siteId ||
-      input.pdf.length > 10 * 1024 * 1024 ||
-      Buffer.byteLength(input.csv) > 10 * 1024 * 1024
+      fingerprint({ ...original, capturedAt: snapshot.capturedAt }) !==
+      fingerprint(snapshot)
     )
-      throw new Error("INVALID_REPORT");
-    return tx.evidenceReport.create({
+      throw new Error("SOURCE_CHANGED");
+    await verifySources(tx, scope, snapshot, new Date());
+    const report = await tx.evidenceReport.create({
       data: {
         ...siteScope(scope),
         title: input.title,
-        snapshot: json(input.snapshot),
-        pdf: new Uint8Array(input.pdf),
-        csv: input.csv,
+        snapshot: json(snapshot),
+        evidenceFormat: SAVED_FORMAT,
+        pdf: new Uint8Array(output.pdf),
+        csv: output.csv,
       },
       select: { id: true, title: true, createdAt: true },
     });
+    await verifySources(tx, scope, snapshot, new Date());
+    return report;
   });
 }
 export async function readEvidenceReports(
@@ -446,27 +752,71 @@ export async function readEvidenceReports(
   actor: Actor,
   scope: ContentScope,
   reportId?: string,
+  format?: "pdf" | "csv",
 ) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await authorizeSiteIn(
-      tx,
-      actor,
-      scope.workspaceId,
-      scope.siteId,
-      reportId ? "export" : "read",
-    );
-    if (reportId) {
-      const report = await tx.evidenceReport.findFirst({
-        where: { ...siteScope(scope), id: reportId },
+  return withEvidenceRead(
+    db,
+    actor,
+    scope,
+    reportId ? "export" : "read",
+    undefined,
+    async (tx) => {
+      if (reportId) {
+        const row = await tx.evidenceReport.findFirst({
+          where: { ...siteScope(scope), id: reportId },
+          select: { id: true, evidenceFormat: true },
+        });
+        if (!row) throw new Error("NOT_FOUND");
+        if (row.evidenceFormat !== SAVED_FORMAT)
+          throw new Error("LEGACY_REVIEW");
+        await savedSnapshot(tx, scope, row, "EvidenceReport");
+        return tx.evidenceReport.findFirstOrThrow({
+          where: {
+            ...siteScope(scope),
+            id: reportId,
+            evidenceFormat: SAVED_FORMAT,
+          },
+          select: { id: true, pdf: format !== "csv", csv: format !== "pdf" },
+        });
+      }
+      return tx.evidenceReport.findMany({
+        where: siteScope(scope),
+        select: {
+          id: true,
+          title: true,
+          createdAt: true,
+          evidenceFormat: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: 100,
       });
-      if (!report) throw new Error("NOT_FOUND");
-      return report;
-    }
-    return tx.evidenceReport.findMany({
-      where: siteScope(scope),
-      select: { id: true, title: true, createdAt: true },
-      orderBy: { createdAt: "desc" },
-      take: 100,
+    },
+  );
+}
+export async function previewEvidenceReport(
+  db: PrismaClient,
+  actor: Actor,
+  scope: ContentScope,
+  id: string,
+) {
+  return withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
+    const row = await tx.evidenceReport.findFirst({
+      where: { ...siteScope(scope), id },
+      select: { id: true, title: true, evidenceFormat: true, createdAt: true },
     });
+    if (!row) throw new Error("NOT_FOUND");
+    const snapshot = await savedSnapshot(tx, scope, row, "EvidenceReport");
+    return {
+      ...row,
+      snapshot,
+      sourceAvailability: await sourceAvailability(
+        tx,
+        scope,
+        snapshot,
+        new Date(),
+      ),
+      downloadStatus:
+        row.evidenceFormat === SAVED_FORMAT ? "available" : "pending-review",
+    };
   });
 }
