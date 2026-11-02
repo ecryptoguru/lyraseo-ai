@@ -66,6 +66,9 @@ export type EvidenceSnapshot = {
     anchorText: string;
     sourceId?: string;
     sourcePageId?: string;
+    artifactRefId?: string;
+    artifactGeneration?: string;
+    sourceFactHash?: string;
     rawExpiresAt?: string;
     basis: string;
   }[];
@@ -93,10 +96,32 @@ function validate(content: DraftContent, sourceIds: ReadonlySet<string>) {
   )
     throw new Error("INVALID_CONTENT");
 }
+type SourceAnchor = {
+  pageId: string;
+  rawExpiresAt: Date;
+  url: string;
+  href: string;
+  name: string;
+  total: number;
+  artifactRefId?: string;
+  artifactGeneration?: string;
+  sourceFactHash?: string;
+};
+function privateAnchors(
+  tx: Tx,
+  s: ContentScope,
+  auditId: string,
+  epoch: number,
+) {
+  return tx.$queryRaw<
+    SourceAnchor[]
+  >`SELECT * FROM lyraseo_audit.private_anchors(${s.siteId},${auditId},${epoch}::integer)`;
+}
 async function capture(
   tx: Tx,
   scope: ContentScope,
   selection: SourceSelection,
+  epoch: number,
   pair?: ReportComparisonSelection,
 ): Promise<EvidenceSnapshot> {
   if (
@@ -152,16 +177,10 @@ async function capture(
       });
     }
     // The extractor stores canonical absolute hrefs; accept only links between two acquired pages.
-    const anchors = await tx.$queryRaw<
-      Array<{
-        pageId: string;
-        rawExpiresAt: Date;
-        url: string;
-        href: string;
-        name: string;
-        total: number;
-      }>
-    >`
+    const anchors =
+      run.storageFormat === "AUDIT_PRIVATE_V1"
+        ? await privateAnchors(tx, scope, id, epoch)
+        : await tx.$queryRaw<SourceAnchor[]>`
       SELECT p.id AS "pageId",t."rawExpiresAt",p."requestedUrl" AS url,d."requestedUrl" AS href,left(link->>'name',512) AS name,(count(*) OVER())::integer AS total
       FROM "AuditPage" p JOIN "AuditPageRetention" t ON t."pageId"=p.id AND t."auditId"=p."auditId" AND t."workspaceId"=p."workspaceId"
       CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(p.evidence->'linkNames')='array'
@@ -177,6 +196,9 @@ async function capture(
         sourceUrl: a.url,
         sourceId: "audit:" + id,
         sourcePageId: a.pageId,
+        artifactRefId: a.artifactRefId,
+        artifactGeneration: a.artifactGeneration,
+        sourceFactHash: a.sourceFactHash,
         rawExpiresAt: a.rawExpiresAt.toISOString(),
         anchorText: boundedRawAnchorText(a.name),
         basis:
@@ -304,7 +326,7 @@ export async function captureEditorialEvidence(
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
-    return capture(tx, scope, selection);
+    return capture(tx, scope, selection, actor.securityVersion);
   });
 }
 /** Report capture authorizes both creation and export before reading saved evidence. */
@@ -323,7 +345,13 @@ export async function captureEvidenceReport(
         selection.searchSnapshotIds.length
     )
       throw new Error("INVALID_SOURCES");
-    return capture(tx, scope, selection, selection.comparison);
+    return capture(
+      tx,
+      scope,
+      selection,
+      actor.securityVersion,
+      selection.comparison,
+    );
   });
 }
 export async function createContentDraft(
@@ -337,8 +365,8 @@ export async function createContentDraft(
     if (!["brief", "draft"].includes(input.kind))
       throw new Error("INVALID_CONTENT");
     await lockSite(tx, scope);
-    const snapshot = await capture(tx, scope, input);
-    await verifySources(tx, scope, snapshot, new Date());
+    const snapshot = await capture(tx, scope, input, actor.securityVersion);
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
     validate(input, new Set(snapshot.sources.map((s) => s.sourceId)));
     const draft = await tx.contentDraft.create({
       data: {
@@ -362,7 +390,7 @@ export async function createContentDraft(
         }),
       },
     });
-    await verifySources(tx, scope, snapshot, new Date());
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
     return { ...draft, history: [revision] };
   });
 }
@@ -472,6 +500,7 @@ async function verifySources(
   s: ContentScope,
   snapshot: EvidenceSnapshot,
   now: Date,
+  epoch: number,
 ) {
   const states = await sourceAvailability(tx, s, snapshot, now);
   if (!states.length || states.some((x) => x.status !== "current"))
@@ -492,17 +521,43 @@ async function verifySources(
       pageId: true,
       auditId: true,
       rawExpiresAt: true,
-      page: { select: { requestedUrl: true } },
+      page: {
+        select: {
+          requestedUrl: true,
+          audit: { select: { storageFormat: true } },
+        },
+      },
     },
   });
   const byId = new Map(pages.map((p) => [p.pageId, p]));
+  const artifactAudits = new Set(
+    pages
+      .filter((p) => p.page.audit.storageFormat === "AUDIT_PRIVATE_V1")
+      .map((p) => p.auditId),
+  );
+  const anchors = (
+    await Promise.all(
+      [...artifactAudits].map((id) => privateAnchors(tx, s, id, epoch)),
+    )
+  ).flat();
   for (const link of snapshot.internalLinks) {
     const page = link.sourcePageId && byId.get(link.sourcePageId);
     if (
       !page ||
       link.sourceId !== "audit:" + page.auditId ||
       page.page.requestedUrl !== link.sourceUrl ||
-      page.rawExpiresAt?.toISOString() !== link.rawExpiresAt
+      page.rawExpiresAt?.toISOString() !== link.rawExpiresAt ||
+      (page.page.audit.storageFormat === "AUDIT_PRIVATE_V1" &&
+        !anchors.some(
+          (a) =>
+            a.pageId === page.pageId &&
+            a.url === link.sourceUrl &&
+            a.href === link.url &&
+            a.artifactRefId === link.artifactRefId &&
+            a.artifactGeneration === link.artifactGeneration &&
+            a.sourceFactHash === link.sourceFactHash &&
+            a.rawExpiresAt.toISOString() === link.rawExpiresAt,
+        ))
     )
       throw new Error("SOURCE_EXPIRED");
   }
@@ -695,7 +750,7 @@ export async function storeEvidenceReport(
   await withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
-    await verifySources(tx, scope, snapshot, new Date());
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
   });
   const output = await input.render(input.title, snapshot);
   if (
@@ -707,7 +762,7 @@ export async function storeEvidenceReport(
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
     await lockSite(tx, scope);
-    await verifySources(tx, scope, snapshot, new Date());
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
     const original = await capture(
       tx,
       scope,
@@ -719,6 +774,7 @@ export async function storeEvidenceReport(
           .filter((s) => s.kind === "google-search-console")
           .map((s) => s.sourceId.slice(4)),
       },
+      actor.securityVersion,
       snapshot.comparison
         ? {
             beforeAuditId: snapshot.comparison.before.auditId,
@@ -731,7 +787,7 @@ export async function storeEvidenceReport(
       fingerprint(snapshot)
     )
       throw new Error("SOURCE_CHANGED");
-    await verifySources(tx, scope, snapshot, new Date());
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
     const report = await tx.evidenceReport.create({
       data: {
         ...siteScope(scope),
@@ -743,7 +799,7 @@ export async function storeEvidenceReport(
       },
       select: { id: true, title: true, createdAt: true },
     });
-    await verifySources(tx, scope, snapshot, new Date());
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
     return report;
   });
 }

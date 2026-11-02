@@ -64,6 +64,11 @@ const command = z.discriminatedUnion("action", [
 ]);
 function failure(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (code === "ARTIFACT_UNAVAILABLE")
+    return Response.json(
+      { error: "Private source storage is unavailable. Retry later." },
+      { status: 503, headers },
+    );
   if (code === "SOURCE_EXPIRED")
     return Response.json(
       { error: "Source unavailable or expired." },

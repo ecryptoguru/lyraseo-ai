@@ -39,6 +39,39 @@ export interface AcquisitionReceipt {
   };
 }
 
+// Ephemeral original response bodies never enter JSON, queues or legacy checkpoints.
+const observedBodies = new WeakMap<AcquisitionReceipt, Uint8Array>();
+const receiptDigests = new WeakMap<AcquisitionReceipt, string>();
+export function receiptAttestation(receipt: AcquisitionReceipt) {
+  return receiptDigests.get(receipt);
+}
+export function receiptFacts(receipt: AcquisitionReceipt) {
+  return JSON.stringify({
+    evidence: receipt.evidence,
+    provenance: { ...receipt.provenance, rawHtml: undefined },
+  });
+}
+const observedReceipts = new WeakSet<AcquisitionReceipt>();
+export function isOriginalObservation(receipt: AcquisitionReceipt) {
+  return observedReceipts.has(receipt);
+}
+async function sealReceipt(receipt: AcquisitionReceipt) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(receiptFacts(receipt)),
+  );
+  receiptDigests.set(
+    receipt,
+    Array.from(new Uint8Array(digest), (v) =>
+      v.toString(16).padStart(2, "0"),
+    ).join(""),
+  );
+  return receipt;
+}
+export function originalBody(receipt: AcquisitionReceipt) {
+  return observedBodies.get(receipt);
+}
+
 export function unavailablePage(requestedUrl: string): PageEvidence {
   return {
     requestedUrl,
@@ -478,6 +511,11 @@ export async function acquireRawPage(
       throw new Error("UNSUPPORTED_CONTENT_TYPE");
     }
     const bytes = await boundedBytes(response, HTML_LIMIT, signal);
+    observedBodies.set(receipt, bytes);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    receipt.provenance.sha256 = Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
     // Preserve every accepted UTF-8 byte when the source is re-encoded
     // for persistence. HTML parsing consumes a leading BOM as a signature.
     const source = new TextDecoder("utf-8", {
@@ -485,10 +523,6 @@ export async function acquireRawPage(
       ignoreBOM: true,
     }).decode(bytes);
     const html = source.startsWith("\uFEFF") ? source.slice(1) : source;
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    receipt.provenance.sha256 = Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, "0"),
-    ).join("");
     // JSONB cannot represent NUL. Keep the original byte digest and an explicit
     // unreadable receipt, never a silently altered copy of the hashed source.
     if (html.includes("\u0000")) throw new Error("BODY_UNREPRESENTABLE");
@@ -516,9 +550,58 @@ export async function acquireRawPage(
         : "ACQUISITION_FAILED";
   }
   outer?.throwIfAborted();
-  return receipt;
+  observedReceipts.add(receipt);
+  return sealReceipt(receipt);
 }
 
+/** Reconstruct the observed receipt for an existing reservation without a transport or a new clock. */
+export async function restoreOriginalReceipt(
+  provenance: AcquisitionReceipt["provenance"],
+  bytes: Uint8Array,
+): Promise<AcquisitionReceipt> {
+  const { requestedUrl, finalUrl, status, headers, robotsPolicy } = provenance;
+  if (
+    !finalUrl ||
+    !status ||
+    !headers["content-type"] ||
+    bytes.length > HTML_LIMIT
+  )
+    throw Error("INVALID_PAGE_EVIDENCE");
+  const raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+    bytes,
+  );
+  if (!raw || raw.includes("\0")) throw Error("INVALID_PAGE_EVIDENCE");
+  const receipt = {
+    evidence: {
+      ...extractRawHtml(
+        raw.replace(/^\uFEFF/, ""),
+        requestedUrl,
+        finalUrl,
+        new Headers(headers),
+      ),
+      status,
+      contentType: headers["content-type"],
+      requestedRobotsGoogleAllowed: replayGoogleRobots(
+        robotsPolicy,
+        requestedUrl,
+      ),
+      robotsGoogleAllowed: replayGoogleRobots(robotsPolicy, finalUrl),
+    },
+    provenance: { ...provenance, rawHtml: raw },
+  };
+  observedBodies.set(receipt, bytes);
+  return sealReceipt(receipt);
+}
+
+/** Rehydrated receipts can replay an already authenticated slot, never establish a new observation. */
+export async function restoreUnavailableReceipt(receipt: AcquisitionReceipt) {
+  if (
+    receipt.evidence.acquired !== false ||
+    receipt.provenance.rawHtml !== undefined
+  )
+    throw Error("INVALID_PAGE_EVIDENCE");
+  return sealReceipt(receipt);
+}
 /** One server-selected page, one observed receipt and one fixed storage
  * adapter. Both browser and bridge provide their already-authorized transition. */
 export async function runAuditPage<T>(

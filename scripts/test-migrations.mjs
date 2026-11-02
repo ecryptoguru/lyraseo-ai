@@ -78,6 +78,10 @@ const bridgeConfig = prefixConfig(
   "twenty-two",
   migrations.filter((name) => name <= "202611020017_signed_audit_bridge"),
 );
+const retentionConfig = prefixConfig(
+  "twenty-three",
+  migrations.filter((n) => n <= "202611030001_evidence_retention"),
+);
 const databases = [];
 function sql(database, statement, capture = false) {
   return run(
@@ -164,7 +168,7 @@ function snapshot(database, withAudit) {
       .map((table) =>
         sql(
           database,
-          `SELECT coalesce(jsonb_agg(to_jsonb(t)-'resultExpiresAt' ORDER BY (to_jsonb(t)-'resultExpiresAt')::text),'[]') FROM "${table}" t;`,
+          `SELECT coalesce(jsonb_agg(to_jsonb(t)-'resultExpiresAt'-'storageFormat' ORDER BY (to_jsonb(t)-'resultExpiresAt'-'storageFormat')::text),'[]') FROM "${table}" t;`,
           true,
         ),
       )
@@ -264,7 +268,7 @@ try {
       )
       .join("");
   const oldDigests = retentionHistory();
-  migrate(kernelDatabase);
+  migrate(kernelDatabase, retentionConfig);
   if (oldDigests !== retentionHistory())
     throw new Error(
       "P1 changed original typed historical evidence, report bytes or financial/dispatch history",
@@ -296,6 +300,48 @@ try {
     throw new Error("Unexpected P1 role privileges " + rights);
   console.log(
     "PASS: populated 22 → 23, typed original evidence and bytes identical, active controlled job intact, unknown receipts closed, no legacy pins, narrow grants.",
+  );
+  const clockRows = () =>
+    sql(
+      kernelDatabase,
+      'SELECT jsonb_agg(to_jsonb(t) ORDER BY "pageId") FROM "AuditPageRetention" t',
+      true,
+    );
+  // Exercise an extension already installed outside public. Its identity/schema must survive.
+  sql(
+    kernelDatabase,
+    "CREATE SCHEMA private_crypto_fixture; CREATE EXTENSION pgcrypto WITH SCHEMA private_crypto_fixture",
+  );
+  const cryptoIdentity = () =>
+    sql(
+      kernelDatabase,
+      "SELECT e.oid||'/'||n.nspname||'/'||e.extversion FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pgcrypto'",
+      true,
+    );
+  const originalCrypto = cryptoIdentity();
+  const before24 = retentionHistory() + clockRows();
+  migrate(kernelDatabase);
+  if (cryptoIdentity() !== originalCrypto)
+    throw Error("Existing pgcrypto installation changed");
+  if (before24 !== retentionHistory() + clockRows())
+    throw Error(
+      "Artifact migration changed historical measurements or capture clocks",
+    );
+  const privateGrants = sql(
+    kernelDatabase,
+    `SELECT count(*) FROM "AuditRun" WHERE "storageFormat" IS NOT NULL;
+    SELECT count(*) FROM "ArtifactBlob"; SELECT count(*) FROM "ArtifactRef"; SELECT count(*) FROM "AuditEvaluationScratch";
+    SELECT count(*) FROM lyraseo_audit.artifact_verifier; SELECT count(*) FROM lyraseo_audit.unavailable_observation;
+    SELECT bool_or(has_any_column_privilege(r,t,'SELECT,INSERT,UPDATE')) FROM unnest(ARRAY['lyraseo_runtime','lyraseo_dispatch','lyraseo_identity']) r CROSS JOIN unnest(ARRAY['"ArtifactBlob"','"ArtifactRef"','"AuditEvaluationScratch"','lyraseo_audit.artifact_verifier','lyraseo_audit.unavailable_observation']) t;`,
+    true,
+  ).trim();
+  if (privateGrants !== "0\n0\n0\n0\n0\n0\nf")
+    throw Error(
+      "Unexpected artifacts, enabled legacy runs, or privileges: " +
+        privateGrants,
+    );
+  console.log(
+    "PASS: populated 23 → 24, identical historical measurements, clocks and financial/dispatch history; no artifact backfill or role table access.",
   );
   for (const scenario of ["empty", "seven", "twenty"]) {
     const database = `lyraseo_replay_${scenario}_${randomUUID().replaceAll("-", "")}`;

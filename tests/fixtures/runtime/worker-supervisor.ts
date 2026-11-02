@@ -1,4 +1,12 @@
+import { enrollTestArtifactAuthority } from "../../helpers/artifact-authority";
 // Node-only disposable harness. Never imported by the Worker/application boot.
+import { mkdtemp, realpath } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  localAuditArtifactStore,
+  faultAfterMutation,
+} from "../../../packages/db/src/artifact-store";
+import { bindLocalArtifactStore } from "../../../packages/db/src/artifact-checkpoint";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -15,10 +23,12 @@ process.once(
     admin: adminUrl,
     secret,
     rotatedSecret,
+    artifactParent,
   }: {
     admin: string;
     secret: string;
     rotatedSecret: string;
+    artifactParent: string;
   }) => {
     const parsed = new URL(adminUrl);
     if (
@@ -31,6 +41,12 @@ process.once(
     parsed.username = "lyraseo_dispatch";
     parsed.password = "local_dispatch_only";
     const db = createDatabase(parsed.href);
+    const artifactRoot = await mkdtemp(
+      join(await realpath(artifactParent), "objects-"),
+    );
+    const authority = await enrollTestArtifactAuthority(admin);
+    const objects = await localAuditArtifactStore(artifactRoot);
+    bindLocalArtifactStore(db, faultAfterMutation(objects, "put"), authority);
     const original: RuntimeKey = {
       id: "supervised",
       principal: "lyraseo_dispatch",
@@ -70,6 +86,7 @@ process.once(
       try {
         let result: unknown;
         switch (req.url) {
+          case "/seed-private":
           case "/seed": {
             await admin.$executeRawUnsafe(
               'TRUNCATE TABLE "ProductUser", "Workspace", "StaffGrant", "StepUpGrant", "BudgetPeriod", "ProductSession" CASCADE',
@@ -108,6 +125,8 @@ process.once(
                 profile: "CONTROLLED_RAW_TEST_V1",
                 declarations: {},
                 methodologyVersion: "readiness-v2",
+                storageFormat:
+                  req.url === "/seed-private" ? "AUDIT_PRIVATE_V1" : null,
                 manifest: ["https://example.com/", "https://example.com/about"],
               },
             });
@@ -140,6 +159,13 @@ process.once(
                 select: { id: true, generation: true, disposition: true },
               }),
               pages: await admin.auditPage.count(),
+              refs: await admin.artifactRef.count(),
+              scratch: await admin.auditEvaluationScratch.count(),
+              inline: await admin.auditPage.count({
+                where: {
+                  provenance: { path: ["rawHtml"], string_contains: "<html>" },
+                },
+              }),
               replays: await admin.internalRequest.count(),
               hops,
             };
@@ -252,6 +278,8 @@ process.once(
     const close = async () => {
       await runtime.close();
       await new Promise<void>((r) => server.close(() => r()));
+      await objects.close();
+      await authority.revoke();
       await Promise.all([admin.$disconnect(), db.$disconnect()]);
       process.exit(0);
     };

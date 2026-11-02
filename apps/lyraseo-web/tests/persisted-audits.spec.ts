@@ -209,7 +209,7 @@ test("viewer can inspect saved audits without mutation controls", async ({
     .click();
   await expect(page.getByText("Original source expired.")).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "Download retained original source" }),
+    page.getByRole("link", { name: "Download retained UTF-8 source" }),
   ).toHaveCount(0);
   await expect(page.getByText("readiness-v1", { exact: false })).toBeVisible();
   await expect(
@@ -218,4 +218,86 @@ test("viewer can inspect saved audits without mutation controls", async ({
   await expect(page.getByRole("button", { name: "Mark reviewed" })).toHaveCount(
     0,
   );
+});
+
+test("retained original bytes, decoded legacy source and unavailable capture are distinguished", async ({
+  page,
+}, info) => {
+  const retained = {
+    ...run.pages[0],
+    requestedUrl: "https://example.com/",
+    sourceAvailability: "current",
+    sourceRepresentation: "original-body",
+  };
+  const missing = {
+    ...run.pages[0],
+    requestedUrl: "https://example.com/missing",
+    sourceAvailability: "unavailable",
+  };
+  const current = {
+    ...run,
+    id: "private-audit",
+    methodologyVersion: "readiness-v2",
+    manifest: [retained.requestedUrl, missing.requestedUrl],
+    pages: [retained, missing],
+    evaluation: {
+      ...run.evaluation,
+      methodologyVersion: "readiness-v2",
+      rules: [],
+    },
+  };
+  const decoded = {
+    ...run,
+    id: "legacy-audit",
+    createdAt: "2026-10-12T00:00:00Z",
+    pages: [{ ...retained, sourceRepresentation: "stored-utf8" }],
+  };
+  await page.route("**/api/audits**", (route) => {
+    const id = new URL(route.request().url()).searchParams.get("auditId");
+    return route.fulfill({
+      json:
+        id === null
+          ? [current, decoded]
+          : id === current.id
+            ? current
+            : decoded,
+    });
+  });
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Controlled source receipt fixture</h1><div id="audit-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(false) });
+  const history = page.getByRole("button", { name: /completed/i });
+  await history.nth(1).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: retained.requestedUrl })
+    .click();
+  await expect(
+    page.getByRole("link", { name: "Download retained UTF-8 source" }),
+  ).toBeVisible();
+  await history.first().click();
+  for (const item of current.pages) {
+    const details = page
+      .locator("details")
+      .filter({ has: page.getByText(item.requestedUrl, { exact: true }) });
+    if ((await details.getAttribute("open")) === null)
+      await details.locator("summary").click();
+  }
+  await expect(
+    page.getByRole("link", { name: "Download original response body" }),
+  ).toHaveAttribute("href", /format=source.*url=/);
+  await expect(page.getByText("Original source unavailable.")).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.getByText("Original source unavailable.").scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: `../../output/build-2026-11-02/private-artifact-${info.project.name}.png`,
+  });
 });

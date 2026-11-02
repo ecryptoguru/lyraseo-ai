@@ -27,6 +27,7 @@ type SavedRun = Summary & {
   pages: Array<{
     requestedUrl: string;
     sourceAvailability?: string;
+    sourceRepresentation?: "original-body" | "stored-utf8";
     provenance: {
       error?: string;
       sha256?: string;
@@ -446,7 +447,9 @@ export function PersistedAudits({
                 <a
                   href={`${base}&auditId=${selected.id}&format=source&url=${encodeURIComponent(page.requestedUrl)}`}
                 >
-                  Download retained original source
+                  {page.sourceRepresentation === "original-body"
+                    ? "Download original response body"
+                    : "Download retained UTF-8 source"}
                 </a>
               ) : (
                 <p>

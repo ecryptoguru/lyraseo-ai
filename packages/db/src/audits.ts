@@ -1,3 +1,14 @@
+import {
+  artifactStore,
+  attestArtifactReceipt,
+  verifiedPublication,
+  witnessedObservation,
+  verifyReturnedBytes,
+  type ArtifactReservation,
+  STORAGE,
+} from "./artifact-checkpoint";
+import type { ArtifactVersion } from "./artifact-store";
+import type { AcquisitionReceipt } from "@lyraseo/visibility/acquisition";
 import { createHash } from "node:crypto";
 import { compactEvaluation, compactGroups, declared } from "./saved-evidence";
 import { pageReceipts } from "./page-receipts";
@@ -172,6 +183,7 @@ export async function createAuditRun(
         profile: input.profile,
         declarations: json(frozenDeclarations),
         methodologyVersion: "readiness-v2",
+        storageFormat: artifactStore(db) ? STORAGE : null,
       },
     });
   });
@@ -220,7 +232,14 @@ export async function readAuditRun(
     "audits:read",
     async (tx) => {
       const run = await scoped(tx, actor, scope, action, now);
-      const pages = await pageReceipts(tx, scope, now);
+      const pages = await pageReceipts(
+        tx,
+        scope,
+        now,
+        artifactStore(db) && !isTokenActor(actor)
+          ? actor.securityVersion
+          : null,
+      );
       const actions = await tx.issueAction.findMany({
         where: { auditId: run.id, workspaceId: scope.workspaceId },
         orderBy: { createdAt: "asc" },
@@ -270,6 +289,34 @@ export async function readAuditSource(
   url: string,
 ) {
   if (isTokenActor(actor)) throw new Error("FORBIDDEN");
+  const ticket = () =>
+    withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
+      const [row] = await tx.$queryRaw<
+        { version: ArtifactVersion | null; format: string | null }[]
+      >`
+      SELECT r."storageFormat" AS format,lyraseo_audit.source_ticket(${scope.siteId},${scope.auditId},${url},${actor.securityVersion}::integer) AS version
+      FROM "AuditRun" r JOIN "AuditPage" p ON p."auditId"=r.id AND p."workspaceId"=r."workspaceId"
+      WHERE r."workspaceId"=${scope.workspaceId} AND r."siteId"=${scope.siteId} AND r.id=${scope.auditId} AND p."requestedUrl"=${url}`;
+      if (!row) throw Error("NOT_FOUND");
+      return row;
+    });
+  const first = await ticket();
+  if (first.format === STORAGE) {
+    if (!first.version) throw Error("SOURCE_EXPIRED");
+    const store = artifactStore(db);
+    if (!store) throw Error("ARTIFACT_UNAVAILABLE");
+    const bytes = await store.openBounded(first.version).catch(() => {
+      throw Error("ARTIFACT_UNAVAILABLE");
+    });
+    const copy = verifyReturnedBytes(first.version, bytes);
+    const latest = await ticket();
+    if (
+      !latest.version ||
+      fingerprint(latest.version) !== fingerprint(first.version)
+    )
+      throw Error("SOURCE_EXPIRED");
+    return copy;
+  }
   return withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
     const now = new Date();
     const rows = await tx.$queryRaw<
@@ -336,9 +383,14 @@ export async function claimAuditRun(
   leaseOwner: string,
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await scoped(tx, actor, scope, "run");
+    const run = await scoped(tx, actor, scope, "run");
+    if (run.storageFormat === STORAGE && !artifactStore(db))
+      throw Error("ARTIFACT_UNAVAILABLE");
     const id = await webTransition(tx, actor, scope, "claim", null, leaseOwner);
-    return tx.auditRun.findUniqueOrThrow({ where: { id } });
+    const lease = await tx.auditRun.findUniqueOrThrow({ where: { id } });
+    if (run.storageFormat === STORAGE)
+      await tx.$queryRaw`SELECT lyraseo_audit.web_artifact_pages(${scope.siteId},${scope.auditId},${actor.securityVersion}::integer,${lease.fence}::integer)`;
+    return lease;
   });
 }
 export async function checkpointAuditPage(
@@ -366,6 +418,61 @@ export async function checkpointAuditPage(
       { evidence, provenance },
     );
     return tx.auditPage.findUniqueOrThrow({ where: { id: pageId } });
+  });
+}
+/** Persist private checkpoints and their yield/completion atomically; filesystem I/O separates the transactions. */
+export async function checkpointPrivateAudit(
+  db: PrismaClient,
+  actor: Actor,
+  scope: AuditScope,
+  fence: number,
+  receipt: AcquisitionReceipt,
+) {
+  const scopedTx = <T>(work: (tx: Tx) => Promise<T>) =>
+    withActor(db, actor, scope.workspaceId, work);
+  const { reservation, initialRun } = await scopedTx(async (tx) => {
+    const run = await scoped(tx, actor, scope, "run");
+    const raw = JSON.stringify(
+      witnessedObservation(
+        db,
+        run,
+        "web/" + scope.auditId + "/" + fence,
+        receipt,
+      ),
+    );
+    const [row] = await tx.$queryRaw<
+      { result: ArtifactReservation }[]
+    >`SELECT lyraseo_audit.web_artifact_reserve(${scope.siteId},${scope.auditId},${actor.securityVersion}::integer,${fence}::integer,${raw}::json) AS result`;
+    return { reservation: row!.result, initialRun: run };
+  });
+  const data = JSON.stringify(
+    await verifiedPublication(db, initialRun, receipt, reservation),
+  );
+  await scopedTx(async (tx) => {
+    const run = await scoped(tx, actor, scope, "run");
+    const { scratch } = attestArtifactReceipt(run, receipt);
+    const [prior] = await tx.$queryRaw<
+      { pages: PageEvidence[] }[]
+    >`SELECT lyraseo_audit.web_artifact_pages(${scope.siteId},${scope.auditId},${actor.securityVersion}::integer,${fence}::integer) AS pages`;
+    const pages = [...prior!.pages, scratch].sort((a, b) =>
+      a.requestedUrl < b.requestedUrl
+        ? -1
+        : a.requestedUrl > b.requestedUrl
+          ? 1
+          : 0,
+    );
+    const evaluation =
+      pages.length === (run.manifest as string[]).length
+        ? compactEvaluation(
+            frozenEvaluation(
+              run,
+              (await tx.site.findUniqueOrThrow({ where: { id: scope.siteId } }))
+                .origin,
+              pages,
+            ),
+          )
+        : null;
+    await tx.$queryRaw`SELECT lyraseo_audit.web_artifact_commit(${scope.siteId},${scope.auditId},${actor.securityVersion}::integer,${fence}::integer,${data}::json,${evaluation ? JSON.stringify(evaluation) : null}::json)`;
   });
 }
 export async function finishAuditRun(

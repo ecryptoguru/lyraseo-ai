@@ -204,7 +204,7 @@ export async function runWorkerBridge({
       if (failureError) return;
       try {
         if (message.event === "configure")
-          send({ admin, secret, rotatedSecret });
+          send({ admin, secret, rotatedSecret, artifactParent: pinDirectory });
         if (message.event === "restart-pin") {
           if (!pins) throw Error("STARTUP_PINS_REQUIRED");
           const next = {

@@ -1,3 +1,9 @@
+import { enrollTestArtifactAuthority } from "../helpers/artifact-authority";
+import {
+  witnessedObservation,
+  verifiedPublication,
+  type ArtifactReservation,
+} from "../../packages/db/src/artifact-checkpoint";
 import { createHmac, createHash, randomUUID, randomBytes } from "node:crypto";
 import { fork } from "node:child_process";
 import { createRequire } from "node:module";
@@ -146,7 +152,7 @@ async function boot(handlerBudgetMs?: number) {
     ),
   });
 }
-async function fixture(pages = 2) {
+async function fixture(pages = 2, privateSource = false) {
   const audit = await admin.auditRun.create({
     data: {
       workspaceId: "a",
@@ -155,6 +161,7 @@ async function fixture(pages = 2) {
       securityVersion: 0,
       idempotencyKey: randomUUID(),
       inputHash: "fixture",
+      storageFormat: privateSource ? "AUDIT_PRIVATE_V1" : null,
       profile: "CONTROLLED_RAW_TEST_V1",
       declarations: {},
       methodologyVersion: "readiness-v2",
@@ -822,47 +829,56 @@ it("persists UNKNOWN for 204, NUL or unavailable bytes without fabricating rende
   }
 });
 
-it("recovers exact replay in new OS processes after both lost step responses", async () => {
-  await listener!.close();
-  listener = undefined;
+async function bootListenerProcess(
+  events: number[],
+  artifact?: { root: string; keyId: string; verifier: string },
+) {
   const require = createRequire(import.meta.url);
   const nodePackage = require.resolve("vite-node/package.json", {
     paths: [dirname(require.resolve("vitest/package.json"))],
   });
   const cli = resolve(dirname(nodePackage), "vite-node.mjs");
-  const events: number[] = [];
-  const bootChild = async () => {
-    const child = fork(cli, ["tests/fixtures/runtime/listener-process.ts"], {
-      stdio: ["ignore", "ignore", "inherit", "ipc"],
-    });
-    let calls = 0;
-    try {
-      const origin = await new Promise<string>((resolve, reject) => {
-        child.on("error", reject);
-        child.once("exit", () =>
-          reject(new Error("controlled listener exited before ready")),
-        );
-        child.on("message", (message: { event: string; origin?: string }) => {
-          if (message.event === "configure")
-            child.send({ secret: Buffer.from(key.secret).toString("base64") });
-          if (message.event === "ready") resolve(message.origin!);
-          if (message.event === "fixture-hop") calls++;
-        });
+
+  const child = fork(cli, ["tests/fixtures/runtime/listener-process.ts"], {
+    stdio: ["ignore", "ignore", "inherit", "ipc"],
+  });
+  let calls = 0;
+  try {
+    const origin = await new Promise<string>((resolve, reject) => {
+      child.on("error", reject);
+      child.once("exit", () =>
+        reject(new Error("controlled listener exited before ready")),
+      );
+      child.on("message", (message: { event: string; origin?: string }) => {
+        if (message.event === "configure")
+          child.send({
+            secret: Buffer.from(key.secret).toString("base64"),
+            artifact,
+          });
+        if (message.event === "ready") resolve(message.origin!);
+        if (message.event === "fixture-hop") calls++;
       });
-      listener = {
-        origin,
-        async close() {
-          const exited = once(child, "exit");
-          child.kill("SIGKILL");
-          await exited;
-          events.push(calls);
-        },
-      };
-    } catch (error) {
-      child.kill();
-      throw error;
-    }
-  };
+    });
+    listener = {
+      origin,
+      async close() {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+        events.push(calls);
+      },
+    };
+  } catch (error) {
+    child.kill();
+    throw error;
+  }
+  return () => calls;
+}
+it("recovers exact replay in new OS processes after both lost step responses", async () => {
+  await listener!.close();
+  listener = undefined;
+  const events: number[] = [];
+  const bootChild = () => bootListenerProcess(events);
   await bootChild();
   await fixture();
   const ref = await claim();
@@ -1923,4 +1939,379 @@ it("round3 class-prototype provider authenticates and revokes using its original
   });
   expect(await admin.internalRequest.count()).toBe(before);
   expect(urls).toEqual([]);
+});
+
+it.each([
+  "reclaim",
+  "stage",
+  "tampered-headers",
+  "truncated",
+  "wrong-hash",
+  "tombstone",
+  "advance",
+] as const)(
+  "recovers an already put private generation through %s with a current proof and truthful clock",
+  async (strategy) => {
+    const { mkdtemp, realpath, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { localAuditArtifactStore } =
+      await import("../../packages/db/src/artifact-store");
+    const { bindLocalArtifactStore } =
+      await import("../../packages/db/src/artifact-checkpoint");
+    const { originalBody } =
+      await import("../../packages/visibility/src/acquisition");
+    const root = await mkdtemp(
+      resolve(await realpath(tmpdir()), "lyraseo-reclaim-"),
+    );
+    const authority = await enrollTestArtifactAuthority(admin);
+    const store = await localAuditArtifactStore(root);
+    try {
+      bindLocalArtifactStore(db, store, authority);
+      const { audit } = await fixture(1, true),
+        ref = await claim();
+      await ack(ref);
+      const e = step(ref);
+      const a = await admitStep(db, env(e), "https://example.com");
+      if (a.disposition !== "ADMITTED") throw Error("Expected admission");
+      const observed = await acquireRawPage(a.url, a.origin, (url, signal) =>
+        transport(url, signal, () => checkStep(db, e.rid, a.proof)),
+      );
+      const raw = JSON.stringify(
+        witnessedObservation(db, audit, "step/" + e.rid, observed),
+      );
+      const [reservation] = await db.$queryRaw<
+        Array<{
+          r: {
+            version: import("../../packages/db/src/artifact-store").ArtifactVersion;
+          };
+        }>
+      >`SELECT lyraseo_audit.step_artifact_reserve(${e.rid}::uuid,${a.proof},${raw}::json) AS r`;
+      const v = reservation!.r.version;
+      await store.putImmutable(v, originalBody(observed)!);
+      const { chmod, writeFile, stat } = await import("node:fs/promises");
+      const file = resolve(
+        root,
+        createHash("sha256").update(v.workspaceId).digest("hex"),
+        v.storageKey + "." + v.generation,
+      );
+      if (strategy === "tampered-headers") {
+        await admin.$executeRaw`UPDATE "ArtifactBlob" SET "pendingReceipt"=jsonb_set("pendingReceipt",'{headers,x-robots-tag}','"noindex"'::jsonb) WHERE "storageKey"=${v.storageKey}::uuid`;
+      }
+      if (strategy === "tombstone") await store.deleteExactVersion(v);
+      if (["stage", "truncated", "wrong-hash"].includes(strategy)) {
+        if (strategy === "truncated")
+          await writeFile(file, Buffer.from("partial"));
+        if (strategy === "wrong-hash")
+          await writeFile(file, Buffer.alloc(v.sourceLength));
+        await chmod(file, 0o400);
+      }
+
+      // Staged objects have no public page or ready ref. No submitter-chosen version is accepted.
+      for (const patch of [
+        { generation: randomUUID() },
+        { sourceLength: v.sourceLength + 1 },
+        { storedHash: "0".repeat(64) },
+        { workspaceId: "other" },
+      ]) {
+        const forged = {
+          ...observed,
+          storageFormat: "AUDIT_PRIVATE_V1",
+          version: { ...v, ...patch },
+        };
+        await expect(
+          db.$queryRaw`SELECT lyraseo_audit.commit_step(${e.rid}::uuid,${a.proof},${JSON.stringify(forged)}::json,'{}'::jsonb)`,
+        ).rejects.toThrow(/INVALID_ARTIFACT/);
+      }
+      expect(await admin.auditPage.count()).toBe(0);
+      expect(await admin.artifactRef.count()).toBe(0);
+      await admin.auditRun.update({
+        where: { id: audit.id },
+        data: { leaseUntil: new Date(Date.now() - 1000) },
+      });
+      await expect(checkStep(db, e.rid, a.proof)).rejects.toThrow();
+      await listener!.close();
+      let childHops: (() => number) | undefined;
+      if (strategy === "stage" || strategy === "tampered-headers") {
+        childHops = await bootListenerProcess([], {
+          root,
+          keyId: authority.keyId,
+          verifier: Buffer.from(authority.secret).toString("base64"),
+        });
+      } else await boot();
+      const hops = [...urls];
+      let active = ref;
+      if (strategy === "advance") {
+        await admin.workDispatch.update({
+          where: { id: ref.workId },
+          data: { nextAttemptAt: new Date(Date.now() - 10) },
+        });
+        expect(await ok(signing(runtimePaths[4], '{"limit":2}'))).toMatchObject(
+          { reopened: 1 },
+        );
+        active = await claim();
+        expect(active.generation).toBe(ref.generation + 1);
+        await ack(active);
+      }
+      const fresh = step(active);
+      if (
+        ["truncated", "wrong-hash", "tombstone", "tampered-headers"].includes(
+          strategy,
+        )
+      ) {
+        if (childHops) expect(childHops()).toBe(0);
+        expect((await wire(fresh)).status).toBe(503);
+        expect(urls).toEqual(hops);
+        expect(await admin.artifactRef.count()).toBe(0);
+        expect(await admin.auditPage.count()).toBe(0);
+        expect(await admin.auditEvaluationScratch.count()).toBe(0);
+        expect((await stat(file)).mode & 0o777).toBe(
+          strategy === "tombstone"
+            ? 0
+            : strategy === "tampered-headers"
+              ? 0o600
+              : 0o400,
+        );
+        return;
+      }
+
+      expect(await ok(fresh)).toEqual({ disposition: "COMPLETED" });
+      if (childHops) expect(childHops()).toBe(0);
+      const expected = strategy === "advance" ? [...hops, ...hops] : hops;
+      expect(urls).toEqual(expected);
+      expect(await ok(fresh)).toEqual({ disposition: "COMPLETED" });
+      expect(urls).toEqual(expected);
+      const blob = await admin.artifactBlob.findFirstOrThrow({
+        where: { state: "READY" },
+      });
+      expect(blob).toMatchObject({
+        pendingReceipt: null,
+        workGeneration: active.generation,
+      });
+      const [source] = await admin.artifactRef.findMany();
+      if (strategy !== "advance") {
+        expect((await stat(file)).mode & 0o777).toBe(0o600);
+        expect(blob.generation).toBe(v.generation);
+        expect(source!.capturedAt.toISOString()).toBe(
+          observed.provenance.acquiredAt,
+        );
+      } else {
+        expect(blob.generation).not.toBe(v.generation);
+        expect(blob.sourceHash).toBe(v.sourceHash);
+        expect(+source!.capturedAt).toBeGreaterThan(
+          Date.parse(observed.provenance.acquiredAt),
+        );
+        expect(
+          await admin.artifactBlob.count({
+            where: { generation: v.generation, state: "ORPHAN" },
+          }),
+        ).toBe(1);
+      }
+      expect(await admin.auditEvaluationScratch.count()).toBe(0);
+    } finally {
+      await store.close();
+      await authority.revoke();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+async function withRound1PrivateStore(
+  work: (
+    store: import("../../packages/db/src/artifact-store").AuditArtifactStore,
+    root: string,
+  ) => Promise<void>,
+) {
+  const { mkdtemp, realpath, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { localAuditArtifactStore } =
+    await import("../../packages/db/src/artifact-store");
+  const { bindLocalArtifactStore } =
+    await import("../../packages/db/src/artifact-checkpoint");
+  const root = await mkdtemp(
+    resolve(await realpath(tmpdir()), "lyraseo-r1-bridge-"),
+  );
+  const authority = await enrollTestArtifactAuthority(admin);
+  const store = await localAuditArtifactStore(root);
+  try {
+    bindLocalArtifactStore(db, store, authority);
+    await work(store, root);
+  } finally {
+    await store.close();
+    await authority.revoke();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+it("round1 signed login cannot echo a reserved descriptor to publish fabricated or unput input", async () => {
+  await withRound1PrivateStore(async () => {
+    const { audit } = await fixture(2, true);
+    const ref = await claim();
+    await ack(ref);
+    const e = step(ref);
+    const a = await admitStep(db, env(e), "https://example.com");
+    if (a.disposition !== "ADMITTED") throw Error("missing proof");
+    const receipt = await acquireRawPage(a.url, a.origin, (url, signal) =>
+      transport(url, signal, () => checkStep(db, e.rid, a.proof)),
+    );
+    const witnessed = witnessedObservation(db, audit, "step/" + e.rid, receipt);
+    const reserve = (payload: unknown) =>
+      db.$queryRaw<
+        { r: ArtifactReservation }[]
+      >`SELECT lyraseo_audit.step_artifact_reserve(${e.rid}::uuid,${a.proof},${JSON.stringify(payload)}::json) AS r`;
+    const commit = (payload: unknown) =>
+      db.$queryRaw`SELECT lyraseo_audit.commit_step(${e.rid}::uuid,${a.proof},${JSON.stringify(payload)}::json,NULL)`;
+    const forged = structuredClone(witnessed);
+    forged.evidence.linkNames.push({
+      href: a.origin + "/about",
+      name: "invented",
+    });
+    forged.provenance.headers["x-robots-tag"] = "noindex";
+    await expect(reserve(forged)).rejects.toThrow(/CONFIRMATION_REQUIRED/);
+    await expect(reserve(receipt)).rejects.toThrow(/CONFIRMATION_REQUIRED/);
+    expect(await admin.artifactBlob.count()).toBe(0);
+    const [slot] = await reserve(witnessed);
+    const reserved = slot!.r;
+    await expect(
+      commit({
+        ...receipt,
+        storageFormat: "AUDIT_PRIVATE_V1",
+        version: reserved.version,
+      }),
+    ).rejects.toThrow(/CONFIRMATION_REQUIRED/);
+    await expect(
+      commit({
+        ...receipt,
+        storageFormat: "AUDIT_PRIVATE_V1",
+        version: reserved.version,
+        confirmation: witnessed.captureConfirmation,
+      }),
+    ).rejects.toThrow(/CONFIRMATION_REQUIRED/);
+    const genuine = await verifiedPublication(db, audit, receipt, reserved);
+    await expect(
+      commit({ ...genuine, evidence: forged.evidence }),
+    ).rejects.toThrow(/INVALID_ARTIFACT|CONFIRMATION_REQUIRED/);
+    await expect(
+      db.$queryRaw`SELECT secret FROM lyraseo_audit.artifact_verifier`,
+    ).rejects.toThrow(/permission denied/);
+    expect(await admin.auditPage.count()).toBe(0);
+    expect(await admin.artifactRef.count()).toBe(0);
+    expect(await admin.auditEvaluationScratch.count()).toBe(0);
+    expect(
+      (await admin.auditRun.findUniqueOrThrow({ where: { id: audit.id } }))
+        .evaluation,
+    ).toBeNull();
+  });
+});
+it.each(["reclaim", "advance"] as const)(
+  "round1 digest-only reservation handles %s with original-clock recovery",
+  async (strategy) => {
+    await withRound1PrivateStore(async () => {
+      const { audit } = await fixture(1, true);
+      const ref = await claim();
+      await ack(ref);
+      const e = step(ref);
+      const a = await admitStep(db, env(e), "https://example.com");
+      if (a.disposition !== "ADMITTED") throw Error("missing proof");
+      const observed = await acquireRawPage(a.url, a.origin, async (u) =>
+        u.endsWith("robots.txt")
+          ? new Response(null, { status: 404 })
+          : new Response(new Uint8Array([255]), {
+              headers: { "content-type": "text/html" },
+            }),
+      );
+      const { commitStep } = await import("../../packages/db/src/bridge");
+      let checks = 0;
+      await expect(
+        commitStep(
+          db,
+          e.rid,
+          a,
+          observed,
+          new AbortController().signal,
+          () => {
+            if (++checks === 2) throw Error("SIMULATED_STOP_AFTER_RESERVE");
+          },
+          new Date(Date.now() + 45000),
+        ),
+      ).rejects.toThrow("SIMULATED_STOP_AFTER_RESERVE");
+      expect(await admin.auditPage.count()).toBe(0);
+      await admin.auditRun.update({
+        where: { id: audit.id },
+        data: { leaseUntil: new Date(Date.now() - 1000) },
+      });
+      await listener!.close();
+      await boot();
+      if (strategy === "advance") {
+        await admin.workDispatch.update({
+          where: { id: ref.workId },
+          data: { nextAttemptAt: new Date(Date.now() - 10) },
+        });
+        expect(await ok(signing(runtimePaths[4], '{"limit":2}'))).toMatchObject(
+          { reopened: 1 },
+        );
+        const next = await claim();
+        await ack(next);
+        expect(next.generation).toBe(ref.generation + 1);
+        expect(await ok(step(next))).toEqual({ disposition: "COMPLETED" });
+        expect(urls.length).toBe(2);
+        expect(await admin.artifactRef.count()).toBe(1);
+        return;
+      }
+      expect(await ok(step(ref))).toEqual({ disposition: "COMPLETED" });
+      expect(urls).toEqual([]);
+      const page = await admin.auditPage.findFirstOrThrow();
+      expect(page.provenance).toMatchObject({
+        acquiredAt: observed.provenance.acquiredAt,
+        sha256: observed.provenance.sha256,
+      });
+      expect(page.evidence).toMatchObject({ acquired: false });
+      expect(await admin.artifactRef.count()).toBe(0);
+    });
+  },
+);
+it("round1 retiring prior signed input prevents a new acquisition and terminal score", async () => {
+  await withRound1PrivateStore(async () => {
+    const { audit } = await fixture(2, true);
+    const first = await claim();
+    await ack(first);
+    expect(await ok(step(first))).toEqual({ disposition: "YIELDED" });
+    const hops = [...urls];
+    await admin.artifactBlob.updateMany({ data: { state: "ORPHAN" } });
+    const next = await claim();
+    await ack(next);
+    expect((await wire(step(next))).status).toBe(503);
+    expect(urls).toEqual(hops);
+    expect(await admin.auditPage.count()).toBe(1);
+    expect(
+      (await admin.auditRun.findUniqueOrThrow({ where: { id: audit.id } }))
+        .evaluation,
+    ).toBeNull();
+  });
+});
+it("round1 retirement during signed terminal publication rolls back the last page and score", async () => {
+  await withRound1PrivateStore(async () => {
+    const { audit } = await fixture(2, true);
+    const first = await claim();
+    await ack(first);
+    expect(await ok(step(first))).toEqual({ disposition: "YIELDED" });
+    await admin.$executeRawUnsafe(`CREATE FUNCTION p2a1_signed_retirement() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+ BEGIN UPDATE public."ArtifactBlob" SET state='ORPHAN' WHERE "auditId"=NEW.id AND "requestedUrl"='https://example.com/';RETURN NEW;END $$`);
+    try {
+      await admin.$executeRawUnsafe(
+        `CREATE TRIGGER p2a1_signed_retire AFTER UPDATE OF status ON "AuditRun" FOR EACH ROW WHEN(NEW.status='COMPLETED') EXECUTE FUNCTION p2a1_signed_retirement()`,
+      );
+      const next = await claim();
+      await ack(next);
+      expect((await wire(step(next))).status).toBe(503);
+      expect(await admin.auditPage.count()).toBe(1);
+      expect(await admin.artifactRef.count()).toBe(1);
+      expect(
+        (await admin.auditRun.findUniqueOrThrow({ where: { id: audit.id } }))
+          .evaluation,
+      ).toBeNull();
+    } finally {
+      await admin.$executeRawUnsafe(
+        "DROP FUNCTION p2a1_signed_retirement() CASCADE",
+      );
+    }
+  });
 });

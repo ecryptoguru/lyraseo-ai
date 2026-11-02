@@ -71,6 +71,7 @@ const bridgePaths = new Set([
 ]);
 const controlPaths = new Set([
   "/seed",
+  "/seed-private",
   "/state",
   "/expire-delivery",
   "/target-revoke",
