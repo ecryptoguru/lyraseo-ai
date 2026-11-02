@@ -1,3 +1,4 @@
+import { projectSnapshot } from "@lyraseo/db/content";
 import { createElement as h } from "react";
 import type { AuditEvaluation, RuleResult } from "@lyraseo/visibility";
 import {
@@ -90,7 +91,7 @@ export function comparisonReportLines(
       .join(" | "),
     `Score delta: ${result.scoreDelta === null ? "not available" : result.scoreDelta}`,
     "Missing, incompatible or uncertain evidence cannot prove a fix. Unevaluated is not resolved. Reviewed dispositions do not prove fixes. Resolved rows retain the before defect; other rows retain the evaluator-selected evidence.",
-    `Comparison finding rows included in PDF: ${Math.min(rows.length, 100)} of ${rows.length}. CSV contains the complete frozen comparison, including every classified finding and both source evaluations.`,
+    `Comparison finding rows included in PDF: ${Math.min(rows.length, 100)} of ${rows.length}. CSV contains the frozen classifications and compact source findings.`,
     ...rows.slice(0, 100).map(({ classification, rule }) => {
       const old = previous.find((r) => same(r, rule)),
         now = current.find((r) => same(r, rule));
@@ -98,7 +99,13 @@ export function comparisonReportLines(
         `${comparisonLabels[classification]} | ${rule.ruleId} v${rule.ruleVersion ?? "legacy/unversioned"} | ${rule.scopeKey}`,
         `Before: ${outcome(old)} -> After: ${outcome(now)}`,
         `Before sources: ${sourcesLabel(old)}. After sources: ${sourcesLabel(now)}.`,
-        `Evidence excerpt (${classification === "resolved" ? "before" : "evaluator-selected"}): ${(rule.evidence ?? rule.reasonCode).slice(0, 300)}`,
+        `Evidence excerpt (${classification === "resolved" ? "before" : "evaluator-selected"}): ${Array.from(
+          (classification === "resolved" ? old : now)?.evidence ??
+            rule.evidence ??
+            rule.reasonCode,
+        )
+          .slice(0, 300)
+          .join("")}`,
       ].join("\n");
     }),
   ];
@@ -107,6 +114,7 @@ export async function renderEvidenceReport(
   title: string,
   snapshot: EvidenceSnapshot,
 ) {
+  snapshot = projectSnapshot(snapshot);
   const rows = [
     [
       "Title",
@@ -116,25 +124,78 @@ export async function renderEvidenceReport(
       "Context reference",
       "Source",
       "Kind",
-      "Evidence",
+      "Original audit scope or search window",
+      "Saved measurements",
+      "Rule findings",
+      "Page receipts",
+      "Coverage and omissions",
     ],
-    ...snapshot.sources.map((source) => [
-      title,
-      `${snapshot.scope.workspaceId}/${snapshot.scope.siteId}`,
-      snapshot.capturedAt,
-      snapshot.methodology,
-      JSON.stringify(
-        snapshot.context && typeof snapshot.context === "object"
-          ? {
-              id: (snapshot.context as Record<string, unknown>).id,
-              revision: (snapshot.context as Record<string, unknown>).revision,
-            }
-          : null,
-      ),
-      source.sourceId,
-      source.kind,
-      JSON.stringify(source.data),
-    ]),
+    ...snapshot.sources.map((source) => {
+      const data = source.data as Record<string, unknown>,
+        evaluation = (data.evaluation ?? {}) as Record<string, unknown>;
+      return [
+        title,
+        `${snapshot.scope.workspaceId}/${snapshot.scope.siteId}`,
+        snapshot.capturedAt,
+        snapshot.methodology,
+        JSON.stringify(
+          snapshot.context && typeof snapshot.context === "object"
+            ? {
+                id: (snapshot.context as Record<string, unknown>).id,
+                revision: (snapshot.context as Record<string, unknown>)
+                  .revision,
+              }
+            : null,
+        ),
+        source.sourceId,
+        source.kind,
+        JSON.stringify(
+          source.kind === "google-search-console"
+            ? {
+                id: data.id,
+                property: data.property,
+                startDate: data.startDate,
+                endDate: data.endDate,
+                shape: data.shape,
+                importedAt: data.importedAt,
+                resultExpiresAt: data.resultExpiresAt,
+              }
+            : {
+                id: data.id,
+                createdAt: data.createdAt,
+                resultExpiresAt: data.resultExpiresAt,
+                profile: data.profile,
+                manifest: data.manifest,
+                methodologyVersion: data.methodologyVersion,
+                declarations: data.declarations,
+              },
+        ),
+        JSON.stringify(
+          source.kind === "google-search-console"
+            ? data.metrics
+            : {
+                score: evaluation.score,
+                coverage: evaluation.coverage,
+                categoryScores: evaluation.categoryScores,
+                categoryCoverage: evaluation.categoryCoverage,
+                eligible: evaluation.eligible,
+              },
+        ),
+        JSON.stringify(evaluation.rules ?? []),
+        JSON.stringify(data.pages ?? []),
+        JSON.stringify(
+          source.kind === "google-search-console"
+            ? { status: data.status, reportCoverage: data.reportCoverage }
+            : {
+                ruleCount: evaluation.ruleCount,
+                outcomeCounts: evaluation.outcomeCounts,
+                omittedRules: evaluation.omittedRules,
+                truncatedExcerpts: data.truncatedExcerpts,
+                omittedLinks: data.omittedLinks,
+              },
+        ),
+      ];
+    }),
   ];
   if (snapshot.comparison)
     rows.push(
@@ -159,7 +220,9 @@ export async function renderEvidenceReport(
         JSON.stringify(snapshot.comparison),
       ],
     );
-  const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const csv = rows
+    .map((row) => rows[0]!.map((_, i) => csvCell(row[i])).join(","))
+    .join("\r\n");
   const text = (value: string) =>
     h(Text, { style: { fontSize: 9, marginBottom: 8 } }, value);
   const object = (value: unknown): Record<string, unknown> =>
@@ -176,13 +239,11 @@ export async function renderEvidenceReport(
       return [
         `Property: ${String(data.property)} | Dates: ${String(data.startDate)} to ${String(data.endDate)}`,
         `Dimensions: ${String(data.shape)} | Import: ${String(data.status)} | Report rows: ${String(coverage.includedRows)} of ${String(coverage.importedRows)} imported`,
-        "The PDF shows up to 10 saved rows. The CSV contains all rows included in this stored report snapshot.",
-        ...(Array.isArray(data.rows)
-          ? data.rows.slice(0, 10).map((row) => {
-              const r = object(row);
-              return `${Array.isArray(r.keys) ? r.keys.join(" / ") : "dimension unavailable"} | Clicks ${String(r.clicks ?? "unknown")} | Impressions ${String(r.impressions ?? "unknown")} | CTR ${String(r.ctr ?? "unknown")} | Position ${String(r.position ?? "unknown")}`;
-            })
-          : []),
+        "Only totals for available rows of this import are saved. Individual queries and pages were not selected.",
+        "Clicks: " +
+          describe(object(data.metrics).clicks) +
+          " | Impressions: " +
+          describe(object(data.metrics).impressions),
       ];
     }
     return [
@@ -203,7 +264,8 @@ export async function renderEvidenceReport(
             "The CSV contains the frozen declarations, rule versions, evidence references and capture times.",
           ]
         : []),
-      `Source rule rows included in PDF: ${Array.isArray(evaluation.rules) ? Math.min(evaluation.rules.length, 100) : 0} of ${Array.isArray(evaluation.rules) ? evaluation.rules.length : 0}. CSV retains the complete saved source evaluation.`,
+      `Source rule rows included in PDF: ${Array.isArray(evaluation.rules) ? Math.min(evaluation.rules.length, 100) : 0} of ${Array.isArray(evaluation.rules) ? evaluation.rules.length : 0}. CSV retains the compact source findings.`,
+      `Diagnostic excerpts shortened or omitted: ${data.truncatedExcerpts ?? 0}. Omitted rules: ${evaluation.omittedRules ?? 0}. Omitted anchors: ${data.omittedLinks ?? 0}.`,
       "Raw HTTP evidence only. Rendered DOM, actual bot retrieval and downstream citation outcomes are unobserved.",
       ...(Array.isArray(evaluation.rules)
         ? evaluation.rules.slice(0, 100).map((rule) => {

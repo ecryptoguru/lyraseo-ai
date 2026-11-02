@@ -369,6 +369,32 @@ it("uses the official SDK client for initialization, tool discovery and real sta
     });
     expect(denied.isError).toBe(true);
     expect(JSON.stringify(denied)).not.toContain("hidden.example.com");
+    const retained = await admin.auditRun.findUniqueOrThrow({
+      where: { id: "saved" },
+    });
+    const { resultExpiresAt: _expiry, id: _id, ...values } = retained;
+    await admin.auditRun.create({
+      data: {
+        ...values,
+        manifest: values.manifest!,
+        evaluation: values.evaluation!,
+        declarations: values.declarations!,
+        id: "aged",
+        idempotencyKey: "aged",
+        createdAt: new Date(0),
+      },
+    });
+    const hidden = await client.callTool({
+      name: "lyraseo_read_audit",
+      arguments: { siteId: "a-site", auditId: "aged" },
+    });
+    expect(hidden.isError).toBe(true);
+    expect(JSON.stringify(hidden)).toContain("has expired");
+    const list = await client.callTool({
+      name: "lyraseo_list_audits",
+      arguments: { siteId: "a-site" },
+    });
+    expect(JSON.stringify(list)).not.toContain('"aged"');
     expect(seen.some((x) => x.includes('"initialize"'))).toBe(true);
     expect(seen.some((x) => x.includes('"tools/list"'))).toBe(true);
     expect(seen.some((x) => x.includes('"tools/call"'))).toBe(true);

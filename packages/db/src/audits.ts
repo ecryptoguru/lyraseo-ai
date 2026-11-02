@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { compactEvaluation, compactGroups, declared } from "./saved-evidence";
+import { pageReceipts } from "./page-receipts";
+import { isTokenActor, withEvidenceRead } from "./context";
 import { auditErrorCode } from "./audit-errors";
 import {
   fingerprint,
@@ -20,7 +24,6 @@ import {
   authorizeSiteIn,
   type Actor,
   type ReadActor,
-  requireReadScope,
   type Tx,
 } from "./context";
 export type AuditScope = {
@@ -39,6 +42,7 @@ async function scoped(
   actor: ReadActor,
   scope: AuditScope,
   action: "read" | "run" | "edit" | "export",
+  now = new Date(),
 ) {
   await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, action);
   const run = await tx.auditRun.findFirst({
@@ -46,9 +50,17 @@ async function scoped(
       id: scope.auditId,
       workspaceId: scope.workspaceId,
       siteId: scope.siteId,
+      resultExpiresAt: { gt: now },
     },
   });
-  if (!run) throw new Error("NOT_FOUND");
+  if (!run)
+    throw new Error(
+      (await tx.auditRun.count({
+        where: { ...siteScope(scope), id: scope.auditId },
+      }))
+        ? "SOURCE_EXPIRED"
+        : "NOT_FOUND",
+    );
   return run;
 }
 function freshVerification(site: { verifiedAt: Date | null }) {
@@ -169,44 +181,127 @@ export async function listAuditRuns(
   actor: ReadActor,
   scope: Omit<AuditScope, "auditId">,
 ) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await requireReadScope(tx, actor, "audits:read");
-    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "read");
-    return tx.auditRun.findMany({
-      where: siteScope(scope),
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 100,
-    });
-  });
+  return withEvidenceRead(
+    db,
+    actor,
+    scope,
+    "read",
+    "audits:read",
+    async (tx) => {
+      return tx.auditRun.findMany({
+        where: { ...siteScope(scope), resultExpiresAt: { gt: new Date() } },
+        select: {
+          id: true,
+          status: true,
+          createdAt: true,
+          completedAt: true,
+          profile: true,
+          methodologyVersion: true,
+          resultExpiresAt: true,
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 100,
+      });
+    },
+  );
 }
 export async function readAuditRun(
   db: PrismaClient,
   actor: ReadActor,
   scope: AuditScope,
   action: "read" | "export" = "read",
+  now = new Date(),
+) {
+  return withEvidenceRead(
+    db,
+    actor,
+    scope,
+    action,
+    "audits:read",
+    async (tx) => {
+      const run = await scoped(tx, actor, scope, action, now);
+      const pages = await pageReceipts(tx, scope, now);
+      const actions = await tx.issueAction.findMany({
+        where: { auditId: run.id, workspaceId: scope.workspaceId },
+        orderBy: { createdAt: "asc" },
+      });
+      return {
+        id: run.id,
+        status: run.status,
+        createdAt: run.createdAt,
+        completedAt: run.completedAt,
+        resultExpiresAt: run.resultExpiresAt,
+        profile: run.profile,
+        methodologyVersion: run.methodologyVersion,
+        declarations: declared(run.declarations),
+        manifest: Array.isArray(run.manifest)
+          ? run.manifest
+              .filter(
+                (u): u is string => typeof u === "string" && u.length <= 2048,
+              )
+              .slice(0, 25)
+          : [],
+        evaluation: compactEvaluation(run.evaluation),
+        pages,
+        actions,
+      };
+    },
+  );
+}
+/** Only the scoped browser runner needs checkpoint identities to choose its next page. */
+export async function readAuditProgress(
+  db: PrismaClient,
+  actor: Actor,
+  scope: AuditScope,
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await requireReadScope(tx, actor, "audits:read");
-    const run = await scoped(tx, actor, scope, action);
+    const run = await scoped(tx, actor, scope, "run");
     const pages = await tx.auditPage.findMany({
-      where: { auditId: run.id, workspaceId: scope.workspaceId },
-      orderBy: { requestedUrl: "asc" },
+      where: { workspaceId: scope.workspaceId, auditId: run.id },
+      select: { requestedUrl: true },
     });
-    const actions = await tx.issueAction.findMany({
-      where: { auditId: run.id, workspaceId: scope.workspaceId },
-      orderBy: { createdAt: "asc" },
-    });
-    // Raw evidence is temporary even while compact historical results remain available.
-    return {
-      ...run,
-      pages: pages.map((page) => {
-        const provenance = { ...(page.provenance as Record<string, unknown>) };
-        if (Date.now() - page.createdAt.getTime() >= 30 * 86400000)
-          delete provenance.rawHtml;
-        return { ...page, provenance };
-      }),
-      actions,
-    };
+    return { manifest: run.manifest, pages };
+  });
+}
+export async function readAuditSource(
+  db: PrismaClient,
+  actor: ReadActor,
+  scope: AuditScope,
+  url: string,
+) {
+  if (isTokenActor(actor)) throw new Error("FORBIDDEN");
+  return withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
+    const now = new Date();
+    const rows = await tx.$queryRaw<
+      Array<{ raw: string | null; sha256: string | null }>
+    >`
+      SELECT p.provenance->>'rawHtml' AS raw,p.provenance->>'sha256' AS sha256 FROM "AuditPage" p
+      JOIN "AuditRun" r ON r.id=p."auditId" AND r."workspaceId"=p."workspaceId"
+      JOIN "AuditPageRetention" t ON t."pageId"=p.id AND t."workspaceId"=p."workspaceId" AND t."auditId"=p."auditId"
+      WHERE r."workspaceId"=${scope.workspaceId} AND r."siteId"=${scope.siteId} AND r.id=${scope.auditId}
+        AND p."requestedUrl"=${url} AND r."resultExpiresAt">${now} AND t."rawExpiresAt">${now}
+        AND jsonb_typeof(p.provenance->'rawHtml')='string'`;
+    if (!rows[0]?.raw) {
+      if (
+        !(await tx.auditPage.count({
+          where: {
+            workspaceId: scope.workspaceId,
+            auditId: scope.auditId,
+            requestedUrl: url,
+            audit: { siteId: scope.siteId },
+          },
+        }))
+      )
+        throw new Error("NOT_FOUND");
+      throw new Error("SOURCE_EXPIRED");
+    }
+    const bytes = new TextEncoder().encode(rows[0].raw);
+    if (
+      rows[0].sha256 &&
+      createHash("sha256").update(bytes).digest("hex") !== rows[0].sha256
+    )
+      throw new Error("SOURCE_EXPIRED");
+    return bytes;
   });
 }
 // Browser-only fixed storage adapter. Its caller must already be in the scoped
@@ -241,6 +336,7 @@ export async function claimAuditRun(
   leaseOwner: string,
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
+    await scoped(tx, actor, scope, "run");
     const id = await webTransition(tx, actor, scope, "claim", null, leaseOwner);
     return tx.auditRun.findUniqueOrThrow({ where: { id } });
   });
@@ -304,32 +400,43 @@ export async function compareAuditRuns(
   scope: AuditScope,
   beforeAuditId: string,
 ) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await requireReadScope(tx, actor, "audits:read");
-    const after = await scoped(tx, actor, scope, "read"),
-      before = await scoped(
-        tx,
-        actor,
-        { ...scope, auditId: beforeAuditId },
-        "read",
+  return withEvidenceRead(
+    db,
+    actor,
+    scope,
+    "read",
+    "audits:read",
+    async (tx) => {
+      const now = new Date();
+      const after = await scoped(tx, actor, scope, "read", now),
+        before = await scoped(
+          tx,
+          actor,
+          { ...scope, auditId: beforeAuditId },
+          "read",
+          now,
+        );
+      if (!before.evaluation || !after.evaluation)
+        throw new Error("AUDIT_INCOMPLETE");
+      const result = compareAudits(
+        {
+          ...(before.evaluation as unknown as AuditEvaluation),
+          profile: before.profile,
+          declarations: before.declarations as AuditDeclarations,
+        },
+        {
+          ...(after.evaluation as unknown as AuditEvaluation),
+          profile: after.profile,
+          declarations: after.declarations as AuditDeclarations,
+        },
       );
-    if (!before.evaluation || !after.evaluation)
-      throw new Error("AUDIT_INCOMPLETE");
-    const result = compareAudits(
-      {
-        ...(before.evaluation as unknown as AuditEvaluation),
-        profile: before.profile,
-        declarations: before.declarations as AuditDeclarations,
-      },
-      {
-        ...(after.evaluation as unknown as AuditEvaluation),
-        profile: after.profile,
-        declarations: after.declarations as AuditDeclarations,
-      },
-    );
-    if (before.profile !== after.profile) result.scoreDelta = null;
-    return { ...result, profileComparable: before.profile === after.profile };
-  });
+      if (before.profile !== after.profile) result.scoreDelta = null;
+      return {
+        ...compactGroups(result),
+        profileComparable: before.profile === after.profile,
+      };
+    },
+  );
 }
 export async function reviewAuditIssue(
   db: PrismaClient,

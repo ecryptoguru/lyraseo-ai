@@ -18,7 +18,10 @@ vi.mock("@/server/auth/settings", () => ({
   authSettings: () => ({ origin: "http://127.0.0.1:3000" }),
 }));
 vi.mock("@/server/google/analytics", () => mocks);
-vi.mock("../../packages/db/src/ga4", () => mocks);
+vi.mock("../../packages/db/src/ga4", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../packages/db/src/ga4")>()),
+  ...mocks,
+}));
 import { GET, POST } from "../../apps/lyraseo-web/src/app/api/analytics/route";
 import { POST as manage } from "../../apps/lyraseo-web/src/app/api/integrations/analytics/route";
 const origin = "http://127.0.0.1:3000",
@@ -42,7 +45,13 @@ beforeEach(() => {
   mocks.analyticsConfigured.mockReturnValue(false);
   mocks.importGa4LandingPages.mockResolvedValue({
     id: "import",
-    rows: [],
+    rows: [{ rawLandingPage: "private-row" }],
+    diagnostics: {
+      partial: true,
+      rowCount: 1,
+      unknown: "private-diagnostic",
+      filters: { streamId: "456", secret: "private-filter" },
+    },
     attempt: "internal",
   });
 });
@@ -73,7 +82,13 @@ it("rejects forged actor fields, oversized bodies and foreign-origin writes befo
   expect(mocks.importGa4LandingPages).not.toHaveBeenCalled();
   const response = await POST(request(input));
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ id: "import", rowCount: 0 });
+  const payload = await response.json();
+  expect(payload).toEqual({
+    id: "import",
+    rowCount: 1,
+    diagnostics: { partial: true, rowCount: 1, filters: { streamId: "456" } },
+  });
+  expect(JSON.stringify(payload)).not.toMatch(/private-|attempt/);
   expect(mocks.importGa4LandingPages.mock.calls[0]![2]).toEqual(scope);
 });
 it("requires explicit stream selection and sends only site scope to persistence", async () => {

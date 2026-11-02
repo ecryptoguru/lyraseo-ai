@@ -1,3 +1,5 @@
+import { obj } from "./saved-evidence";
+import { withEvidenceRead } from "./context";
 import { siteScope } from "./sites";
 import { normalizeUrl } from "@lyraseo/visibility";
 import { createHash, randomBytes } from "node:crypto";
@@ -46,11 +48,6 @@ export type Ga4Provider = {
   ): Promise<Ga4Report>;
 };
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
-const retentionCutoff = () => {
-  const date = new Date();
-  date.setUTCMonth(date.getUTCMonth() - 13);
-  return date;
-};
 const aad = (s: SiteScope) => `analytics.readonly:${s.workspaceId}:${s.siteId}`;
 async function authorize(tx: Tx, actor: Actor, s: SiteScope, edit = false) {
   const site = await authorizeSiteIn(
@@ -384,10 +381,13 @@ export async function importGa4LandingPages(
   const attempt = randomBytes(16).toString("hex");
   const admitted = await withActor(db, actor, s.workspaceId, async (tx) => {
     await fenced(tx, actor, s, c);
+    const now = new Date();
     await tx.analyticsImport.deleteMany({
-      where: { ...siteScope(s), startedAt: { lt: retentionCutoff() } },
+      where: { ...siteScope(s), resultExpiresAt: { lte: now } },
     });
     const existing = await tx.analyticsImport.findUnique({ where: { id } });
+    if (existing && !existing.resultExpiresAt)
+      throw new Error("SOURCE_EXPIRED");
     if (
       existing &&
       ["complete", "partial", "no_data"].includes(existing.status)
@@ -535,14 +535,92 @@ export async function importGa4LandingPages(
     throw new Error(reason);
   }
 }
+function ga4RowFacts(value: unknown) {
+  const r = obj(value),
+    text = (v: unknown) =>
+      typeof v === "string" && v.length <= 2048 ? v : null,
+    measure = (v: unknown) =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+  return {
+    date: text(r.date),
+    rawLandingPage: text(r.rawLandingPage),
+    hostName: text(r.hostName),
+    streamId: text(r.streamId),
+    channel: text(r.channel),
+    normalizedUrl: text(r.normalizedUrl),
+    unavailableReason: text(r.unavailableReason),
+    sessions: measure(r.sessions),
+    engagedSessions: measure(r.engagedSessions),
+    sessionKeyEventRate: measure(r.sessionKeyEventRate),
+  };
+}
+export function analyticsDiagnostics(value: unknown) {
+  const d = obj(value);
+  const flags = [
+    "restricted",
+    "partial",
+    "thresholded",
+    "sampled",
+    "otherLoss",
+    "qualifiedCompatibility",
+    "keyEventsConfigured",
+    "provisional",
+    "truncated",
+  ];
+  const counts = [
+    "rowCount",
+    "processedRows",
+    "offset",
+    "limit",
+    "unmatchedRows",
+  ];
+  const text = [
+    "source",
+    "provider",
+    "shape",
+    "normalizationVersion",
+    "rateSemantics",
+    "emptyReason",
+  ];
+  const fields = (v: unknown) =>
+    Array.isArray(v)
+      ? v.filter((x) => typeof x === "string" && x.length <= 128).slice(0, 12)
+      : undefined;
+  const f = obj(d.filters);
+  return {
+    ...Object.fromEntries(
+      flags.filter((k) => typeof d[k] === "boolean").map((k) => [k, d[k]]),
+    ),
+    ...Object.fromEntries(
+      counts.filter((k) => Number.isSafeInteger(d[k])).map((k) => [k, d[k]]),
+    ),
+    ...Object.fromEntries(
+      text
+        .filter(
+          (k) => typeof d[k] === "string" && (d[k] as string).length <= 512,
+        )
+        .map((k) => [k, d[k]]),
+    ),
+    dimensions: fields(d.dimensions),
+    metrics: fields(d.metrics),
+    filters: Object.fromEntries(
+      ["streamId", "hostName", "sessionDefaultChannelGroup"]
+        .filter(
+          (k) => typeof f[k] === "string" && (f[k] as string).length <= 256,
+        )
+        .map((k) => [k, f[k]]),
+    ),
+  };
+}
 export async function readGa4LandingPages(
   db: PrismaClient,
   actor: Actor,
   s: SiteScope,
 ) {
   // Reuse saved, actor-authorized GSC opportunities. This path never refreshes either provider.
-  const search = await readGoogleSearch(db, actor, s);
-  return withActor(db, actor, s.workspaceId, async (tx) => {
+  const now = new Date();
+  const search = await readGoogleSearch(db, actor, s, now);
+  return withEvidenceRead(db, actor, s, "read", undefined, async (tx) => {
     const site = await authorize(tx, actor, s);
     const membership = await tx.membership.findUnique({
       where: {
@@ -566,7 +644,7 @@ export async function readGa4LandingPages(
       },
     });
     const imports = await tx.analyticsImport.findMany({
-      where: { ...siteScope(s), startedAt: { gte: retentionCutoff() } },
+      where: { ...siteScope(s), resultExpiresAt: { gt: now } },
       orderBy: { startedAt: "desc" },
       take: 20,
     });
@@ -611,13 +689,16 @@ export async function readGa4LandingPages(
       properties: connection?.catalog ?? [],
       snapshots: imports.map(({ attempt: _attempt, ...x }) => ({
         ...x,
+        diagnostics: analyticsDiagnostics(x.diagnostics),
         stale:
           !!x.importedAt && Date.now() - x.importedAt.getTime() > 7 * 86400000,
         recoverable:
           x.status === "failed" ||
           (x.status === "running" && x.leaseUntil <= new Date()),
         rowCount: Array.isArray(x.rows) ? x.rows.length : 0,
-        rows: Array.isArray(x.rows) ? x.rows.slice(0, 100) : [],
+        rows: Array.isArray(x.rows)
+          ? x.rows.slice(0, 100).map(ga4RowFacts)
+          : [],
         displayLimited: Array.isArray(x.rows) && x.rows.length > 100,
       })),
       opportunityOutcomes,
@@ -692,7 +773,7 @@ export function joinGa4Outcomes<T extends { page: string }>(
         : {
             status: "available" as const,
             label: "GA4 observed session context; no query attribution",
-            rows,
+            rows: rows.map(ga4RowFacts),
             window: {
               startDate: snapshot!.startDate,
               endDate: snapshot!.endDate,

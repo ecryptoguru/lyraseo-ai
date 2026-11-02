@@ -74,6 +74,10 @@ const kernelConfig = prefixConfig(
   "twenty-one",
   migrations.filter((name) => name <= "202611020016_worker_dispatch"),
 );
+const bridgeConfig = prefixConfig(
+  "twenty-two",
+  migrations.filter((name) => name <= "202611020017_signed_audit_bridge"),
+);
 const databases = [];
 function sql(database, statement, capture = false) {
   return run(
@@ -160,7 +164,7 @@ function snapshot(database, withAudit) {
       .map((table) =>
         sql(
           database,
-          `SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]') FROM "${table}" t;`,
+          `SELECT coalesce(jsonb_agg(to_jsonb(t)-'resultExpiresAt' ORDER BY (to_jsonb(t)-'resultExpiresAt')::text),'[]') FROM "${table}" t;`,
           true,
         ),
       )
@@ -214,8 +218,8 @@ try {
       )
       .join("\n");
   const historyBeforeBridge = kernelHistory();
-  migrate(kernelDatabase);
-  migrate(kernelDatabase);
+  migrate(kernelDatabase, bridgeConfig);
+  migrate(kernelDatabase, bridgeConfig);
   if (historyBeforeBridge !== kernelHistory())
     throw new Error(
       "Bridge migration changed prior audit, paid or kernel history.",
@@ -238,6 +242,61 @@ try {
     "PASS: populated 21 → 22, identical audit, ledger, replay and dispatch history; restricted reconnect and precise grants.",
   );
 
+  sql(kernelDatabase, fixture("pre-retention.sql"));
+  const retentionHistory = () =>
+    kernelHistory() +
+    [
+      "SearchSnapshot",
+      "SearchImport",
+      "AnalyticsImport",
+      "VisibilityPanel",
+      "VisibilityRun",
+      "ContentDraft",
+      "ContentRevision",
+      "EvidenceReport",
+    ]
+      .map((table) =>
+        sql(
+          kernelDatabase,
+          `SELECT md5(jsonb_agg(to_jsonb(t)-'evidenceFormat'-'resultExpiresAt' ORDER BY id)::text) FROM "${table}" t`,
+          true,
+        ),
+      )
+      .join("");
+  const oldDigests = retentionHistory();
+  migrate(kernelDatabase);
+  if (oldDigests !== retentionHistory())
+    throw new Error(
+      "P1 changed original typed historical evidence, report bytes or financial/dispatch history",
+    );
+  const clocks = sql(
+    kernelDatabase,
+    `SELECT string_agg("pageId"||'='||"clockStatus",',' ORDER BY "pageId") FROM "AuditPageRetention";
+    SELECT "rawExpiresAt" FROM "AuditPageRetention" WHERE "pageId"='clock-known';
+    SELECT ("evidenceFormat" IS NULL) FROM "EvidenceReport" WHERE id='old-report';
+    SELECT count(*) FROM "ContentRevisionPin";
+    SELECT "resultExpiresAt" FROM "AnalyticsImport" WHERE id='old-ga4';`,
+    true,
+  ).trim();
+  if (
+    clocks !==
+    "clock-future=unknown,clock-invalid=unknown,clock-known=known,clock-offset=unknown,immutable-page=unknown\n2024-11-30 12:13:14.456\nt\n0\n2025-11-30 12:13:14.456"
+  )
+    throw new Error("Unexpected P1 historical clock metadata: " + clocks);
+  const rights = sql(
+    kernelDatabase,
+    `SELECT has_table_privilege('lyraseo_runtime','"AuditPageRetention"','INSERT,UPDATE,DELETE'),
+    has_table_privilege('lyraseo_dispatch','"ContentRevisionPin"','SELECT,INSERT,UPDATE,DELETE'),
+    has_table_privilege('lyraseo_identity','"AuditPageRetention"','SELECT'),
+    has_function_privilege('lyraseo_runtime','lyraseo_audit.insert_capture_clock()','EXECUTE'),
+    has_table_privilege('lyraseo_runtime','"AuditPageRetention"','SELECT');`,
+    true,
+  ).trim();
+  if (rights !== "f|f|f|f|t")
+    throw new Error("Unexpected P1 role privileges " + rights);
+  console.log(
+    "PASS: populated 22 → 23, typed original evidence and bytes identical, active controlled job intact, unknown receipts closed, no legacy pins, narrow grants.",
+  );
   for (const scenario of ["empty", "seven", "twenty"]) {
     const database = `lyraseo_replay_${scenario}_${randomUUID().replaceAll("-", "")}`;
     run("docker", ["exec", container, "createdb", "-U", "postgres", database]);

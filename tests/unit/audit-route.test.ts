@@ -2,6 +2,7 @@ import { afterAll, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   resolveActor: vi.fn(),
   readAuditRun: vi.fn(),
+  readAuditSource: vi.fn(),
   listAuditRuns: vi.fn(),
   createAuditRun: vi.fn(),
   compareAuditRuns: vi.fn(),
@@ -32,6 +33,9 @@ beforeEach(() => {
   vi.stubEnv("LYRA_LOCAL_RAW_AUDITS", "true");
   vi.stubEnv("VERCEL", "");
   mocks.resolveActor.mockResolvedValue({ userId: "verified" });
+  mocks.readAuditSource.mockResolvedValue(
+    new TextEncoder().encode("<script>hostile</script>"),
+  );
   mocks.readAuditRun.mockResolvedValue({
     id: "audit",
     profile: "LOCAL_RAW_V1",
@@ -43,7 +47,6 @@ beforeEach(() => {
         requestedUrl: "https://example.com/",
         provenance: {
           channel: "raw-http",
-          rawHtml: "<script>hostile</script>",
         },
       },
     ],

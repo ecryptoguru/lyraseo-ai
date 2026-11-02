@@ -9,6 +9,7 @@ import {
   createAuditRun,
   listAuditRuns,
   readAuditRun,
+  readAuditSource,
   reviewAuditIssue,
 } from "@lyraseo/db/audits";
 import { runRawAuditStep } from "@/server/acquisition/runner";
@@ -16,16 +17,6 @@ import { publicHttpsTransport } from "@/server/acquisition/transport";
 import { declarationsSchema, type AuditEvaluation } from "@lyraseo/visibility";
 
 const headers = { "Cache-Control": "private, no-store" };
-function auditView(run: Awaited<ReturnType<typeof readAuditRun>>) {
-  return {
-    ...run,
-    pages: run.pages.map((page) => {
-      const provenance = { ...page.provenance };
-      delete provenance.rawHtml;
-      return { ...page, provenance };
-    }),
-  };
-}
 async function boundedBody(request: Request) {
   const reader = request.body?.getReader();
   if (!reader) throw new Error("INVALID_BODY");
@@ -73,6 +64,11 @@ const command = z.discriminatedUnion("action", [
 ]);
 function failure(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (code === "SOURCE_EXPIRED")
+    return Response.json(
+      { error: "Source unavailable or expired." },
+      { status: 410, headers },
+    );
   if (["FORBIDDEN", "NOT_FOUND"].includes(code))
     return Response.json(
       { error: "Access to this audit is unavailable." },
@@ -168,13 +164,11 @@ export async function POST(request: Request) {
       }
       case "step":
         return Response.json(
-          auditView(
-            await runRawAuditStep(
-              database(),
-              actor,
-              auditScope.parse(input),
-              publicHttpsTransport,
-            ),
+          await runRawAuditStep(
+            database(),
+            actor,
+            auditScope.parse(input),
+            publicHttpsTransport,
           ),
           { headers },
         );
@@ -221,21 +215,14 @@ export async function GET(request: Request) {
         ),
         { headers },
       );
-    const run = await readAuditRun(
-      database(),
-      actor,
-      resource,
-      query.get("format") === "csv" ? "export" : "read",
-    );
     if (query.get("format") === "source") {
-      const raw = run.pages.find(
-        (page) => page.requestedUrl === query.get("url"),
-      )?.provenance.rawHtml;
-      if (typeof raw !== "string")
-        return Response.json(
-          { error: "Source unavailable or expired." },
-          { status: 410, headers },
-        );
+      if (request.headers.has("authorization")) throw new Error("FORBIDDEN");
+      const raw = await readAuditSource(
+        database(),
+        actor,
+        resource,
+        query.get("url") ?? "",
+      );
       return new Response(raw, {
         headers: {
           ...headers,
@@ -245,6 +232,12 @@ export async function GET(request: Request) {
         },
       });
     }
+    const run = await readAuditRun(
+      database(),
+      actor,
+      resource,
+      query.get("format") === "csv" ? "export" : "read",
+    );
     if (query.get("format") === "csv") {
       const csvCell = (value: unknown) => {
         let text = String(value ?? "");
@@ -333,7 +326,7 @@ export async function GET(request: Request) {
         },
       );
     }
-    return Response.json(auditView(run), { headers });
+    return Response.json(run, { headers });
   } catch (error) {
     return failure(error);
   }

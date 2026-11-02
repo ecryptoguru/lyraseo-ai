@@ -26,6 +26,7 @@ type SavedRun = Summary & {
   }>;
   pages: Array<{
     requestedUrl: string;
+    sourceAvailability?: string;
     provenance: {
       error?: string;
       sha256?: string;
@@ -433,7 +434,7 @@ export function PersistedAudits({
           {selected.pages.map((page) => (
             <details key={page.requestedUrl}>
               <summary className="audit-url">{page.requestedUrl}</summary>
-              <p>{page.provenance.error ?? "Original HTML captured"}</p>
+              {page.provenance.error && <p>{page.provenance.error}</p>}
               <p>Captured {page.provenance.acquiredAt}</p>
               <p className="audit-url">
                 SHA-256 {page.provenance.sha256 ?? "unavailable"}
@@ -441,11 +442,23 @@ export function PersistedAudits({
               {page.provenance.robotsPolicy && (
                 <RobotsPolicyDetails policy={page.provenance.robotsPolicy} />
               )}
-              <a
-                href={`${base}&auditId=${selected.id}&format=source&url=${encodeURIComponent(page.requestedUrl)}`}
-              >
-                Download retained original source
-              </a>
+              {page.sourceAvailability === "current" ? (
+                <a
+                  href={`${base}&auditId=${selected.id}&format=source&url=${encodeURIComponent(page.requestedUrl)}`}
+                >
+                  Download retained original source
+                </a>
+              ) : (
+                <p>
+                  Original source{" "}
+                  {page.sourceAvailability === "expired"
+                    ? "expired"
+                    : page.sourceAvailability === "unknown-clock"
+                      ? "unavailable because its capture time is unknown"
+                      : "unavailable"}
+                  .
+                </p>
+              )}
             </details>
           ))}
           <p>
@@ -509,7 +522,11 @@ export function PersistedAudits({
   );
 }
 
-function RobotsPolicyDetails({ policy }: { policy: RobotsPolicyObservation }) {
+function RobotsPolicyDetails({
+  policy,
+}: {
+  policy: RobotsPolicyObservation & { groupAgent?: string; ruleCount?: number };
+}) {
   return (
     <details className="audit-url">
       <summary>Google robots policy evidence</summary>
@@ -545,6 +562,11 @@ function RobotsPolicyDetails({ policy }: { policy: RobotsPolicyObservation }) {
             : policy.final.allowed
               ? "allowed"
               : "disallowed"}
+        </p>
+      )}
+      {policy.groupAgent && (
+        <p>
+          Applicable group {policy.groupAgent} · {policy.ruleCount} parsed rules
         </p>
       )}
       {policy.googleGroup && (

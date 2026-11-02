@@ -110,6 +110,20 @@ const catalogue: Record<string, [Category, Priority, string[], string[]?]> = {
   ],
   T04: ["entity", "low", ["bodyComplete", "linkNames"], ["requiredPolicyUrls"]],
 };
+/** Field-name allowlist for saved evidence references. Keep it aligned with the measured rule catalogue. */
+export const measuredEvidenceFields: ReadonlySet<string> = new Set([
+  ...Object.values(catalogue).flatMap(([, , fields, declarations]) => [
+    ...fields,
+    ...(declarations ?? []),
+  ]),
+  "acquiredAt",
+  "sha256",
+  "redirects",
+  "status",
+  "finalUrl",
+  "robotsPolicy",
+  "manifest",
+]);
 const originRules = new Set(["D05", "T02", "T03", "T04"]);
 const pageRules = Object.keys(catalogue).filter((id) => !originRules.has(id));
 function make(

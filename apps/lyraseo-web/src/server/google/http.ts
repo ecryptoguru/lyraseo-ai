@@ -6,6 +6,11 @@ export const googleScope = z.object({
 export const googleHeaders = { "Cache-Control": "private, no-store" };
 export function googleFailure(error: unknown) {
   const message = error instanceof Error ? error.message : "";
+  if (message === "SOURCE_EXPIRED")
+    return Response.json(
+      { error: "This evidence is unavailable or expired." },
+      { status: 410, headers: googleHeaders },
+    );
   if (["FORBIDDEN", "NOT_FOUND"].includes(message))
     return Response.json(
       { error: "Site access is unavailable." },

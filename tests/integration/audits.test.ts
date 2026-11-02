@@ -191,9 +191,14 @@ it("keeps review workflow separate from snapshots and removed pages unevaluated"
     disposition: "REVIEWED",
     reason: "Reviewed source",
   });
-  expect((await readAuditRun(db, actor, scope(before.id))).evaluation).toEqual(
-    original,
-  );
+  expect(
+    (await admin.auditRun.findUniqueOrThrow({ where: { id: before.id } }))
+      .evaluation,
+  ).toEqual(original);
+  expect(
+    (await readAuditRun(db, actor, scope(before.id))).evaluation
+      ?.methodologyVersion,
+  ).toBe(before.methodologyVersion);
   const after = await complete("after");
   const comparison = await compareAuditRuns(
     db,
@@ -414,11 +419,14 @@ it("finishes a legacy queued run under its stored methodology and keeps its hist
   await checkpointAuditPage(db, actor, s, claim.fence, page(), provenance());
   const completed = await finishAuditRun(db, actor, s, claim.fence);
   const saved = await readAuditRun(db, actor, s);
-  expect(saved.evaluation).toEqual(completed.evaluation);
+  expect(
+    (await admin.auditRun.findUniqueOrThrow({ where: { id: old.id } }))
+      .evaluation,
+  ).toEqual(completed.evaluation);
   expect(saved.evaluation).toMatchObject({
     methodologyVersion: "readiness-v1",
     score: null,
   });
-  expect(saved.evaluation).not.toHaveProperty("categoryCoverage");
-  expect(saved.evaluation?.rules[0]).not.toHaveProperty("ruleVersion");
+  expect(saved.evaluation).toHaveProperty("categoryCoverage", undefined);
+  expect(saved.evaluation?.rules[0]).toHaveProperty("ruleVersion", undefined);
 });

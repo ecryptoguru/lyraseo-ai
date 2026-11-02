@@ -125,6 +125,7 @@ test("viewer can download a private report without draft or report creation cont
         {
           id: "report",
           title: "Private evidence report",
+          evidenceFormat: "saved-evidence-v2",
           createdAt: "2026-11-02T00:00:00Z",
         },
       ],
@@ -404,4 +405,175 @@ test("report comparison respects loading, empty and paused states", async ({
   await expect(
     page.getByText("Paused", { exact: false }).first(),
   ).toBeVisible();
+});
+test("pins a historical revision, retains a citation from an expired source and previews a quarantined report", async ({
+  page,
+}, testInfo) => {
+  let pinned = false,
+    advanced = false,
+    attempted: Record<string, unknown> | undefined;
+  const saved = (older: boolean) => ({
+    ...draft,
+    revision: advanced ? 3 : 2,
+    nextHistoryBefore: older ? null : 2,
+    sourceAvailability: [{ sourceId: "audit:audit", status: "expired" }],
+    history: older
+      ? [
+          {
+            ...draft.history[0],
+            revision: 1,
+            pin: pinned ? { pinnedAt: "2026-11-02T00:00:00Z" } : null,
+          },
+        ]
+      : [
+          {
+            ...draft.history[0],
+            revision: advanced ? 3 : 2,
+            pin: null,
+            ...(advanced
+              ? {
+                  content: {
+                    ...draft.history[0].content,
+                    body: "Bob's revision",
+                    citations: [
+                      { sourceId: "audit:bob", note: "Bob's citation" },
+                    ],
+                  },
+                }
+              : {}),
+          },
+        ],
+  });
+  await page.route("**/api/content**", (route) => {
+    if (route.request().method() === "GET")
+      return route.fulfill({
+        json: [
+          saved(
+            new URL(route.request().url()).searchParams.has("beforeRevision"),
+          ),
+        ],
+      });
+    const input = route.request().postDataJSON();
+    if (input.action === "save") {
+      attempted = input;
+      // Match the optimistic writer: only an actual stale baseline gets a conflict.
+      if (input.expectedRevision === (advanced ? 3 : 2))
+        return route.fulfill({
+          json: { revision: input.expectedRevision + 1 },
+        });
+      return route.fulfill({
+        status: 409,
+        json: { error: "A newer revision exists. Preserve your edits." },
+      });
+    }
+    expect(input.action).toBe("pin");
+    expect(input.revision).toBe(1);
+    advanced = true;
+    pinned = input.pinned;
+    return route.fulfill({
+      json: {
+        revision: 1,
+        pinned,
+        available: true,
+        pin: pinned ? { pinnedAt: "2026-11-02T00:00:00Z" } : null,
+      },
+    });
+  });
+  const report = {
+    id: "legacy",
+    title: "Original report",
+    createdAt: "2025-01-01T12:00:00Z",
+    evidenceFormat: null,
+  };
+  await page.route("**/api/reports**", (route) =>
+    route.fulfill({
+      json: route.request().url().includes("format=preview")
+        ? {
+            ...report,
+            sourceAvailability: [
+              { sourceId: "gsc:old", status: "disconnected" },
+            ],
+            snapshot: {
+              sources: [
+                {
+                  sourceId: "gsc:old",
+                  data: { metrics: { clicks: 3, impressions: 10 } },
+                },
+              ],
+            },
+          }
+        : [report],
+    }),
+  );
+  await page.route("**/api/audits**", (r) => r.fulfill({ json: [] }));
+  await page.route("**/api/search**", (r) =>
+    r.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Controlled retention fixture</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  await page
+    .getByRole("button", { name: "Product page improvement · revision 2" })
+    .click();
+  await expect(page.getByText("audit:audit · source expired")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Saved citation · The title finding supports the proposed change.",
+    ),
+  ).toBeVisible();
+  await page.getByText("Saved revision history", { exact: true }).click();
+  await page.getByLabel("Editable Markdown draft").fill("Unsaved edits");
+  await page.getByRole("button", { name: "Load older revisions" }).click();
+  await page
+    .getByRole("button", { name: "Pin revision 1", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Unpin revision 1", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Unpin revision 1", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Pin revision 1", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Editable Markdown draft")).toHaveValue(
+    "Unsaved edits",
+  );
+  await page.getByRole("button", { name: "Save next revision" }).click();
+  await expect(page.getByRole("status").first()).toContainText(
+    "newer revision",
+  );
+  expect(attempted).toMatchObject({
+    expectedRevision: 2,
+    body: "Unsaved edits",
+    citations: draft.history[0].content.citations,
+  });
+  await expect(page.getByLabel("Editable Markdown draft")).toHaveValue(
+    "Unsaved edits",
+  );
+  await expect(
+    page.getByText("Original downloads unavailable pending legacy review."),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download PDF" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Preview Original report" }).click();
+  await expect(
+    page.getByRole("region", { name: "Saved report preview" }),
+  ).toContainText("source disconnected");
+  await expect(
+    page.getByRole("region", { name: "Saved report preview" }),
+  ).toContainText("Saved clicks 3");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/retention-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
 });

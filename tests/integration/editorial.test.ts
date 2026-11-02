@@ -122,8 +122,10 @@ it("stores private immutable report outputs with fresh download authorization", 
   const report = await storeEvidenceReport(db, actor, scope, {
     title: "Evidence",
     snapshot,
-    pdf: new Uint8Array([37, 80, 68, 70]),
-    csv: "saved,csv",
+    render: async () => ({
+      pdf: new Uint8Array([37, 80, 68, 70]),
+      csv: "saved,csv",
+    }),
   });
   await expect(
     captureEditorialEvidence(db, { ...actor, userId: "viewer" }, scope, input),
@@ -132,8 +134,7 @@ it("stores private immutable report outputs with fresh download authorization", 
     storeEvidenceReport(db, { ...actor, userId: "viewer" }, scope, {
       title: "Forbidden",
       snapshot,
-      pdf: new Uint8Array([1]),
-      csv: "no",
+      render: async () => ({ pdf: new Uint8Array([1]), csv: "no" }),
     }),
   ).rejects.toThrow("FORBIDDEN");
   expect(
@@ -230,14 +231,20 @@ it("copies a retained wider Unicode anchor into a JSONB editorial snapshot witho
             { href: "https://example.com/about", name: "a".repeat(499) + "😀" },
           ],
         },
-        provenance: { channel: "raw-http" },
+        provenance: {
+          channel: "raw-http",
+          acquiredAt: new Date(Date.now() - 1000).toISOString(),
+        },
       },
       {
         workspaceId: "a",
         auditId: "unicode-source",
         requestedUrl: "https://example.com/about",
         evidence: { acquired: true, linkNames: [] },
-        provenance: { channel: "raw-http" },
+        provenance: {
+          channel: "raw-http",
+          acquiredAt: new Date(Date.now() - 1000).toISOString(),
+        },
       },
     ],
   });
