@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./runtime-signing": "./src/runtime-signing.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

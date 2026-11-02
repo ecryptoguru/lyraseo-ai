@@ -112,6 +112,13 @@ export async function authorizeSiteIn(
     where: { workspaceId_id: { workspaceId, id: siteId } },
   });
   if (!site || site.deletedAt) throw new Error("NOT_FOUND");
+  if (action === "run") {
+    const [row] = await tx.$queryRaw<
+      { allowed: boolean }[]
+    >`SELECT lyraseo_audit.web_can_run(${siteId}::text) AS allowed`;
+    if (!row?.allowed) throw new Error("FORBIDDEN");
+    return site;
+  }
   if (member.role === "OWNER" || member.role === "ADMIN") return site;
   if (member.role === "VIEWER" && !["read", "export"].includes(action))
     throw new Error("FORBIDDEN");

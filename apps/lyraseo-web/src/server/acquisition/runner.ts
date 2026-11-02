@@ -10,7 +10,7 @@ import {
   type AuditScope,
 } from "@lyraseo/db/audits";
 import {
-  acquireRawPage,
+  runAuditPage,
   type PublicTransport,
 } from "@lyraseo/visibility/acquisition";
 
@@ -27,10 +27,11 @@ export async function runRawAuditStep(
   const next = (stored.manifest as string[]).find((url) => !captured.has(url));
   if (next) {
     const siteOrigin = new URL(next).origin;
-    const receipt = await acquireRawPage(next, siteOrigin, transport);
-    await checkpointAuditPage(db, actor, scope, lease.fence, receipt.evidence, {
-      ...receipt.provenance,
-    });
+    await runAuditPage(next, siteOrigin, transport, (receipt) =>
+      checkpointAuditPage(db, actor, scope, lease.fence, receipt.evidence, {
+        ...receipt.provenance,
+      }),
+    );
     captured.add(next);
   }
   if (captured.size === (stored.manifest as string[]).length) {

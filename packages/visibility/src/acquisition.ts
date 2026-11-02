@@ -338,6 +338,7 @@ export async function acquireRawPage(
   requestedUrl: string,
   siteOrigin: string,
   transport: PublicTransport,
+  outer?: AbortSignal,
 ): Promise<AcquisitionReceipt> {
   const requested = normalizeUrl(requestedUrl),
     origin = new URL(normalizeUrl(siteOrigin)).origin;
@@ -360,7 +361,9 @@ export async function acquireRawPage(
       redirects: [],
     },
   };
-  const signal = AbortSignal.timeout(15000);
+  const deadline = AbortSignal.timeout(15000);
+  const signal = outer ? AbortSignal.any([outer, deadline]) : deadline;
+  signal.throwIfAborted();
   try {
     const policy = await requestSameOrigin(
       policyUrl,
@@ -475,7 +478,13 @@ export async function acquireRawPage(
       throw new Error("UNSUPPORTED_CONTENT_TYPE");
     }
     const bytes = await boundedBytes(response, HTML_LIMIT, signal);
-    const html = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // Preserve every accepted UTF-8 byte when the source is re-encoded
+    // for persistence. HTML parsing consumes a leading BOM as a signature.
+    const source = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
+    const html = source.startsWith("\uFEFF") ? source.slice(1) : source;
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     receipt.provenance.sha256 = Array.from(new Uint8Array(digest), (byte) =>
       byte.toString(16).padStart(2, "0"),
@@ -484,7 +493,7 @@ export async function acquireRawPage(
     // unreadable receipt, never a silently altered copy of the hashed source.
     if (html.includes("\u0000")) throw new Error("BODY_UNREPRESENTABLE");
     if (html.length === 0) throw new Error("EMPTY_HTML_BODY");
-    receipt.provenance.rawHtml = html;
+    receipt.provenance.rawHtml = source;
     const evidence = {
       ...extractRawHtml(html, requested, finalUrl, response.headers),
       status: response.status,
@@ -497,6 +506,7 @@ export async function acquireRawPage(
       throw new Error("EVIDENCE_TOO_LARGE");
     receipt.evidence = evidence;
   } catch (error) {
+    outer?.throwIfAborted();
     const code = error instanceof Error ? error.message : "ACQUISITION_FAILED";
     receipt.provenance.error =
       /^(EMPTY_HTML_BODY|BODY_UNREPRESENTABLE|BODY_TOO_LARGE|EVIDENCE_TOO_LARGE|REDIRECT_\w+|ROBOTS_\w+|HTTP_ERROR|UNSUPPORTED_CONTENT_TYPE|UNSAFE_TRANSPORT_REDIRECT|DESTINATION_BLOCKED)$/.test(
@@ -505,5 +515,20 @@ export async function acquireRawPage(
         ? code
         : "ACQUISITION_FAILED";
   }
+  outer?.throwIfAborted();
   return receipt;
+}
+
+/** One server-selected page, one observed receipt and one fixed storage
+ * adapter. Both browser and bridge provide their already-authorized transition. */
+export async function runAuditPage<T>(
+  url: string,
+  origin: string,
+  transport: PublicTransport,
+  persist: (receipt: AcquisitionReceipt) => Promise<T>,
+  signal?: AbortSignal,
+) {
+  const receipt = await acquireRawPage(url, origin, transport, signal);
+  signal?.throwIfAborted();
+  return persist(receipt);
 }

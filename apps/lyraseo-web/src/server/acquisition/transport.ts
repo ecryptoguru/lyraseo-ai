@@ -40,9 +40,11 @@ export async function resolvePublicAddress(
 export async function publicHttpsTransport(
   value: string,
   signal: AbortSignal,
+  beforeSocket?: () => Promise<void>,
 ): Promise<Response> {
   const url = new URL(normalizeUrl(value));
   const address = await resolvePublicAddress(url.hostname, signal);
+  await beforeSocket?.();
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const req = request(

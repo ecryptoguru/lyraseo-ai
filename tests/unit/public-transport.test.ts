@@ -115,3 +115,44 @@ it.each([200, 204, 205])(
     );
   },
 );
+it("checks authority after DNS resolution and before opening the pinned TLS socket", async () => {
+  const signal = AbortSignal.timeout(1000);
+  httpsMocks.request.mockClear();
+  let resolved = false;
+  mocks.lookup.mockImplementation(async () => {
+    resolved = true;
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  await expect(
+    publicHttpsTransport("https://example.com/", signal, async () => {
+      expect(resolved).toBe(true);
+      throw new Error("REVOKED");
+    }),
+  ).rejects.toThrow("REVOKED");
+  expect(httpsMocks.request).not.toHaveBeenCalled();
+});
+it("keeps the TLS and Host URL intact and pins the first public lookup even if DNS changes", async () => {
+  mocks.lookup
+    .mockReset()
+    .mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }])
+    .mockResolvedValueOnce([{ address: "127.0.0.1", family: 4 }]);
+  respond(204);
+  const gate = vi.fn(async () => {
+    expect(mocks.lookup).toHaveBeenCalledTimes(1);
+  });
+  await publicHttpsTransport(
+    "https://example.com/page",
+    AbortSignal.timeout(1000),
+    gate,
+  );
+  const [target, options] = httpsMocks.request.mock.calls.at(-1)!;
+  expect(target.href).toBe("https://example.com/page");
+  expect(options.servername).toBeUndefined();
+  expect(options.rejectUnauthorized).not.toBe(false);
+  expect(options.headers.host).toBeUndefined();
+  const resolved = vi.fn();
+  options.lookup("example.com", {}, resolved);
+  expect(resolved).toHaveBeenCalledWith(null, "93.184.216.34", 4);
+  expect(mocks.lookup).toHaveBeenCalledTimes(1);
+  expect(gate).toHaveBeenCalledOnce();
+});

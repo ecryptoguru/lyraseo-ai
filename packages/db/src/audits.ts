@@ -1,15 +1,17 @@
-import { validRawRobotsReceipt } from "@lyraseo/visibility/robots-source";
+import { auditErrorCode } from "./audit-errors";
+import {
+  fingerprint,
+  validateRawPage,
+  frozenEvaluation,
+} from "./audit-evidence";
+import { auditManifest } from "@lyraseo/visibility/url";
 import { siteScope } from "./sites";
 /** Local, unmetered raw acquisition lifecycle. Never admits a paid provider call. */
-import { createHash } from "node:crypto";
 import type { PrismaClient, Prisma } from "../generated/client";
 import {
-  normalizeUrl,
-  evaluateAudit,
   compareAudits,
   validateDeclarations,
   type ReadinessDeclarations,
-  type Methodology,
   type PageEvidence,
   type AuditEvaluation,
 } from "@lyraseo/visibility";
@@ -32,20 +34,6 @@ export type AuditDeclarations = ReadinessDeclarations & {
 };
 const json = (value: unknown) =>
   JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
-const stable = (value: unknown): unknown =>
-  Array.isArray(value)
-    ? value.map(stable)
-    : value && typeof value === "object"
-      ? Object.fromEntries(
-          Object.entries(value)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([key, item]) => [key, stable(item)]),
-        )
-      : value;
-const fingerprint = (value: unknown) =>
-  createHash("sha256")
-    .update(JSON.stringify(stable(value)))
-    .digest("hex");
 async function scoped(
   tx: Tx,
   actor: ReadActor,
@@ -68,30 +56,9 @@ function freshVerification(site: { verifiedAt: Date | null }) {
   if (!verified || verified > Date.now() || Date.now() - verified > 86400000)
     throw new Error("SITE_NOT_VERIFIED");
 }
-function validFinalUrl(value: unknown, requested: string) {
-  if (value === undefined) return true;
-  if (typeof value !== "string") return false;
-  try {
-    return new URL(normalizeUrl(value)).origin === new URL(requested).origin;
-  } catch {
-    return false;
-  }
-}
 async function lock(tx: Tx, scope: AuditScope) {
   await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id=${scope.workspaceId} FOR UPDATE`;
   await tx.$queryRaw`SELECT id FROM "Site" WHERE id=${scope.siteId} AND "workspaceId"=${scope.workspaceId} FOR UPDATE`;
-}
-function lease(
-  run: { status: string; fence: number; leaseUntil: Date | null },
-  fence: number,
-) {
-  if (
-    run.status !== "RUNNING" ||
-    run.fence !== fence ||
-    !run.leaseUntil ||
-    run.leaseUntil.getTime() <= Date.now()
-  )
-    throw new Error("STALE_LEASE");
 }
 export async function createAuditRun(
   db: PrismaClient,
@@ -121,24 +88,7 @@ export async function createAuditRun(
       "run",
     );
     freshVerification(site);
-    let manifest: string[];
-    try {
-      if (!Array.isArray(input.manifest) || input.manifest.length > 25)
-        throw new Error();
-      manifest = input.manifest.map(normalizeUrl).sort();
-    } catch {
-      throw new Error("INVALID_MANIFEST");
-    }
-    if (new Set(manifest).size !== manifest.length)
-      throw new Error("INVALID_MANIFEST");
-    const homepage = normalizeUrl(site.origin + "/");
-    if (
-      !manifest.length ||
-      manifest.length > 25 ||
-      !manifest.includes(homepage) ||
-      manifest.some((url) => new URL(url).origin !== site.origin)
-    )
-      throw new Error("INVALID_MANIFEST");
+    const manifest = auditManifest(input.manifest, site.origin);
     const previous = await tx.auditRun.findUnique({
       where: {
         workspaceId_siteId_userId_idempotencyKey: {
@@ -259,39 +209,40 @@ export async function readAuditRun(
     };
   });
 }
+// Browser-only fixed storage adapter. Its caller must already be in the scoped
+// web transaction; the SQL guard independently binds and locks that actor.
+async function webTransition(
+  tx: Tx,
+  actor: Actor,
+  scope: AuditScope,
+  action: string,
+  fence: number | null = null,
+  owner: string | null = null,
+  data: unknown = null,
+) {
+  if ("credential" in actor) throw new Error("FORBIDDEN");
+  const [row] = await tx.$queryRaw<
+    { id: string }[]
+  >`SELECT lyraseo_audit.web_transition(
+   ${scope.siteId}::text,${scope.auditId}::text,${actor.securityVersion}::integer,${action}::text,
+   ${fence}::integer,${owner}::text,${data === null ? null : JSON.stringify(data)}::json) AS id`.catch(
+    (error: unknown) => {
+      const code = auditErrorCode(error);
+      if (code) throw new Error(code);
+      throw error;
+    },
+  );
+  return row!.id;
+}
 export async function claimAuditRun(
   db: PrismaClient,
   actor: Actor,
   scope: AuditScope,
   leaseOwner: string,
 ) {
-  if (!leaseOwner || leaseOwner.length > 128)
-    throw new Error("INVALID_LEASE_OWNER");
   return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await lock(tx, scope);
-    const run = await scoped(tx, actor, scope, "run");
-    freshVerification(
-      await tx.site.findUniqueOrThrow({ where: { id: scope.siteId } }),
-    );
-    if (
-      run.profile !== "LOCAL_RAW_V1" ||
-      run.userId !== actor.userId ||
-      run.securityVersion !== actor.securityVersion
-    )
-      throw new Error("FORBIDDEN");
-    if (!["QUEUED", "RUNNING"].includes(run.status))
-      throw new Error("AUDIT_TERMINAL");
-    if (run.leaseUntil && run.leaseUntil.getTime() > Date.now())
-      throw new Error("LEASE_BUSY");
-    return tx.auditRun.update({
-      where: { id: run.id },
-      data: {
-        status: "RUNNING",
-        fence: { increment: 1 },
-        leaseOwner,
-        leaseUntil: new Date(Date.now() + 90000),
-      },
-    });
+    const id = await webTransition(tx, actor, scope, "claim", null, leaseOwner);
+    return tx.auditRun.findUniqueOrThrow({ where: { id } });
   });
 }
 export async function checkpointAuditPage(
@@ -303,97 +254,22 @@ export async function checkpointAuditPage(
   provenance: Record<string, unknown>,
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await lock(tx, scope);
-    const run = await scoped(tx, actor, scope, "run");
-    freshVerification(
-      await tx.site.findUniqueOrThrow({ where: { id: scope.siteId } }),
+    const id = await webTransition(tx, actor, scope, "prepare", fence);
+    validateRawPage(
+      await tx.auditRun.findUniqueOrThrow({ where: { id } }),
+      evidence,
+      provenance,
     );
-    lease(run, fence);
-    if (
-      run.userId !== actor.userId ||
-      run.securityVersion !== actor.securityVersion
-    )
-      throw new Error("FORBIDDEN");
-    if (
-      !(run.manifest as string[]).includes(evidence.requestedUrl) ||
-      provenance.requestedUrl !== evidence.requestedUrl ||
-      provenance.channel !== "raw-http" ||
-      typeof provenance.acquiredAt !== "string" ||
-      !Number.isFinite(Date.parse(provenance.acquiredAt)) ||
-      Date.parse(provenance.acquiredAt) > Date.now() ||
-      !validFinalUrl(evidence.finalUrl, evidence.requestedUrl) ||
-      !validFinalUrl(provenance.finalUrl, evidence.requestedUrl) ||
-      (evidence.finalUrl !== undefined &&
-        provenance.finalUrl !== undefined &&
-        evidence.finalUrl !== provenance.finalUrl)
-    )
-      throw new Error("INVALID_PAGE_EVIDENCE");
-    if (
-      Buffer.byteLength(JSON.stringify(evidence), "utf8") > 262144 ||
-      Buffer.byteLength(JSON.stringify(provenance), "utf8") >
-        32 * 1024 * 1024 ||
-      (typeof provenance.rawHtml === "string" &&
-        Buffer.byteLength(provenance.rawHtml, "utf8") > 5 * 1024 * 1024)
-    )
-      throw new Error("EVIDENCE_TOO_LARGE");
-    // LOCAL_RAW_V1 has no renderer. Even trusted internal writers cannot
-    // promote raw anchors, headings or metadata to rendered observations.
-    if (
-      run.methodologyVersion === "readiness-v2" &&
-      run.profile === "LOCAL_RAW_V1" &&
-      (!validRawRobotsReceipt(evidence, provenance.robotsPolicy) ||
-        (evidence.acquired &&
-          (typeof provenance.rawHtml !== "string" ||
-            !provenance.rawHtml.length)) ||
-        evidence.headComplete ||
-        evidence.bodyComplete ||
-        evidence.metadata?.rendered !== undefined ||
-        evidence.jsonLdComplete ||
-        evidence.mainMediaNames !== undefined ||
-        evidence.logoNames !== undefined ||
-        evidence.visibleText !== undefined ||
-        evidence.mainText !== undefined ||
-        evidence.populatedSections !== undefined ||
-        evidence.articleDates !== undefined ||
-        evidence.headingLevels.length ||
-        evidence.h1Texts.length ||
-        evidence.headingTexts !== undefined ||
-        evidence.pageType !== undefined ||
-        evidence.indexingIntent !== undefined ||
-        evidence.intendedCanonical !== undefined ||
-        evidence.intentionallyExcluded !== undefined)
-    )
-      throw new Error("INVALID_PAGE_EVIDENCE");
-    const existing = await tx.auditPage.findUnique({
-      where: {
-        auditId_requestedUrl: {
-          auditId: run.id,
-          requestedUrl: evidence.requestedUrl,
-        },
-      },
-    });
-    if (existing) {
-      if (
-        fingerprint(existing.evidence) !== fingerprint(json(evidence)) ||
-        fingerprint(existing.provenance) !== fingerprint(json(provenance))
-      )
-        throw new Error("IMMUTABLE_EVIDENCE");
-      return existing;
-    }
-    const page = await tx.auditPage.create({
-      data: {
-        workspaceId: scope.workspaceId,
-        auditId: run.id,
-        requestedUrl: evidence.requestedUrl,
-        evidence: json(evidence),
-        provenance: json(provenance),
-      },
-    });
-    await tx.auditRun.update({
-      where: { id: run.id },
-      data: { leaseUntil: new Date(Date.now() + 90000) },
-    });
-    return page;
+    const pageId = await webTransition(
+      tx,
+      actor,
+      scope,
+      "checkpoint",
+      fence,
+      null,
+      { evidence, provenance },
+    );
+    return tx.auditPage.findUniqueOrThrow({ where: { id: pageId } });
   });
 }
 export async function finishAuditRun(
@@ -403,44 +279,23 @@ export async function finishAuditRun(
   fence: number,
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await lock(tx, scope);
-    const run = await scoped(tx, actor, scope, "run");
-    freshVerification(
-      await tx.site.findUniqueOrThrow({ where: { id: scope.siteId } }),
-    );
-    lease(run, fence);
-    if (
-      run.userId !== actor.userId ||
-      run.securityVersion !== actor.securityVersion
-    )
-      throw new Error("FORBIDDEN");
+    const id = await webTransition(tx, actor, scope, "prepare", fence);
+    const run = await tx.auditRun.findUniqueOrThrow({ where: { id } });
     const pages = await tx.auditPage.findMany({
-      where: { auditId: run.id, workspaceId: scope.workspaceId },
+      where: { auditId: id },
+      select: { evidence: true },
       orderBy: { requestedUrl: "asc" },
     });
-    if (pages.length !== (run.manifest as string[]).length)
-      throw new Error("AUDIT_INCOMPLETE");
     const site = await tx.site.findUniqueOrThrow({
       where: { id: scope.siteId },
     });
-    const evaluation = evaluateAudit({
-      ...(run.declarations as AuditDeclarations),
-      siteOrigin: site.origin,
-      manifest: run.manifest as string[],
-      pages: pages.map((p) => p.evidence as unknown as PageEvidence),
-      methodologyVersion: run.methodologyVersion as Methodology,
-      profile: run.profile,
-    });
-    return tx.auditRun.update({
-      where: { id: run.id },
-      data: {
-        evaluation: json(evaluation),
-        status: "COMPLETED",
-        completedAt: new Date(),
-        leaseUntil: null,
-        leaseOwner: null,
-      },
-    });
+    const evaluation = frozenEvaluation(
+      run,
+      site.origin,
+      pages.map((p) => p.evidence as unknown as PageEvidence),
+    );
+    await webTransition(tx, actor, scope, "finish", fence, null, evaluation);
+    return tx.auditRun.findUniqueOrThrow({ where: { id } });
   });
 }
 export async function compareAuditRuns(
@@ -517,80 +372,39 @@ export async function reviewAuditIssue(
   });
 }
 /** Terminates a failed controlled acquisition without publishing a partial score. */
-export async function failAuditRun(
+async function endLease(
+  db: PrismaClient,
+  actor: Actor,
+  scope: AuditScope,
+  action: "fail" | "yield" | "cancel",
+  fence: number | null,
+) {
+  return withActor(db, actor, scope.workspaceId, async (tx) => {
+    const id = await webTransition(tx, actor, scope, action, fence);
+    return tx.auditRun.findUniqueOrThrow({ where: { id } });
+  });
+}
+export function failAuditRun(
   db: PrismaClient,
   actor: Actor,
   scope: AuditScope,
   fence: number,
 ) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await lock(tx, scope);
-    const run = await scoped(tx, actor, scope, "run");
-    lease(run, fence);
-    if (
-      run.userId !== actor.userId ||
-      run.securityVersion !== actor.securityVersion
-    )
-      throw new Error("FORBIDDEN");
-    return tx.auditRun.update({
-      where: { id: run.id },
-      data: {
-        status: "FAILED",
-        completedAt: new Date(),
-        leaseUntil: null,
-        leaseOwner: null,
-      },
-    });
-  });
+  return endLease(db, actor, scope, "fail", fence);
 }
-/** Authorized site editors can stop an abandoned run even after its sponsor loses access. */
-export async function cancelAuditRun(
-  db: PrismaClient,
-  actor: Actor,
-  scope: AuditScope,
-) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await lock(tx, scope);
-    const run = await scoped(tx, actor, scope, "edit");
-    if (!["QUEUED", "RUNNING"].includes(run.status))
-      throw new Error("AUDIT_TERMINAL");
-    return tx.auditRun.update({
-      where: { id: run.id },
-      data: {
-        status: "FAILED",
-        fence: { increment: 1 },
-        completedAt: new Date(),
-        leaseUntil: null,
-        leaseOwner: null,
-      },
-    });
-  });
-}
-
-/** Release a bounded page invocation; the next invocation can claim immediately. */
-export async function yieldAuditRun(
+export function yieldAuditRun(
   db: PrismaClient,
   actor: Actor,
   scope: AuditScope,
   fence: number,
 ) {
-  return withActor(db, actor, scope.workspaceId, async (tx) => {
-    await lock(tx, scope);
-    const run = await scoped(tx, actor, scope, "run");
-    lease(run, fence);
-    if (
-      run.userId !== actor.userId ||
-      run.securityVersion !== actor.securityVersion
-    )
-      throw new Error("FORBIDDEN");
-    return tx.auditRun.update({
-      where: { id: run.id },
-      data: {
-        status: "QUEUED",
-        fence: { increment: 1 },
-        leaseUntil: null,
-        leaseOwner: null,
-      },
-    });
-  });
+  return endLease(db, actor, scope, "yield", fence);
+}
+/** Authorized editors can stop another sponsor's abandoned run across profiles. */
+export function cancelAuditRun(
+  db: PrismaClient,
+  actor: Actor,
+  scope: AuditScope,
+) {
+  return endLease(db, actor, scope, "cancel", null);
 }
