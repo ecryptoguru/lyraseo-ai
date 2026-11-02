@@ -1,0 +1,54 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lyraseo-carrier-unqualified",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-02",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "CARRIER_QUALIFIED": "false",
+    "CARRIER_ENABLED": "false",
+    "BRIDGE_ORIGIN": "",
+    "BRIDGE_KEY_ID": "",
+    "BRIDGE_PRINCIPAL": "lyraseo_dispatch",
+    "BRIDGE_AUDIENCE": "lyraseo-kernel-a",
+  },
+  "secrets": {
+    "required": ["BRIDGE_SECRET"],
+  },
+  "env": {
+    "local": {
+      "vars": {
+        "CARRIER_QUALIFIED": "false",
+        "CARRIER_ENABLED": "false",
+        "BRIDGE_ORIGIN": "",
+        "BRIDGE_KEY_ID": "",
+        "BRIDGE_PRINCIPAL": "lyraseo_dispatch",
+        "BRIDGE_AUDIENCE": "lyraseo-kernel-a",
+      },
+      "secrets": {
+        "required": ["BRIDGE_SECRET"],
+      },
+      "queues": {
+        "producers": [
+          {
+            "binding": "WORK_QUEUE",
+            "queue": "lyraseo-carrier-local",
+          },
+        ],
+        "consumers": [
+          {
+            "queue": "lyraseo-carrier-local",
+            "max_batch_size": 1,
+            "max_concurrency": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 5,
+            "retry_delay": 60,
+            "dead_letter_queue": "lyraseo-carrier-local-dlq",
+          },
+        ],
+      },
+    },
+  },
+  "send_metrics": false,
+}

@@ -32,10 +32,14 @@ jobs:
         run: pnpm db:local
       - name: Generate Next.js route and environment types
         run: pnpm --filter @lyraseo/web exec next typegen
+      - name: Generate carrier runtime declarations
+        run: pnpm --filter @lyraseo/worker generate-types && git diff --exit-code -- apps/lyraseo-worker/worker-configuration.d.ts
       - run: pnpm check
       - run: pnpm format:check
       - run: pnpm test:unit
       - run: pnpm test:integration
+      - name: Real Workers carrier and signed Node bridge
+        run: pnpm test:worker
       - name: Replay empty and populated database migrations
         run: pnpm test:migrations
       - run: pnpm build

@@ -11,8 +11,9 @@
     "test:migrations": "node scripts/test-migrations.mjs",
     "test:e2e": "pnpm --filter @lyraseo/web test:e2e",
     "db:local": "node scripts/local-db.mjs",
-    "format:check": "prettier --check \"apps/lyraseo-web/src/**/*.{ts,tsx,css}\" \"packages/*/src/*.ts\" \"tests/**/*.ts\"",
-    "auth:preflight": "node --env-file-if-exists=apps/lyraseo-web/.env.local scripts/auth-preflight.mjs"
+    "format:check": "prettier --check \"apps/lyraseo-web/src/**/*.{ts,tsx,css}\" \"packages/*/src/*.ts\" \"tests/**/*.ts\" && pnpm --filter @lyraseo/worker format:check",
+    "auth:preflight": "node --env-file-if-exists=apps/lyraseo-web/.env.local scripts/auth-preflight.mjs",
+    "test:worker": "node --test tests/worker-harness.test.mjs && node scripts/test-worker-bridge.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
