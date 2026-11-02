@@ -1,0 +1,2 @@
+# Keep pinned Wrangler output byte-identical for the generated-types drift check.
+/apps/lyraseo-worker/worker-configuration.d.ts -whitespace

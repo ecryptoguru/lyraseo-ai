@@ -1,7 +1,15 @@
-// Queue and Browser Run bindings will be enabled only after their security and
-// runtime contracts pass controlled tests. No live site work runs in this build.
+import { consume, scheduledTick } from "./carrier";
+
 export default {
   fetch(): Response {
-    return new Response("Provider work is unavailable until configured.", { status: 503 });
+    return new Response("Provider work is unavailable until configured.", {
+      status: 503,
+    });
   },
-};
+  async queue(batch, env) {
+    await consume(batch, env);
+  },
+  scheduled(controller, env, ctx) {
+    ctx.waitUntil(scheduledTick(controller, env));
+  },
+} satisfies ExportedHandler<Env, unknown>;
