@@ -1,7 +1,15 @@
 import type { createDatabase } from "@lyraseo/db";
-import { admitStep, checkStep, commitStep } from "@lyraseo/db/bridge";
+import {
+  admitStep,
+  checkStep,
+  commitStep,
+  restoreStepSource,
+} from "@lyraseo/db/bridge";
 import type { KernelRequest } from "@lyraseo/db/dispatch";
-import { runAuditPage } from "@lyraseo/visibility/acquisition";
+import {
+  runAuditPage,
+  type AcquisitionReceipt,
+} from "@lyraseo/visibility/acquisition";
 
 import type { ControlledFixture } from "./fixture";
 export async function signedStep(
@@ -67,7 +75,32 @@ export async function signedStep(
         .then(check)
         .catch(() => {});
   }, 200);
+  const persist = async (receipt: AcquisitionReceipt) => {
+    clearInterval(poll);
+    if (active) await active;
+    signal.throwIfAborted();
+    return commitStep(
+      db,
+      envelope.requestId,
+      attempt,
+      receipt,
+      signal,
+      assertSigner,
+      deadline,
+    );
+  };
   try {
+    if (attempt.pendingSource) {
+      await hopCheck();
+      const receipt = await restoreStepSource(
+        db,
+        envelope.requestId,
+        attempt.proof,
+        deadline,
+      );
+      await hopCheck();
+      return await persist(receipt);
+    }
     return await runAuditPage(
       attempt.url,
       attempt.origin,
@@ -81,20 +114,7 @@ export async function signedStep(
           rawSignal.throwIfAborted();
         });
       },
-      async (receipt) => {
-        clearInterval(poll);
-        if (active) await active;
-        signal.throwIfAborted();
-        return commitStep(
-          db,
-          envelope.requestId,
-          attempt,
-          receipt,
-          signal,
-          assertSigner,
-          deadline,
-        );
-      },
+      persist,
       signal,
     );
   } finally {

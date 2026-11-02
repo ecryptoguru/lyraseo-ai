@@ -27,6 +27,9 @@ async function control(action: string) {
   expect(r.status).toBe(200);
   return r.json() as Promise<{
     pages: number;
+    refs: number;
+    scratch: number;
+    inline: number;
     hops: number;
     work: { id: string; generation: number; disposition: string }[];
     audits: { status: string }[];
@@ -119,6 +122,33 @@ it.runIf(integration)(
     const state = await control("state");
     expect(state.pages).toBe(2);
     expect(state.audits[0]!.status).toBe("COMPLETED");
+  },
+);
+it.runIf(integration)(
+  "two private pages recover a lost object ack and score across listener restart",
+  async () => {
+    await control("seed-private");
+    const e = supervised(),
+      b = new Bridge(e);
+    for (let generation = 1; generation <= 2; generation++) {
+      const ref = (await b.command(runtimePaths[0], { limit: 1 }, deadline()))
+        .refs![0]!;
+      expect(ref.generation).toBe(generation);
+      await b.command(runtimePaths[1], ref, deadline());
+      const queue = { version: 1 as const, workId: ref.workId, generation };
+      expect((await consumeOne(queue)).explicitAcks).toEqual(["native"]);
+      expect(await control("state")).toMatchObject({
+        pages: generation,
+        refs: generation,
+        scratch: generation === 1 ? 1 : 0,
+        inline: 0,
+        audits: [{ status: generation === 1 ? "QUEUED" : "COMPLETED" }],
+      });
+      if (generation === 1) {
+        await control("restart");
+        expect((await consumeOne(queue)).explicitAcks).toEqual(["native"]);
+      }
+    }
   },
 );
 it.runIf(integration)(

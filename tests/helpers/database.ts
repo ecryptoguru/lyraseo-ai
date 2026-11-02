@@ -1,8 +1,11 @@
 import { createDatabase } from "../../packages/db/src";
-export const adminUrl =
-  "postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/lyraseo_test";
-export const runtimeUrl =
-  "postgresql://lyraseo_runtime:local_runtime_only@127.0.0.1:54329/lyraseo_test";
+// Focused migration work can reserve an independently created local fixture DB.
+const ownedName = process.env.LYRA_TEST_DB_NAME;
+if (ownedName && !/^lyraseo_p2a1_[a-f0-9]{12}$/.test(ownedName))
+  throw Error("INVALID_LOCAL_TEST_DATABASE");
+const databaseName = ownedName ?? "lyraseo_test";
+export const adminUrl = `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${databaseName}`;
+export const runtimeUrl = `postgresql://lyraseo_runtime:local_runtime_only@127.0.0.1:54329/${databaseName}`;
 export async function resetDatabase() {
   const db = createDatabase(adminUrl);
   try {

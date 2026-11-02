@@ -205,6 +205,9 @@ model OperationQuote {
 }
 
 model AuditRun {
+ storageFormat String?
+ artifactBlobs ArtifactBlob[]
+ @@unique([workspaceId,siteId,id])
  resultExpiresAt DateTime @default(dbgenerated())
  @@index([workspaceId,siteId,resultExpiresAt])
  id String @id @default(cuid())
@@ -595,6 +598,8 @@ model InternalRequest {
 }
 
 model AuditPageRetention {
+ artifactRefs ArtifactRef[]
+ scratch AuditEvaluationScratch?
  pageId String @id
  workspaceId String
  auditId String
@@ -614,4 +619,72 @@ model ContentRevisionPin {
  pinner ProductUser @relation(fields:[pinnedBy], references:[id], onDelete:NoAction, onUpdate:NoAction)
  entry ContentRevision @relation(fields:[workspaceId,draftId,revision],references:[workspaceId,draftId,revision],onDelete:Cascade)
  @@id([workspaceId,draftId,revision])
+}
+
+model ArtifactBlob {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId    String
+  siteId         String
+  auditId        String
+  requestedUrl   String
+  pageId         String       @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fence          Int
+  workId         String?      @db.Uuid
+  workGeneration Int?
+  category       String       @default("AUDIT_SOURCE")
+  rights         String       @default("PRIVATE_AUDIT")
+  expiryClass    String       @default("CAPTURE_30D")
+  capturedAt     DateTime
+  expiresAt      DateTime
+  pendingReceipt Json?
+  factHash       String
+  storageKey     String       @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  generation     String       @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  codec          String       @default("IDENTITY")
+  sourceHash     String
+  sourceLength   Int
+  storedHash     String
+  storedLength   Int
+  state          String       @default("STAGED")
+  createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  audit AuditRun     @relation(fields: [workspaceId, siteId, auditId], references: [workspaceId, siteId, id], onDelete: NoAction, onUpdate: NoAction)
+  refs ArtifactRef[]
+
+  @@unique([auditId, requestedUrl, fence])
+  @@unique([workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt])
+  @@index([state, expiresAt, id])
+  @@index([workspaceId, id])
+}
+
+model ArtifactRef {
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId        String
+  siteId             String
+  auditId            String
+  pageId             String             @unique
+  anchors            Json
+  slotPageId         String             @db.Uuid
+  blobId             String             @unique @db.Uuid
+  generation         String             @db.Uuid
+  ownerKind          String             @default("AUDIT_PAGE")
+  role               String             @default("ORIGINAL_BODY")
+  capturedAt         DateTime
+  expiresAt          DateTime
+  page AuditPageRetention @relation(fields: [workspaceId, auditId, pageId], references: [workspaceId, auditId, pageId], onDelete: NoAction, onUpdate: NoAction)
+  blob ArtifactBlob       @relation(fields: [workspaceId, siteId, auditId, slotPageId, blobId, generation, capturedAt, expiresAt], references: [workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([expiresAt, id])
+  @@index([workspaceId, auditId, pageId])
+}
+
+model AuditEvaluationScratch {
+  workspaceId        String
+  auditId            String
+  pageId             String
+  expiresAt          DateTime
+  facts              Json
+  page AuditPageRetention @relation(fields: [workspaceId, auditId, pageId], references: [workspaceId, auditId, pageId], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([workspaceId, auditId, pageId])
+  @@index([expiresAt, pageId])
 }

@@ -3,6 +3,7 @@ import type { createDatabase } from "@lyraseo/db";
 import type { Actor } from "@lyraseo/db/context";
 import {
   checkpointAuditPage,
+  checkpointPrivateAudit,
   claimAuditRun,
   finishAuditRun,
   readAuditRun,
@@ -28,6 +29,12 @@ export async function runRawAuditStep(
   const next = (stored.manifest as string[]).find((url) => !captured.has(url));
   if (next) {
     const siteOrigin = new URL(next).origin;
+    if (lease.storageFormat === "AUDIT_PRIVATE_V1") {
+      await runAuditPage(next, siteOrigin, transport, (receipt) =>
+        checkpointPrivateAudit(db, actor, scope, lease.fence, receipt),
+      );
+      return readAuditRun(db, actor, scope);
+    }
     await runAuditPage(next, siteOrigin, transport, (receipt) =>
       checkpointAuditPage(db, actor, scope, lease.fence, receipt.evidence, {
         ...receipt.provenance,

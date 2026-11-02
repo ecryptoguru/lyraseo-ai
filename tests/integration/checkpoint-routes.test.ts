@@ -1,3 +1,4 @@
+import { enrollTestArtifactAuthority } from "../helpers/artifact-authority";
 import { afterAll, beforeEach, expect, it, vi } from "vitest";
 import { createDatabase } from "../../packages/db/src";
 import { authorizeSiteIn, withActor } from "../../packages/db/src/context";
@@ -471,5 +472,97 @@ it("admits reviewed declarations through actual handlers, freezes evidence and e
   } finally {
     seams.transport = null;
     await site.close();
+  }
+});
+
+it("serves the exact private original through the existing authenticated attachment handler", async () => {
+  const { mkdtemp, realpath, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { localAuditArtifactStore } =
+    await import("../../packages/db/src/artifact-store");
+  const { bindLocalArtifactStore } =
+    await import("../../packages/db/src/artifact-checkpoint");
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "lyraseo-attachment-"),
+  );
+  const selected = createDatabase(runtimeUrl);
+  const home = "https://example.com/";
+  const body = Buffer.from(
+    "\uFEFF<html><body>PRIVATE_ATTACHMENT_ONLY</body></html>",
+  );
+  const authority = await enrollTestArtifactAuthority(admin);
+  const local = await localAuditArtifactStore(root);
+  try {
+    bindLocalArtifactStore(selected, local, authority);
+    seams.db = selected;
+    seams.transport = async (u) =>
+      u.endsWith("robots.txt")
+        ? new Response(null, { status: 404 })
+        : new Response(body, { headers: { "content-type": "text/html" } });
+    const audit = await json(
+      await audits.POST(
+        post({
+          action: "create",
+          idempotencyKey: "private-attachment",
+          manifest: [home],
+        }),
+      ),
+      201,
+    );
+    const result = await json(
+      await audits.POST(post({ action: "step", auditId: audit.id })),
+    );
+    expect(result.pages[0]).toMatchObject({
+      sourceAvailability: "current",
+      sourceRepresentation: "original-body",
+    });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_ATTACHMENT_ONLY");
+    const source = () =>
+      get(
+        "&auditId=" +
+          audit.id +
+          "&format=source&url=" +
+          encodeURIComponent(home),
+      );
+    const attachment = await audits.GET(source());
+    expect(attachment.status).toBe(200);
+    expect(attachment.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(attachment.headers.get("Content-Disposition")).toMatch(
+      /^attachment/,
+    );
+    expect(Buffer.from(await attachment.arrayBuffer())).toEqual(body);
+    const token = source();
+    token.headers.set("authorization", "Bearer synthetic-test");
+    expect((await audits.GET(token)).status).toBe(404);
+
+    for (const wrong of [
+      Buffer.alloc(body.length),
+      body.subarray(0, body.length - 1),
+    ]) {
+      bindLocalArtifactStore(selected, {
+        ...local,
+        async openBounded() {
+          return wrong;
+        },
+      });
+      const damaged = await audits.GET(source());
+      expect(damaged.status).toBe(503);
+      expect(await damaged.json()).toMatchObject({
+        error: expect.stringContaining("unavailable"),
+      });
+    }
+    seams.db = db;
+    const unavailable = await audits.GET(source());
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({
+      error: expect.stringContaining("Private source storage is unavailable"),
+    });
+  } finally {
+    seams.db = db;
+    await authority.revoke();
+    await local.close();
+    await selected.$disconnect();
+    await rm(root, { recursive: true, force: true });
   }
 });
