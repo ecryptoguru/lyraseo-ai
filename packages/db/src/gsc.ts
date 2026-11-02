@@ -483,6 +483,45 @@ export async function readGoogleSearch(
       select: { property: true, createdAt: true },
     });
     const cutoff = retentionCutoff();
+    const imports = await tx.searchImport.findMany({
+      where: { ...siteScope(s), startedAt: { gte: cutoff } },
+      select: {
+        id: true,
+        property: true,
+        startDate: true,
+        endDate: true,
+        shape: true,
+        status: true,
+        startedAt: true,
+        completedAt: true,
+        failure: true,
+        leaseUntil: true,
+      },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      take: 20,
+    });
+    const importSnapshots = imports.length
+      ? await tx.searchSnapshot.findMany({
+          where: {
+            ...siteScope(s),
+            importedAt: { gte: cutoff },
+            OR: imports.map(({ property, startDate, endDate, shape }) => ({
+              property,
+              startDate,
+              endDate,
+              shape,
+            })),
+          },
+          select: {
+            property: true,
+            startDate: true,
+            endDate: true,
+            shape: true,
+            status: true,
+          },
+          take: 20,
+        })
+      : [];
     const snapshots = await tx.$queryRaw<
       Array<{
         id: string;
@@ -559,6 +598,34 @@ export async function readGoogleSearch(
       : [];
     return {
       connection: c,
+      imports: imports.map(({ leaseUntil, failure, ...receipt }) => ({
+        ...receipt,
+        // GET observes lease expiry; only the guarded POST may recover an import.
+        recoverable:
+          receipt.status === "failed" ||
+          (receipt.status === "running" && leaseUntil <= new Date()),
+        failure: [
+          "GOOGLE_RECONNECT_REQUIRED",
+          "GOOGLE_PROPERTY_FORBIDDEN",
+          "GOOGLE_PERMISSION_REQUIRED",
+          "GOOGLE_CONNECTION_CHANGED",
+          "GOOGLE_IMPORT_LEASE_EXPIRED",
+          "GOOGLE_TEMPORARILY_UNAVAILABLE",
+          "INVALID_GOOGLE_RESPONSE",
+        ].includes(failure ?? "")
+          ? failure
+          : failure
+            ? "GOOGLE_TEMPORARILY_UNAVAILABLE"
+            : null,
+        snapshotStatus:
+          importSnapshots.find(
+            (snapshot) =>
+              snapshot.property === receipt.property &&
+              snapshot.startDate === receipt.startDate &&
+              snapshot.endDate === receipt.endDate &&
+              snapshot.shape === receipt.shape,
+          )?.status ?? null,
+      })),
       snapshots: snapshots.map((snapshot) => ({
         ...snapshot,
         displayLimited: snapshot.rowsTruncated,

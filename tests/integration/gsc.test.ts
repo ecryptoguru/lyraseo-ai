@@ -51,6 +51,158 @@ async function connect(p = provider) {
   await selectGoogleProperty(db, actor, scope, "https://example.com/", p, box);
   return state;
 }
+async function savedImport(id: string, extra: Record<string, unknown> = {}) {
+  return admin.searchImport.create({
+    data: {
+      id,
+      ...scope,
+      property: "https://example.com/",
+      startDate: "2026-10-01",
+      endDate: "2026-10-28",
+      shape: "query,page",
+      generation: 7,
+      attempt: "private-attempt-secret",
+      status: "running",
+      leaseUntil: new Date(Date.now() + 300000),
+      ...extra,
+    },
+  });
+}
+it("reads bounded retained import receipts with safe metadata and observes expired leases without mutation", async () => {
+  await connect();
+  await savedImport("failed", {
+    status: "failed",
+    failure: "GOOGLE_RECONNECT_REQUIRED",
+    completedAt: new Date(),
+  });
+  await savedImport("expired", { leaseUntil: new Date(0) });
+  await savedImport("active");
+  await savedImport("unsafe", {
+    status: "failed",
+    failure: "GOOGLE_provider-body access_token=raw-secret",
+  });
+  await savedImport("old", { startedAt: new Date("2020-01-01") });
+  const before = await admin.searchImport.findMany({ orderBy: { id: "asc" } });
+  const read = await readGoogleSearch(db, actor, scope);
+  expect(read.imports).toHaveLength(4);
+  expect(read.imports.find((r) => r.id === "failed")).toMatchObject({
+    status: "failed",
+    failure: "GOOGLE_RECONNECT_REQUIRED",
+    recoverable: true,
+  });
+  expect(read.imports.find((r) => r.id === "expired")).toMatchObject({
+    status: "running",
+    recoverable: true,
+  });
+  expect(read.imports.find((r) => r.id === "active")?.recoverable).toBe(false);
+  expect(read.imports.find((r) => r.id === "unsafe")?.failure).toBe(
+    "GOOGLE_TEMPORARILY_UNAVAILABLE",
+  );
+  expect(Object.keys(read.imports[0]).sort()).toEqual([
+    "completedAt",
+    "endDate",
+    "failure",
+    "id",
+    "property",
+    "recoverable",
+    "shape",
+    "snapshotStatus",
+    "startDate",
+    "startedAt",
+    "status",
+  ]);
+  expect(JSON.stringify(read.imports)).not.toMatch(
+    /raw-secret|private-attempt|generation|leaseUntil|sessionId|userId/,
+  );
+  expect(await admin.searchImport.findMany({ orderBy: { id: "asc" } })).toEqual(
+    before,
+  );
+  await admin.searchImport.createMany({
+    data: Array.from({ length: 24 }, (_, i) => ({
+      ...before[0],
+      id: `bounded-${i}`,
+      startedAt: new Date(Date.now() + i * 1000),
+    })),
+  });
+  const bounded = await readGoogleSearch(db, actor, scope);
+  expect(bounded.imports).toHaveLength(20);
+  expect(bounded.imports[0].id).toBe("bounded-23");
+  expect(bounded.imports.at(-1)?.id).toBe("bounded-4");
+});
+it("keeps import receipt reads site-authorized after same-tenant grant and token scope revocation", async () => {
+  const { createApiToken, resolveApiToken, tokenAccessPolicyHash } =
+    await import("../../packages/db/src/tokens");
+  await savedImport("private-receipt", { status: "failed" });
+  expect(
+    (await readGoogleSearch(db, { ...actor, userId: "viewer" }, scope)).imports,
+  ).toHaveLength(1);
+  await admin.siteGrant.deleteMany({ where: { userId: "viewer" } });
+  await expect(
+    readGoogleSearch(db, { ...actor, userId: "viewer" }, scope),
+  ).rejects.toThrow("FORBIDDEN");
+  await expect(
+    readGoogleSearch(db, actor, { workspaceId: "a", siteId: "b-site" }),
+  ).rejects.toThrow("NOT_FOUND");
+  expect(
+    (await readGoogleSearch(db, actor, { workspaceId: "b", siteId: "b-site" }))
+      .imports,
+  ).toEqual([]);
+  const policy = tokenAccessPolicyHash(["pilot@example.com"]);
+  const issued = await createApiToken(
+    db,
+    actor,
+    {
+      workspaceId: "a",
+      name: "Status read",
+      siteIds: ["a-site"],
+      scopes: ["search:read"],
+      requestKey: crypto.randomUUID(),
+    },
+    policy,
+  );
+  const tokenActor = await resolveApiToken(db, issued.secret, policy);
+  expect((await readGoogleSearch(db, tokenActor, scope)).imports[0].id).toBe(
+    "private-receipt",
+  );
+  await admin.apiToken.update({
+    where: { id: tokenActor.tokenId },
+    data: { scopes: ["sites:read"] },
+  });
+  await expect(readGoogleSearch(db, tokenActor, scope)).rejects.toThrow(
+    "FORBIDDEN",
+  );
+});
+it("correlates completed partial imports without copying snapshot rows or dispatching a provider on reads", async () => {
+  const p = {
+    ...provider,
+    properties: vi.fn(provider.properties),
+    query: vi.fn(provider.query),
+  };
+  await connect(p);
+  await savedImport("partial", { status: "complete", completedAt: new Date() });
+  await admin.searchSnapshot.create({
+    data: {
+      ...scope,
+      property: "https://example.com/",
+      startDate: "2026-10-01",
+      endDate: "2026-10-28",
+      shape: "query,page",
+      status: "partial",
+      rows: [],
+    },
+  });
+  p.properties.mockClear();
+  const read = await readGoogleSearch(db, actor, scope);
+  expect(read.imports[0]).toMatchObject({
+    snapshotStatus: "partial",
+    recoverable: false,
+  });
+  expect(read.imports[0]).not.toHaveProperty("rows");
+  expect(read.snapshots[0].rowCount).toBe(0);
+  expect(read.coverage).toContain("not proven zero traffic");
+  expect(p.properties).not.toHaveBeenCalled();
+  expect(p.query).not.toHaveBeenCalled();
+});
 it("consumes session-bound state once and isolates credential rows under forced RLS", async () => {
   const { url: state } = await beginGoogleConnect(
     db,

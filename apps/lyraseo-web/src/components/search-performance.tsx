@@ -14,6 +14,19 @@ type Snapshot = {
 };
 type SearchState = {
   connection: { property: string | null } | null;
+  imports: Array<{
+    id: string;
+    property: string;
+    startDate: string;
+    endDate: string;
+    shape: string;
+    status: string;
+    startedAt: string;
+    completedAt: string | null;
+    failure: string | null;
+    recoverable: boolean;
+    snapshotStatus: string | null;
+  }>;
   snapshots: Snapshot[];
   coverage: string;
   opportunities: SearchOpportunity[];
@@ -31,6 +44,10 @@ const errors: Record<string, string> = {
     "Google no longer grants access to this property. Reconnect with an authorized account.",
   GOOGLE_CONNECTION_CHANGED:
     "The connection changed during import. Check the selected property and retry.",
+  GOOGLE_IMPORT_RUNNING:
+    "An import is already running. Refresh import status to check it; retry its saved window only after it fails or its lease expires.",
+  GOOGLE_PERMISSION_REQUIRED:
+    "Google access is insufficient. Reconnect Search Console with an authorized account.",
 };
 export function SearchPerformance({
   workspaceId,
@@ -111,6 +128,8 @@ export function SearchPerformance({
     try {
       await work();
     } catch (error) {
+      // A failed POST may have saved a failure receipt. Read it without dispatching work.
+      await refresh().catch(() => {});
       setMessage(
         error instanceof Error
           ? error.message
@@ -291,6 +310,107 @@ export function SearchPerformance({
           </form>
         </section>
       )}
+      <section className="pilot-card" aria-labelledby="search-import-history">
+        <h2 id="search-import-history">Recent import status</h2>
+        <p>
+          Latest 20 saved windows from the last 13 months. Status checks only
+          read saved data. Explicit imports use free Google Search Console API
+          quota; no paid AI calls are used. Saved evidence remains available
+          while another window is running or has failed.
+        </p>
+        <button
+          className="button button-secondary"
+          disabled={busy}
+          onClick={() =>
+            void perform(async () => {
+              await refresh();
+              setMessage(
+                "Saved import status refreshed. No import was started.",
+              );
+            })
+          }
+        >
+          Refresh import status
+        </button>
+        {state && !state.imports?.length && <p>No saved import status yet.</p>}
+        <ul className="audit-findings">
+          {state?.imports?.map((receipt) => (
+            <li key={receipt.id}>
+              <h3>
+                {receipt.startDate.slice(0, 10)}–{receipt.endDate.slice(0, 10)}
+                {" · "}
+                {receipt.shape.slice(0, 20)}
+              </h3>
+              <p className="audit-url">{receipt.property.slice(0, 2048)}</p>
+              <p>
+                {receipt.status === "running"
+                  ? receipt.recoverable
+                    ? "Lease expired — import stalled and can be retried. No new snapshot was published by this attempt."
+                    : "Running — this window has not published new evidence yet. Refresh status to check progress."
+                  : receipt.status === "failed"
+                    ? receipt.failure === "GOOGLE_IMPORT_LEASE_EXPIRED"
+                      ? "Lease expired — import can be retried."
+                      : "Failed — this attempt did not publish new evidence."
+                    : receipt.status === "complete"
+                      ? receipt.snapshotStatus === "partial"
+                        ? "Completed with partial coverage — the import processing limit was reached."
+                        : "Completed — inspect saved evidence and its coverage below. Empty provider rows do not prove zero traffic."
+                      : "Status unavailable. Refresh saved status to check again."}
+              </p>
+              {receipt.status === "failed" && (
+                <p>
+                  {errors[receipt.failure ?? ""] ??
+                    "Check your Google connection, then explicitly retry this window when ready."}
+                </p>
+              )}
+              <p>
+                Started {new Date(receipt.startedAt).toLocaleString()}
+                {receipt.completedAt &&
+                  ` · Finished ${new Date(receipt.completedAt).toLocaleString()}`}
+              </p>
+              {receipt.recoverable &&
+                (!collectionEnabled ? (
+                  <p>
+                    Collection is paused. Retry is available when collection
+                    resumes.
+                  </p>
+                ) : !editable ? (
+                  <p>
+                    Ask a workspace manager to reconnect or retry this window.
+                  </p>
+                ) : state.connection?.property !== receipt.property ? (
+                  <p>
+                    Connect and select this receipt’s verified property before
+                    retrying.
+                  </p>
+                ) : (
+                  <button
+                    className="button button-secondary"
+                    disabled={busy}
+                    onClick={() =>
+                      void perform(async () => {
+                        setStartDate(receipt.startDate);
+                        setEndDate(receipt.endDate);
+                        setMessage("Retrying the saved window and dimension…");
+                        await request("/api/search", {
+                          startDate: receipt.startDate,
+                          endDate: receipt.endDate,
+                          shape: receipt.shape,
+                        });
+                        await refresh();
+                        setMessage(
+                          "Saved window retry completed. Inspect its status and coverage.",
+                        );
+                      })
+                    }
+                  >
+                    Retry this window
+                  </button>
+                ))}
+            </li>
+          ))}
+        </ul>
+      </section>
       <section className="pilot-card" aria-labelledby="search-opportunities">
         <h2 id="search-opportunities">Opportunities to inspect</h2>
         <p>

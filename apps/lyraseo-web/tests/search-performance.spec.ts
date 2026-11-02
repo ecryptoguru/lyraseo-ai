@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -9,10 +9,10 @@ const viteRequire = createRequire(
   ),
 );
 const { build } = viteRequire("esbuild");
-async function renderBundle(editable: boolean) {
+async function renderBundle(editable: boolean, collectionEnabled = true) {
   const result = await build({
     stdin: {
-      contents: `import {createRoot} from 'react-dom/client';import {SearchPerformance} from './src/components/search-performance';createRoot(document.querySelector('#search-fixture')).render(<SearchPerformance workspaceId="a" siteId="site" editable={${editable}}/>);`,
+      contents: `import {createRoot} from 'react-dom/client';import {SearchPerformance} from './src/components/search-performance';createRoot(document.querySelector('#search-fixture')).render(<SearchPerformance workspaceId="a" siteId="site" editable={${editable}} collectionEnabled={${collectionEnabled}}/>);`,
       resolveDir: process.cwd(),
       loader: "tsx",
     },
@@ -26,6 +26,7 @@ async function renderBundle(editable: boolean) {
 }
 const evidence = {
   connection: { property: "https://example.com/" },
+  imports: [],
   coverage: "Available provider rows only. Some searches are omitted.",
   opportunities: [
     {
@@ -58,6 +59,188 @@ const evidence = {
     },
   ],
 };
+const history = [
+  {
+    id: "failed",
+    property: "https://example.com/",
+    startDate: "2026-10-02",
+    endDate: "2026-10-22",
+    shape: "query,page",
+    status: "failed",
+    startedAt: "2026-11-02T00:00:00Z",
+    completedAt: "2026-11-02T00:01:00Z",
+    failure: "GOOGLE_RECONNECT_REQUIRED",
+    recoverable: true,
+    snapshotStatus: null,
+  },
+  {
+    id: "stalled",
+    property: "https://example.com/",
+    startDate: "2026-09-01",
+    endDate: "2026-09-28",
+    shape: "date",
+    status: "running",
+    startedAt: "2026-11-01T00:00:00Z",
+    completedAt: null,
+    failure: null,
+    recoverable: true,
+    snapshotStatus: null,
+  },
+  {
+    id: "partial",
+    property: "https://example.com/",
+    startDate: "2026-10-01",
+    endDate: "2026-10-28",
+    shape: "page",
+    status: "complete",
+    startedAt: "2026-10-31T00:00:00Z",
+    completedAt: "2026-10-31T00:01:00Z",
+    failure: null,
+    recoverable: false,
+    snapshotStatus: "partial",
+  },
+  {
+    id: "active",
+    property: "https://example.com/",
+    startDate: "2026-10-03",
+    endDate: "2026-10-23",
+    shape: "query",
+    status: "running",
+    startedAt: "2026-11-02T00:02:00Z",
+    completedAt: null,
+    failure: null,
+    recoverable: false,
+    snapshotStatus: null,
+  },
+];
+async function reopenFixture(
+  page: Page,
+  editable = true,
+  collectionEnabled = true,
+) {
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Saved search status</h1><div id="search-fixture"></div>';
+  });
+  await page.addScriptTag({
+    content: await renderBundle(editable, collectionEnabled),
+  });
+  await expect(
+    page.getByRole("heading", { name: "Recent import status" }),
+  ).toBeVisible();
+}
+test("reopens failed and stalled imports without dispatch and retries the exact saved window and shape", async ({
+  page,
+}, testInfo) => {
+  const posts: unknown[] = [];
+  await page.route("**/api/search**", (route) => {
+    if (route.request().method() === "POST") {
+      posts.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 409,
+        json: { error: "GOOGLE_IMPORT_RUNNING" },
+      });
+    }
+    return route.fulfill({ json: { ...evidence, imports: history } });
+  });
+  await reopenFixture(page);
+  await reopenFixture(page);
+  await expect(
+    page.getByText("Failed — this attempt", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Lease expired — import stalled", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Completed with partial coverage", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Running — this window", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Saved search evidence" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Refresh import status" }).click();
+  await expect(page.getByRole("status")).toContainText("No import was started");
+  expect(posts).toEqual([]);
+  const failed = page.getByRole("listitem").filter({
+    has: page.getByRole("heading", {
+      name: "2026-10-02–2026-10-22 · query,page",
+    }),
+  });
+  await failed.getByRole("button", { name: "Retry this window" }).click();
+  await expect(page.getByRole("status")).toContainText(
+    "An import is already running",
+  );
+  expect(posts).toEqual([
+    {
+      workspaceId: "a",
+      siteId: "site",
+      startDate: "2026-10-02",
+      endDate: "2026-10-22",
+      shape: "query,page",
+    },
+  ]);
+  await expect(page.getByLabel("Start date")).toHaveValue("2026-10-02");
+  await expect(page.getByLabel("End date")).toHaveValue("2026-10-22");
+  await expect(
+    page.getByRole("heading", { name: "Saved search evidence" }),
+  ).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/search-import-status-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
+for (const mode of ["viewer", "paused"] as const) {
+  test(`${mode} reads saved failed and stalled status without retry; paused manager can disconnect`, async ({
+    page,
+  }) => {
+    const posts: string[] = [];
+    await page.route("**/api/search**", (route) => {
+      if (route.request().method() === "POST") posts.push("import");
+      return route.fulfill({ json: { ...evidence, imports: history } });
+    });
+    await page.route("**/api/integrations/google", (route) => {
+      posts.push(route.request().postDataJSON().action);
+      return route.fulfill({ json: {} });
+    });
+    await reopenFixture(page, mode !== "viewer", mode !== "paused");
+    await expect(
+      page.getByText("Lease expired — import stalled", { exact: false }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry this window" }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Refresh import status" }).click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "No import was started" }),
+    ).toBeVisible();
+    expect(posts).toEqual([]);
+    if (mode === "paused") {
+      await page
+        .getByRole("button", { name: "Disconnect and remove imported data" })
+        .click();
+      await expect(
+        page.getByRole("status").filter({ hasText: "Google disconnected" }),
+      ).toBeVisible();
+      expect(posts).toEqual(["disconnect"]);
+    }
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    ).toBe(true);
+  });
+}
 test("search evidence shows partial coverage and preserves dates after import failure", async ({
   page,
 }, testInfo) => {
