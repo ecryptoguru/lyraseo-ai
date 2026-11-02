@@ -17,6 +17,11 @@ import {
 import type { PrismaClient, Prisma } from "../generated/client";
 import { withActor, authorizeSiteIn, type Actor } from "./context";
 import type { SiteScope } from "./sites";
+import {
+  recordPrivateObservation,
+  observationAvailabilityIn,
+} from "./observation-artifacts";
+import type { ObservationRecording } from "./observation-source";
 const json = (x: unknown) => x as Prisma.InputJsonValue;
 export const visibilityAvailability = {
   available: false,
@@ -140,6 +145,9 @@ function provenanceSummary(value: unknown) {
     requestedLocale: locale(p.requestedLocale),
     confirmedLocale: locale(p.confirmedLocale),
     extractionVersion: text(p.extractionVersion),
+    clockContract: text(p.clockContract),
+    representation: text(p.representation),
+    producerClass: text(p.producerClass),
   };
 }
 function observedSlots(value: unknown, brands: Brand[]) {
@@ -191,7 +199,10 @@ export async function recordVisibilityEvidence(
   s: SiteScope,
   panelId: string,
   evidence: ProviderEvidence,
+  recording?: ObservationRecording,
 ) {
+  if (recording)
+    return recordPrivateObservation(db, actor, s, panelId, evidence, recording);
   s = { workspaceId: s.workspaceId, siteId: s.siteId };
   return withActor(db, actor, s.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "run");
@@ -334,6 +345,7 @@ export async function readVisibility(
         slots: true,
         createdAt: true,
         rawExpiresAt: true,
+        storageFormat: true,
       },
     });
     if (runId && !runs.length)
@@ -349,7 +361,7 @@ export async function readVisibility(
       });
       const brands = (panel?.brands ?? []) as unknown as Brand[];
       const raw =
-        runId && run.rawExpiresAt > now
+        runId && run.storageFormat === null && run.rawExpiresAt > now
           ? await tx.visibilityRun.findFirst({
               where: {
                 ...s,
@@ -372,6 +384,17 @@ export async function readVisibility(
             )
           : null,
         ...(runId ? { rawAnswers: raw?.rawAnswers ?? null } : {}),
+        ...(runId && run.storageFormat === "OBSERVATION_PRIVATE_V1"
+          ? {
+              rawAvailability: await observationAvailabilityIn(
+                tx,
+                actor,
+                s,
+                run.id,
+                slots.map((slot) => slot.promptId),
+              ),
+            }
+          : {}),
         rawExpired: run.rawExpiresAt <= now,
       });
     }

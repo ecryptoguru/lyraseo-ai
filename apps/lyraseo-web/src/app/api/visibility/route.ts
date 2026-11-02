@@ -14,6 +14,7 @@ import {
   readVisibility,
   requestVisibilityRun,
 } from "@lyraseo/db/visibility";
+import { readObservationAnswer } from "@lyraseo/db/observation-artifacts";
 const profile = z.enum([
   "azure-sol-api",
   "consumer-chatgpt",
@@ -76,9 +77,38 @@ export async function GET(request: Request) {
     const actor = await resolveActor();
     const q = Object.fromEntries(new URL(request.url).searchParams);
     const input = googleScope
-      .extend({ runId: z.string().min(1).max(128).optional() })
+      .extend({
+        runId: z.string().min(1).max(128).optional(),
+        promptId: z.string().min(1).max(80).optional(),
+        action: z.literal("read-answer").optional(),
+      })
       .strict()
       .parse(q);
+    if (input.action === "read-answer") {
+      if (!input.runId || !input.promptId) throw Error("INVALID_REQUEST");
+      const result = await readObservationAnswer(
+        database(),
+        actor,
+        googleScope.parse(input),
+        input.runId,
+        input.promptId,
+        resolveActor,
+      );
+      return Response.json(result, {
+        status: result.answer
+          ? 200
+          : result.availability.state === "unavailable"
+            ? 503
+            : 410,
+        headers: {
+          ...googleHeaders,
+          "X-Robots-Tag": "noindex, nofollow",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Disposition": 'attachment; filename="answer.json"',
+        },
+      });
+    }
+    if (input.promptId) throw Error("INVALID_REQUEST");
     return Response.json(
       await readVisibility(
         database(),

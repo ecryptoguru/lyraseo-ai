@@ -35,6 +35,7 @@
     "./tokens": "./src/tokens.ts",
     "./pages": "./src/pages.ts",
     "./ga4": "./src/ga4.ts",
+    "./observation-artifacts": "./src/observation-artifacts.ts",
     "./artifact-store": "./src/artifact-store.ts",
     "./artifact-checkpoint": "./src/artifact-checkpoint.ts",
     "./bridge": "./src/bridge.ts"
