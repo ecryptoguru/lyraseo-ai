@@ -18,6 +18,12 @@ import {
   type ArtifactVersion,
   type AuditArtifactStore,
 } from "./artifact-store";
+import {
+  checkedObservationSource,
+  answerRepresentation,
+  verifyAnswerRepresentation,
+  type NormalizedObservation,
+} from "./observation-source";
 import type { PrismaClient } from "../generated/client";
 export const STORAGE = "AUDIT_PRIVATE_V1";
 export type LocalArtifactAuthority = { keyId: string; secret: Uint8Array };
@@ -255,4 +261,106 @@ export async function recoverAuditArtifactOrphans(
       await db.$executeRaw`UPDATE "ArtifactBlob" SET state='DELETED' WHERE "workspaceId"=${v.workspaceId} AND "auditId"=${auditId} AND "storageKey"=${v.storageKey}::uuid AND generation=${v.generation}::uuid AND state='ORPHAN'`;
   }
   return recovered;
+}
+
+/** A fixture source seal has no provider or wire-capture authority. */
+export function witnessedNormalizedObservation(
+  db: PrismaClient,
+  source: NormalizedObservation,
+  binding: string,
+) {
+  checkedObservationSource(source);
+  const submitted = {
+    evidence: source.manifest,
+    provenance: source.provenance,
+  };
+  const key = authorities.get(db);
+  if (!key) throw Error("ARTIFACT_UNAVAILABLE");
+  const mac = createHmac("sha256", key.secret)
+    .update(
+      [
+        "observation-fixture-source-v1",
+        binding,
+        createHash("sha256")
+          .update(JSON.stringify(submitted.evidence))
+          .digest("hex"),
+        createHash("sha256")
+          .update(JSON.stringify(submitted.provenance))
+          .digest("hex"),
+      ].join("\n"),
+    )
+    .digest("hex");
+  return { submitted, confirmation: { keyId: key.keyId, mac } };
+}
+export type ObservationReservation = {
+  id: string;
+  runId: string;
+  state: "STAGED" | "FINALIZED";
+  proof: string;
+  binding: string;
+  versions: { promptId: string; version: ArtifactVersion | null }[];
+};
+/** Publication is independent of the source MAC and requires every exact stored generation. */
+export async function verifiedNormalizedPublication(
+  db: PrismaClient,
+  source: NormalizedObservation,
+  reservation: ObservationReservation,
+) {
+  checkedObservationSource(source);
+  const store = artifactStore(db),
+    key = authorities.get(db);
+  if (
+    !store ||
+    !key ||
+    reservation.versions.length !== source.manifest.slots.length
+  )
+    throw Error("ARTIFACT_UNAVAILABLE");
+  for (let i = 0; i < source.manifest.slots.length; i++) {
+    const slot = source.manifest.slots[i]!,
+      matches = reservation.versions.filter(
+        (v) => v.promptId === slot.promptId,
+      );
+    if (matches.length !== 1) throw Error("INVALID_ARTIFACT");
+    const version = matches[0]!.version;
+    if (!version) {
+      if (slot.answerHash !== null) throw Error("INVALID_ARTIFACT");
+      continue;
+    }
+    if (
+      version.sourceHash !== slot.answerHash ||
+      version.sourceLength !== slot.answerLength
+    )
+      throw Error("INVALID_ARTIFACT");
+    const bytes = answerRepresentation(source, i);
+    await putReserved(store, version, bytes);
+    const returned = verifyReturnedBytes(
+      version,
+      await store.openBounded(version).catch(() => {
+        throw Error("ARTIFACT_UNAVAILABLE");
+      }),
+    );
+    verifyAnswerRepresentation(source, i, returned);
+  }
+  checkedObservationSource(source);
+  if (authorities.get(db) !== key || artifactStore(db) !== store)
+    throw Error("ARTIFACT_UNAVAILABLE");
+  const submitted = {
+    evidence: source.manifest,
+    provenance: source.provenance,
+  };
+  const mac = createHmac("sha256", key.secret)
+    .update(
+      [
+        "observation-fixture-publication-v1",
+        reservation.binding,
+        createHash("sha256")
+          .update(JSON.stringify(submitted.evidence))
+          .digest("hex"),
+        createHash("sha256")
+          .update(JSON.stringify(submitted.provenance))
+          .digest("hex"),
+      ].join("\n"),
+    )
+    .digest("hex");
+  return { submitted, confirmation: { keyId: key.keyId, mac } };
 }

@@ -82,6 +82,10 @@ const retentionConfig = prefixConfig(
   "twenty-three",
   migrations.filter((n) => n <= "202611030001_evidence_retention"),
 );
+const auditArtifactConfig = prefixConfig(
+  "twenty-four",
+  migrations.filter((n) => n <= "202611030002_private_audit_artifacts"),
+);
 const databases = [];
 function sql(database, statement, capture = false) {
   return run(
@@ -262,7 +266,7 @@ try {
       .map((table) =>
         sql(
           kernelDatabase,
-          `SELECT md5(jsonb_agg(to_jsonb(t)-'evidenceFormat'-'resultExpiresAt' ORDER BY id)::text) FROM "${table}" t`,
+          `SELECT md5(jsonb_agg(to_jsonb(t)-'evidenceFormat'-'resultExpiresAt'-'storageFormat' ORDER BY id)::text) FROM "${table}" t`,
           true,
         ),
       )
@@ -320,7 +324,7 @@ try {
     );
   const originalCrypto = cryptoIdentity();
   const before24 = retentionHistory() + clockRows();
-  migrate(kernelDatabase);
+  migrate(kernelDatabase, auditArtifactConfig);
   if (cryptoIdentity() !== originalCrypto)
     throw Error("Existing pgcrypto installation changed");
   if (before24 !== retentionHistory() + clockRows())
@@ -342,6 +346,52 @@ try {
     );
   console.log(
     "PASS: populated 23 → 24, identical historical measurements, clocks and financial/dispatch history; no artifact backfill or role table access.",
+  );
+  // Admin-created historical metadata fixture, not provider capture or physical-object proof.
+  sql(
+    kernelDatabase,
+    `
+    INSERT INTO "AuditPage"(id,"auditId","workspaceId","requestedUrl",evidence,provenance)
+    VALUES ('00000000-0000-4000-8000-000000000025','active-controlled','controlled-workspace','https://example.com/artifact-history','{}','{"acquiredAt":"2024-10-31T12:13:14.456Z"}');
+    INSERT INTO "ArtifactBlob"(id,"workspaceId","siteId","auditId","requestedUrl","pageId",fence,"capturedAt","expiresAt","factHash","sourceHash","sourceLength","storedHash","storedLength",state)
+    VALUES('00000000-0000-4000-8000-000000000026','controlled-workspace','controlled-site','active-controlled','https://example.com/artifact-history','00000000-0000-4000-8000-000000000025',1,'2024-10-31 12:13:14.456','2024-11-30 12:13:14.456',repeat('a',64),repeat('b',64),1,repeat('b',64),1,'READY');
+    INSERT INTO "ArtifactRef"("workspaceId","siteId","auditId","pageId",anchors,"slotPageId","blobId",generation,"capturedAt","expiresAt")
+    SELECT "workspaceId","siteId","auditId","pageId"::text,'[]',"pageId",id,generation,"capturedAt","expiresAt" FROM "ArtifactBlob";
+  `,
+  );
+  const auditArtifactHistory = () =>
+    retentionHistory() +
+    clockRows() +
+    sql(
+      kernelDatabase,
+      `
+    SELECT jsonb_agg(to_jsonb(b)-ARRAY['ownerKind','recordingId','runId','panelId','promptId'] ORDER BY id) FROM "ArtifactBlob" b;
+    SELECT jsonb_agg(to_jsonb(f)-ARRAY['recordingId','runId','panelId','promptId'] ORDER BY id) FROM "ArtifactRef" f;
+  `,
+      true,
+    );
+  const before25 = auditArtifactHistory();
+  migrate(kernelDatabase);
+  if (before25 !== auditArtifactHistory())
+    throw Error(
+      "Observation migration changed historical audit artifacts, measurements, clocks or financial history",
+    );
+  const observationGrants = sql(
+    kernelDatabase,
+    `
+    SELECT count(*) FROM "VisibilityRecording"; SELECT count(*) FROM "VisibilityObservationSlot";
+    SELECT count(*) FROM "VisibilityRun" WHERE "storageFormat" IS NOT NULL;
+    SELECT bool_or((has_any_column_privilege(r,t,'SELECT,INSERT,UPDATE') OR has_table_privilege(r,t,'DELETE'))) FROM unnest(ARRAY['lyraseo_runtime','lyraseo_dispatch','lyraseo_identity']) r CROSS JOIN unnest(ARRAY['"VisibilityRecording"','"VisibilityObservationSlot"']) t;
+  `,
+    true,
+  ).trim();
+  if (observationGrants !== "0\n0\n0\nf")
+    throw Error(
+      "Observation migration backfilled private data or widened grants: " +
+        observationGrants,
+    );
+  console.log(
+    "PASS: populated 24 → 25 preserves audit artifact/ref tuples, legacy answers, measurements, P1 clocks and financial history; private observation rows start empty, with no direct product-login grants.",
   );
   for (const scenario of ["empty", "seven", "twenty"]) {
     const database = `lyraseo_replay_${scenario}_${randomUUID().replaceAll("-", "")}`;

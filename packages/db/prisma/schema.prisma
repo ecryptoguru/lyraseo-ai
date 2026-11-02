@@ -385,6 +385,8 @@ model VisibilityPanel {
  @@unique([workspaceId,siteId,version])
 }
 model VisibilityRun {
+ storageFormat String?
+ @@unique([workspaceId,siteId,panelId,id])
  resultExpiresAt DateTime @default(dbgenerated())
  @@index([workspaceId,siteId,resultExpiresAt])
  id String @id @default(cuid())
@@ -622,13 +624,19 @@ model ContentRevisionPin {
 }
 
 model ArtifactBlob {
+  ownerKind String @default("AUDIT_PAGE")
+  recordingId String? @db.Uuid
+  runId String?
+  panelId String?
+  promptId String?
+  @@unique([workspaceId,siteId,panelId,runId,recordingId,promptId,id,generation,capturedAt,expiresAt])
   id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId    String
   siteId         String
-  auditId        String
-  requestedUrl   String
-  pageId         String       @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  fence          Int
+  auditId        String?
+  requestedUrl   String?
+  pageId         String?      @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fence          Int?
   workId         String?      @db.Uuid
   workGeneration Int?
   category       String       @default("AUDIT_SOURCE")
@@ -647,7 +655,7 @@ model ArtifactBlob {
   storedLength   Int
   state          String       @default("STAGED")
   createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
-  audit AuditRun     @relation(fields: [workspaceId, siteId, auditId], references: [workspaceId, siteId, id], onDelete: NoAction, onUpdate: NoAction)
+  audit AuditRun?    @relation(fields: [workspaceId, siteId, auditId], references: [workspaceId, siteId, id], onDelete: NoAction, onUpdate: NoAction)
   refs ArtifactRef[]
 
   @@unique([auditId, requestedUrl, fence])
@@ -657,21 +665,25 @@ model ArtifactBlob {
 }
 
 model ArtifactRef {
+  recordingId String? @db.Uuid
+  runId String?
+  panelId String?
+  promptId String?
   id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId        String
   siteId             String
-  auditId            String
-  pageId             String             @unique
+  auditId            String?
+  pageId             String?            @unique
   anchors            Json
-  slotPageId         String             @db.Uuid
+  slotPageId         String?            @db.Uuid
   blobId             String             @unique @db.Uuid
   generation         String             @db.Uuid
   ownerKind          String             @default("AUDIT_PAGE")
   role               String             @default("ORIGINAL_BODY")
   capturedAt         DateTime
   expiresAt          DateTime
-  page AuditPageRetention @relation(fields: [workspaceId, auditId, pageId], references: [workspaceId, auditId, pageId], onDelete: NoAction, onUpdate: NoAction)
-  blob ArtifactBlob       @relation(fields: [workspaceId, siteId, auditId, slotPageId, blobId, generation, capturedAt, expiresAt], references: [workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt], onDelete: NoAction, onUpdate: NoAction)
+  page AuditPageRetention? @relation(fields: [workspaceId, auditId, pageId], references: [workspaceId, auditId, pageId], onDelete: NoAction, onUpdate: NoAction)
+  blob ArtifactBlob?      @relation(fields: [workspaceId, siteId, auditId, slotPageId, blobId, generation, capturedAt, expiresAt], references: [workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([expiresAt, id])
   @@index([workspaceId, auditId, pageId])
@@ -687,4 +699,47 @@ model AuditEvaluationScratch {
 
   @@id([workspaceId, auditId, pageId])
   @@index([expiresAt, pageId])
+}
+
+model VisibilityRecording {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ runId String @unique @default(dbgenerated("gen_random_uuid()::text"))
+ workspaceId String
+ siteId String
+ panelId String
+ userId String
+ securityVersion Int
+ sessionId String
+ sourceNamespace String
+ recordingKey String
+ sourceBinding String
+ manifestHash String
+ manifest Json
+ state String @default("STAGED")
+ proof String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ proofExpiresAt DateTime @default(dbgenerated("clock_timestamp() + interval '5 minutes'")) @db.Timestamptz(6)
+ observedAt DateTime
+ rawExpiresAt DateTime
+ retiredAt DateTime? @db.Timestamptz(6)
+ @@unique([workspaceId,siteId,sourceNamespace,recordingKey])
+ @@unique([workspaceId,siteId,panelId,runId,id])
+ @@index([state,proofExpiresAt,id])
+}
+model VisibilityObservationSlot {
+ workspaceId String
+ siteId String
+ panelId String
+ runId String
+ recordingId String @db.Uuid
+ promptId String
+ observedAt DateTime
+ clockContract String @default("COMMON_OBSERVED_AT_V1")
+ factDigest String
+ answerHash String?
+ answerLength Int
+ rawExpiresAt DateTime
+ disposition String
+ @@id([workspaceId,siteId,runId,promptId])
+ @@unique([workspaceId,siteId,panelId,runId,recordingId,promptId,observedAt,rawExpiresAt])
+ @@index([rawExpiresAt,runId,promptId])
 }

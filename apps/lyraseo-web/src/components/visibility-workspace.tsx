@@ -34,6 +34,14 @@ type Run = {
       }
     >;
   }>;
+  storageFormat?: string | null;
+  rawAvailability?: Array<{
+    promptId: string;
+    state: string;
+    representation: string;
+    producerClass: string;
+    originalProviderWire: false;
+  }>;
   rawAnswers?: unknown;
   rawExpired: boolean;
 };
@@ -571,11 +579,47 @@ export function VisibilityWorkspace({
               </table>
             </div>
             <details>
-              <summary>Original answer evidence and provenance</summary>
+              <summary>
+                {detail.storageFormat === "OBSERVATION_PRIVATE_V1"
+                  ? "Parsed answer evidence and provenance"
+                  : "Original answer evidence and provenance"}
+              </summary>
               <pre className="audit-url">
                 {JSON.stringify(detail.provenance, null, 2)}
               </pre>
-              {detail.rawExpired ? (
+              {detail.storageFormat === "OBSERVATION_PRIVATE_V1" ? (
+                <>
+                  <p>
+                    Synthetic controlled fixture evidence. Retained answers are
+                    parsed JSON, not original provider responses. Original
+                    provider wire is unavailable.
+                  </p>
+                  <ul>
+                    {detail.rawAvailability?.map((slot) => (
+                      <li key={slot.promptId}>
+                        {slot.promptId}:{" "}
+                        {slot.state === "retained-parsed"
+                          ? "retained parsed answer"
+                          : slot.state === "expired"
+                            ? "raw answer expired"
+                            : slot.state === "rights-unavailable"
+                              ? "raw answer rights unavailable"
+                              : slot.state === "not-retained"
+                                ? "no answer body retained"
+                                : "raw answer unavailable"}
+                        .{" "}
+                        {slot.state === "retained-parsed" && (
+                          <a
+                            href={`/api/visibility?${query}&runId=${encodeURIComponent(detail.id)}&promptId=${encodeURIComponent(slot.promptId)}&action=read-answer`}
+                          >
+                            Read parsed answer for {slot.promptId}
+                          </a>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : detail.rawExpired ? (
                 <p>
                   Raw answer retention has expired. Compact evidence remains
                   subject to its own retention.

@@ -177,3 +177,90 @@ test("viewer traces synthetic evidence and failed slots without collection contr
   ).toBeVisible();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
+test("private parsed fixtures show explicit per-answer availability without implicit raw reads", async ({
+  page,
+}, testInfo) => {
+  const run = {
+    id: "private-run",
+    panelId: "panel",
+    profile: "azure-sol-api",
+    createdAt: "2026-11-02T00:00:00Z",
+    storageFormat: "OBSERVATION_PRIVATE_V1",
+    provenance: { synthetic: true, provider: "azure", model: "fixture-model" },
+    rawExpired: false,
+    rawAnswers: null,
+    slots: [
+      {
+        promptId: "p1",
+        state: "successful",
+        extraction: {
+          brand: {
+            mention: false,
+            citation: false,
+            recommendation: false,
+            reason: null,
+          },
+        },
+      },
+    ],
+    rawAvailability: [
+      "retained-parsed",
+      "expired",
+      "rights-unavailable",
+      "not-retained",
+      "unavailable",
+    ].map((state, index) => ({
+      promptId: `p${index + 1}`,
+      state,
+      representation: "ANSWER_PARSED_JSON_V1",
+      producerClass: "CONTROLLED_FIXTURE_V1",
+      originalProviderWire: false,
+    })),
+  };
+  let answerReads = 0;
+  await page.route("**/api/visibility**", (route) => {
+    if (new URL(route.request().url()).searchParams.has("action"))
+      answerReads++;
+    return route.fulfill({
+      json: { panels: [panel], runs: [run], availability },
+    });
+  });
+  await mount(page, false);
+  await page
+    .getByRole("button", { name: /Azure API.*Synthetic fixture/ })
+    .click();
+  await page
+    .getByText("Parsed answer evidence and provenance", { exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      /Retained answers are parsed JSON, not original provider responses/,
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("p2: raw answer expired.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("p3: raw answer rights unavailable.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("p4: no answer body retained.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("p5: raw answer unavailable.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Read parsed answer for p1" }),
+  ).toHaveAttribute("href", /action=read-answer/);
+  expect(answerReads).toBe(0);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/private-observation-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
