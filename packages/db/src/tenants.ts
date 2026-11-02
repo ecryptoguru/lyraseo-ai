@@ -4,6 +4,9 @@ import {
   withActor,
   requireFreshAuthentication,
   type Actor,
+  type ReadActor,
+  isTokenActor,
+  requireReadScope,
   type Tx,
 } from "./context";
 const hash = (token: string) =>
@@ -52,7 +55,7 @@ async function consume(
   });
   if (result.count !== 1) throw new Error("STEP_UP_REQUIRED");
 }
-async function membership(tx: Tx, actor: Actor, workspaceId: string) {
+async function membership(tx: Tx, actor: ReadActor, workspaceId: string) {
   const workspace = await tx.workspace.findUnique({
     where: { id: workspaceId },
   });
@@ -65,14 +68,19 @@ async function membership(tx: Tx, actor: Actor, workspaceId: string) {
 }
 export async function listSites(
   db: PrismaClient,
-  actor: Actor,
+  actor: ReadActor,
   workspaceId: string,
 ) {
   return withActor(db, actor, workspaceId, async (tx) => {
+    await requireReadScope(tx, actor, "sites:read");
+    const token = isTokenActor(actor)
+      ? await tx.apiToken.findUnique({ where: { id: actor.tokenId } })
+      : null;
     const member = await membership(tx, actor, workspaceId);
     return tx.site.findMany({
       where: {
         workspaceId,
+        ...(token ? { id: { in: token.siteIds } } : {}),
         deletedAt: null,
         ...(["OWNER", "ADMIN"].includes(member.role)
           ? {}

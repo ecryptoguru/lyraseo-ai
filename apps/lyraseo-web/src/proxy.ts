@@ -4,6 +4,13 @@ import { authSettings } from "./server/auth/settings";
 import { readConfig } from "./server/config";
 export async function proxy(request: NextRequest) {
   const settings = authSettings();
+  if (settings && request.nextUrl.pathname === "/api/mcp") {
+    // Bearer endpoint authenticates independently; never refresh or consult browser cookies.
+    const response = NextResponse.next();
+    response.headers.set("Cache-Control", "private, no-store");
+    response.headers.set("X-Robots-Tag", "noindex, nofollow");
+    return response;
+  }
   if (settings) {
     let response = NextResponse.next({ request });
     const client = createServerClient(settings.url, settings.key, {

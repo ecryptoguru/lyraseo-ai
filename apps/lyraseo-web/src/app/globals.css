@@ -2642,3 +2642,58 @@ a.data-row:hover strong {
     padding-top: 48px;
   }
 }
+
+.audit-input {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.5rem 0 1rem;
+  padding: 0.75rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  font: inherit;
+}
+.audit-history,
+.audit-findings {
+  list-style: none;
+  padding: 0;
+}
+.audit-history li,
+.audit-findings li {
+  margin: 0.75rem 0;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.audit-url {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.audit-table {
+  max-width: 100%;
+  overflow: auto;
+}
+.audit-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.audit-table th,
+.audit-table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.audit-table td:first-child {
+  max-width: 30rem;
+}
+pre.audit-url {
+  white-space: pre-wrap;
+}
+
+.audit-source {
+  display: block;
+  padding: 0.5rem 0;
+}

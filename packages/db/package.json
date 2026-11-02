@@ -16,7 +16,8 @@
   "dependencies": {
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
-    "pg": "8.23.1"
+    "pg": "8.23.1",
+    "@lyraseo/visibility": "workspace:*"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -24,6 +25,14 @@
     "./accounting": "./src/accounting.ts",
     "./tenants": "./src/tenants.ts",
     "./identity": "./src/identity.ts",
-    "./execution": "./src/execution.ts"
+    "./execution": "./src/execution.ts",
+    "./audits": "./src/audits.ts",
+    "./sites": "./src/sites.ts",
+    "./gsc": "./src/gsc.ts",
+    "./content": "./src/content.ts",
+    "./visibility": "./src/visibility.ts",
+    "./tokens": "./src/tokens.ts",
+    "./pages": "./src/pages.ts",
+    "./ga4": "./src/ga4.ts"
   }
 }

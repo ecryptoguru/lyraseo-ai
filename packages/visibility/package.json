@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./url": "./src/url.ts"
+    "./url": "./src/url.ts",
+    "./acquisition": "./src/acquisition.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -14,5 +15,9 @@
   "devDependencies": {
     "typescript": "5.9.3",
     "vitest": "3.2.7"
+  },
+  "dependencies": {
+    "htmlparser2": "10.1.0",
+    "robots-parser": "3.0.1"
   }
 }

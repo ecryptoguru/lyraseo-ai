@@ -1,18 +1,20 @@
 # LyraSEO AI documentation
 
-This directory owns LyraSEO AI product planning. Continue development in `/Users/defiankit/Desktop/lyraseo-ai`.
+This directory owns LyraSEO AI product planning and engineering handoff. Continue development in `/Users/defiankit/Desktop/lyraseo-ai`.
 
-The [consolidated planning review](./product-quality-and-optimization.md#8-consolidated-planning-review) records the 2026-10-23 final consistency review, corrected contradictions, remaining founder choices and engineering/provider verification work. The stack is settled; phase-one local implementation was authorized on 2026-10-23 and is in progress. See [implementation progress](./evidence/phase-one-progress.md). Phase two and paid upgrades remain deferred. [Remaining decisions](./product-quality-and-optimization.md#83-what-remains-to-finalize-later) are deferred until the founder resumes; [engineering contracts](./product-quality-and-optimization.md#84-engineering-specification-finalized) are tracked separately.
+The [consolidated planning review](./product-quality-and-optimization.md#8-consolidated-planning-review) records the 2026-10-23 final consistency review, corrected contradictions, remaining founder choices and engineering/provider verification work. The stack is settled; phase-one local implementation was authorized on 2026-10-23 and is in progress. See the [current build roadmap](./build-roadmap.md); local operational receipts remain under the ignored `docs/evidence/` directory. Phase two and paid upgrades remain deferred. [Remaining decisions](./product-quality-and-optimization.md#83-what-remains-to-finalize-later) are deferred until the founder resumes; [engineering contracts](./product-quality-and-optimization.md#84-engineering-specification-finalized) are tracked separately.
 
 ## Engineering handoff
 
 - [Current build roadmap](./build-roadmap.md) — approved private-pilot milestones, hosted OpenSEO breadth and verification gates.
 
+- [Private-pilot development and verification](./runbooks/private-pilot-development.md) — controlled evidence journeys, optional connectors, agent reads and explicit acceptance boundaries.
+
 - [Private-pilot authentication and ledger setup](./runbooks/private-pilot-auth.md) — implemented local boundaries, dedicated role configuration and unverified live acceptance.
 
 - [Finalized engineering contracts](./engineering-contracts.md) — runtime, identity/tenancy, API/jobs/cost, integrations, privacy/recovery and UI states.
 - [Audit and measurement contracts](./audit-and-measurement-contracts.md) — exact rules, fixtures, score/coverage and visibility formulas.
-- [Implementation plan](./superpowers/plans/2026-10-23-lyraseo-implementation.md) — sixteen tasks with file/interface ownership, tests, dependencies and estimates. Planning only; business choices remain deferred.
+- [Implementation plan](./superpowers/plans/2026-10-23-lyraseo-implementation.md) — the original sixteen-task baseline with interface ownership, tests and dependencies. The expanded build roadmap owns the current enhancement sequence; business choices remain deferred.
 
 ## Product requirements
 
@@ -48,7 +50,7 @@ Better Auth cutover is approved to preserve private-test accounts and product da
 
 Retention/deletion defaults are approved: short-lived full-source artifacts, 13-month compact history, saved-work protection, a seven-day active-store deletion target and separate backup/processor/legal boundaries. See the approved policy for exact categories and verification gates.
 
-Impeccable is selected for landing-page and application design. The [UI/UX requirements](./product-quality-and-optimization.md#3-premium-ui-and-interaction-direction) cover responsive behavior, visual craft, motion, evidence, accessibility and bounded visual verification. Launch Review and the refined landing/app direction are approved; exact fonts, tokens and theme scope are also approved. No UI implementation has begun.
+Impeccable is selected for landing-page and application design. The [UI/UX requirements](./product-quality-and-optimization.md#3-premium-ui-and-interaction-direction) cover responsive behavior, visual craft, motion, evidence, accessibility and bounded visual verification. Launch Review and the refined landing/app direction are approved; exact fonts, tokens and theme scope are also approved. The local UI has rendered desktop/mobile fixture coverage; protected authenticated hosted acceptance remains open.
 
 The founder is approved as the initial human operator for release approval, support and exceptional recovery; engineering prepares procedures and verification. The approved private-pilot recovery objective is recorded in [release phases](./release-phases.md#5-approved-initial-operator-and-pilot-recovery): restore within 24 hours of a confirmed incident, with up to 24 hours of recent test changes lost under successful daily backups and seven daily restore points. Engineering verifies the target; production objectives are finalized in phase 2.
 
@@ -58,7 +60,7 @@ Solo, Team and Agency are approved as the phase-two public plan families, with t
 
 ## Selected domains
 
-The founder selected a Vercel-provided `.vercel.app` address for initial setup/private testing and `lyraseoai.com` for the eventual production domain. The exact Vercel hostname is assigned at setup; `lyraseoai.vercel.app` is a preferred example, not a reserved address. Acquire/confirm production domain ownership before phase-two implementation; DNS and sender verification are phase-two setup checks. Approved URL layout: phase 1 uses `/` for marketing, `/app` for the customer app and `/admin` for staff on the assigned `.vercel.app` hostname. In phase 2, use `lyraseoai.com` for marketing, `app.lyraseoai.com` for the customer app and `app.lyraseoai.com/admin` for staff. Retain one codebase and one Vercel project with explicit host routing. No purchase or deployment is authorized. The hostname choice does not authorize Vercel Pro or establish Hobby eligibility; the existing free-first hosting policy remains.
+The founder selected a Vercel-provided `.vercel.app` address for initial setup/private testing and `lyraseoai.com` for the eventual production domain. The exact Vercel hostname is assigned at setup; `lyraseoai.vercel.app` is a preferred example, not a reserved address. Acquire/confirm production domain ownership before phase-two implementation; DNS and sender verification are phase-two setup checks. Approved URL layout: phase 1 uses `/` for marketing, `/app` for the customer app and `/admin` for staff on the assigned `.vercel.app` hostname. In phase 2, use `lyraseoai.com` for marketing, `app.lyraseoai.com` for the customer app and `app.lyraseoai.com/admin` for staff. Retain one codebase and one Vercel project with explicit host routing. The domain is not acquired. Hosted activation follows eligibility and acceptance gates; paid upgrades and domain purchase still require approval. The hostname choice does not authorize Vercel Pro or establish Hobby eligibility; the existing free-first hosting policy remains.
 
 ## Project boundary
 

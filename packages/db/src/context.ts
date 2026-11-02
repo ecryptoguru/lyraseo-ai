@@ -8,10 +8,35 @@ export type Actor = {
   authProvider: "supabase";
   mfaAuthenticatedAt?: string;
 };
+/** Verified bearer credentials never impersonate a browser session. */
+export type TokenActor = {
+  credential: "api-token";
+  userId: string;
+  securityVersion: number;
+  tokenId: string;
+  tokenHash: string;
+  workspaceId: string;
+};
+export type ReadActor = Actor | TokenActor;
+export const isTokenActor = (actor: ReadActor): actor is TokenActor =>
+  "credential" in actor;
+export type ReadScope = "sites:read" | "audits:read" | "search:read";
+export async function requireReadScope(
+  tx: Tx,
+  actor: ReadActor,
+  scope: ReadScope,
+) {
+  if (isTokenActor(actor)) {
+    const token = await tx.apiToken.findUnique({
+      where: { id: actor.tokenId },
+    });
+    if (!token?.scopes.includes(scope)) throw new Error("FORBIDDEN");
+  }
+}
 export type Tx = Prisma.TransactionClient;
 export async function withActor<T>(
   db: PrismaClient,
-  actor: Actor,
+  actor: ReadActor,
   workspaceId: string,
   work: (tx: Tx) => Promise<T>,
 ): Promise<T> {
@@ -27,6 +52,31 @@ export async function withActor<T>(
         user.securityVersion !== actor.securityVersion
       )
         throw new Error("FORBIDDEN");
+      if (isTokenActor(actor)) {
+        const token = await tx.apiToken.findUnique({
+          where: { id: actor.tokenId },
+        });
+        const member = await tx.membership.findUnique({
+          where: { workspaceId_userId: { workspaceId, userId: actor.userId } },
+        });
+        const workspace = await tx.workspace.findUnique({
+          where: { id: workspaceId },
+        });
+        if (
+          !token ||
+          token.tokenHash !== actor.tokenHash ||
+          token.createdBy !== actor.userId ||
+          token.workspaceId !== workspaceId ||
+          actor.workspaceId !== workspaceId ||
+          token.revokedAt ||
+          token.expiresAt.getTime() <= Date.now() ||
+          token.securityVersion !== user.securityVersion ||
+          !member ||
+          !workspace ||
+          workspace.deletedAt
+        )
+          throw new Error("FORBIDDEN");
+      }
       return work(tx);
     },
     { maxWait: 10000, timeout: 15000 },
@@ -34,11 +84,22 @@ export async function withActor<T>(
 }
 export async function authorizeSiteIn(
   tx: Tx,
-  actor: Actor,
+  actor: ReadActor,
   workspaceId: string,
   siteId: string,
   action: "read" | "run" | "edit" | "export",
 ) {
+  if (isTokenActor(actor)) {
+    const token = await tx.apiToken.findUnique({
+      where: { id: actor.tokenId },
+    });
+    if (
+      action !== "read" ||
+      !token?.siteIds.includes(siteId) ||
+      token.workspaceId !== workspaceId
+    )
+      throw new Error("FORBIDDEN");
+  }
   const member = await tx.membership.findUnique({
     where: { workspaceId_userId: { workspaceId, userId: actor.userId } },
   });

@@ -36,6 +36,8 @@ jobs:
       - run: pnpm format:check
       - run: pnpm test:unit
       - run: pnpm test:integration
+      - name: Replay empty and populated database migrations
+        run: pnpm test:migrations
       - run: pnpm build
       - name: Install Chromium
         run: pnpm --filter @lyraseo/web exec playwright install --with-deps chromium

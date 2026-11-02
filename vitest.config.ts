@@ -13,5 +13,13 @@ export default defineConfig({
       "@": new URL("./apps/lyraseo-web/src", import.meta.url).pathname,
     },
   },
-  test: { fileParallelism: false, hookTimeout: 15000, testTimeout: 15000 },
+  test: {
+    env: {
+      LYRA_ENABLED_CAPABILITIES:
+        "audits,context,search,analytics,content,visibility,mcp",
+    },
+    fileParallelism: false,
+    hookTimeout: 15000,
+    testTimeout: 15000,
+  },
 });
