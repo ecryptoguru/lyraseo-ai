@@ -1,0 +1,190 @@
+generator client {
+  provider = "prisma-client"
+  output = "../generated"
+}
+datasource db {
+  provider = "postgresql"
+}
+enum Role {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+model ProductUser {
+  id String @id @default(cuid())
+  suspended Boolean @default(false)
+  securityVersion Int @default(0)
+  quotes OperationQuote[]
+  operations Operation[]
+  createdAt DateTime @default(now())
+  identities ProviderIdentity[]
+  memberships Membership[]
+}
+model ProviderIdentity {
+  id String @id @default(cuid())
+  provider String
+  subject String
+  userId String
+  user ProductUser @relation(fields:[userId], references:[id], onDelete:Cascade)
+  @@unique([provider,subject])
+}
+model Workspace {
+  id String @id @default(cuid())
+  name String
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  memberships Membership[]
+  sites Site[]
+}
+model Membership {
+  workspaceId String
+  userId String
+  role Role
+  workspace Workspace @relation(fields:[workspaceId],references:[id],onDelete:Cascade)
+  user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
+  grants SiteGrant[]
+  @@id([workspaceId,userId])
+}
+model Site {
+  quotes OperationQuote[]
+  operations Operation[]
+  id String @id @default(cuid())
+  workspaceId String
+  origin String
+  verifiedAt DateTime?
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields:[workspaceId],references:[id],onDelete:Cascade)
+  grants SiteGrant[]
+  @@unique([workspaceId,id])
+  @@unique([workspaceId,origin])
+  @@index([workspaceId,createdAt,id])
+}
+model SiteGrant {
+  workspaceId String
+  siteId String
+  userId String
+  site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+  member Membership @relation(fields:[workspaceId,userId],references:[workspaceId,userId],onDelete:Cascade)
+  @@id([workspaceId,siteId,userId])
+}
+
+model StaffGrant {
+  userId String @id
+  enabled Boolean @default(true)
+}
+model StepUpGrant {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  userId String
+  sessionId String
+  action String
+  resourceId String
+  expiresAt DateTime
+  consumedAt DateTime?
+}
+model BudgetPeriod {
+  id String @id @default(cuid())
+  userId String
+  period String
+  bucket String
+  limit Decimal @db.Decimal(20,9)
+  spent Decimal @default(0) @db.Decimal(20,9)
+  reserved Decimal @default(0) @db.Decimal(20,9)
+  @@unique([userId,period,bucket])
+}
+model Operation {
+  id String @id @default(cuid())
+  workspaceId String
+  siteId String
+  userId String
+  sessionId String
+  securityVersion Int
+  kind String
+  provider String
+  period String
+  route String
+  idempotencyKey String
+  inputHash String
+  requestInput Json?
+  tariffVersion String
+  reservedCost Decimal @db.Decimal(20,9)
+  actualCost Decimal? @db.Decimal(20,9)
+  status String @default("QUEUED")
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  cancelRequestedAt DateTime?
+  leaseOwner String?
+  leaseUntil DateTime?
+  fence Int @default(0)
+  attemptState String @default("NONE")
+  providerTaskId String?
+  settledAt DateTime?
+  site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+  user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
+  quote OperationQuote?
+  outbox OutboxEvent?
+  receipts UsageReceipt[]
+  @@unique([userId,workspaceId,route,idempotencyKey])
+  @@index([workspaceId,createdAt,id])
+  @@index([status,leaseUntil])
+}
+model OutboxEvent {
+  id String @id @default(cuid())
+  operationId String @unique
+  workspaceId String
+  userId String
+  createdAt DateTime @default(now())
+  deliveredAt DateTime?
+  attempts Int @default(0)
+  operation Operation @relation(fields:[operationId],references:[id],onDelete:Cascade)
+}
+model UsageReceipt {
+  id String @id @default(cuid())
+  operationId String
+  workspaceId String
+  userId String
+  provider String
+  receiptId String
+  amount Decimal @db.Decimal(20,9)
+  acceptedOutput Boolean
+  createdAt DateTime @default(now())
+  operation Operation @relation(fields:[operationId],references:[id],onDelete:Restrict)
+  @@unique([provider,receiptId])
+  @@unique([operationId,provider])
+}
+model AuthThrottle {
+  key String @id
+  count Int @default(1)
+  expiresAt DateTime
+}
+model ProductSession {
+  sessionId String @id
+  userId String
+  securityVersion Int
+  createdAt DateTime
+  refreshedAt DateTime
+}
+
+model OperationQuote {
+  id String @id @default(cuid())
+  userId String
+  workspaceId String
+  siteId String
+  kind String
+  provider String
+  route String
+  inputHash String
+  requestInput Json
+  maximumCost Decimal @db.Decimal(20,9)
+  tariffVersion String
+  securityVersion Int
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  consumedOperationId String? @unique
+  user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
+  site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+  consumedOperation Operation? @relation(fields:[consumedOperationId],references:[id],onDelete:Restrict)
+  @@index([userId,expiresAt])
+}

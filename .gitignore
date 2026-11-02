@@ -1,0 +1,20 @@
+node_modules/
+.next/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.vercel/
+.wrangler/
+*.tsbuildinfo
+playwright-report/
+test-results/
+.DS_Store
+
+packages/db/generated/
+.serena/
+output/
+.impeccable/
+# Local operational receipts can contain account and deployment metadata.
+docs/evidence/

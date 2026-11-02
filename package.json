@@ -1,0 +1,25 @@
+{
+  "name": "lyraseo-ai",
+  "private": true,
+  "packageManager": "pnpm@11.13.1",
+  "scripts": {
+    "dev": "pnpm --filter @lyraseo/web dev",
+    "build": "pnpm --filter @lyraseo/web build",
+    "check": "pnpm --filter @lyraseo/web lint && pnpm -r typecheck",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "pnpm --filter @lyraseo/web test:e2e",
+    "db:local": "node scripts/local-db.mjs",
+    "format:check": "prettier --check \"apps/lyraseo-web/src/**/*.{ts,tsx,css}\" \"packages/*/src/*.ts\" \"tests/**/*.ts\"",
+    "auth:preflight": "node --env-file-if-exists=apps/lyraseo-web/.env.local scripts/auth-preflight.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

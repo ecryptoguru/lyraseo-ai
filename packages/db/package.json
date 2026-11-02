@@ -1,0 +1,29 @@
+{
+  "name": "@lyraseo/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm --dir ../.. test:integration"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1",
+    "prisma": "7.10.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "pg": "8.23.1"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./context": "./src/context.ts",
+    "./accounting": "./src/accounting.ts",
+    "./tenants": "./src/tenants.ts",
+    "./identity": "./src/identity.ts",
+    "./execution": "./src/execution.ts"
+  }
+}
