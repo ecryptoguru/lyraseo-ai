@@ -8,10 +8,12 @@ The private-pilot branch now includes durable operation services, session-bound 
 
 New audits use the versioned `readiness-v2` contract with reviewed expectations, source-specific completeness, rule evidence references and category coverage. Historical v1 results remain reproducible and unchanged. Comparisons preserve uncertainty and invalidate affected findings when the declared basis changes. The raw profile still cannot supply rendered evidence or a complete readiness score.
 
+The signed Node bridge has a controlled local harness with durable page checkpoints, restart/replay tests and cancellation/revocation checks. It shares audit authorization, validation and lifecycle rules with the browser driver. Stock Next.js rejects the reserved runtime namespace. Hosted HTTPS ingress, an autonomous bridge service, Queue delivery and public-site runtime qualification remain open.
+
 | Private-pilot milestone | Implementation state | Acceptance still required |
 | --- | --- | --- |
 | 1. Baseline and private access | Prior16 tasks inventoried; public repository and CI established; tenant/site authorization tests | Google sign-in setup, SMTP/OTP, MFA/recovery and protected hosted acceptance |
-| 2. Durable execution and cost | Server quotes, atomic admission, restricted dispatch/replay/policy kernel, immutable financial receipts and ledger recovery; legacy publication disabled | Qualified tariffs, signed Node execution bridge, actual queue consumers, provider receipt/reconciliation adapters and staff operator controls |
+| 2. Durable execution and cost | Server quotes, atomic admission, restricted dispatch/replay/policy kernel, signed controlled Node audit harness, immutable financial receipts and ledger recovery; legacy publication disabled | Qualified tariffs, hosted bridge qualification, actual queue consumers, provider receipt/reconciliation adapters and staff operator controls |
 | 3. Real audits and fixture website | Locally gated raw acquisition, session-bound site proof, immutable manifests, leased page checkpoints, fixture-site HTTP fix/rerun/comparison and CSV; rendered-head rules remain UNKNOWN | Hosted authenticated journey; actual worker runtime, rendering and subresource isolation/capacity qualification |
 | 4. Business context and page workspace | Immutable reviewed context; exact URL identities, change journal, self-assignment, linked draft revisions and saved evidence | Broader team assignments, verified alias mapping when needed, hosted reopen/revocation acceptance |
 | 5. GSC and opportunity inbox | Independent read-only OAuth, property selection, bounded cached imports, comparable-window opportunities and scoped UI | Live property reconciliation, refresh/backfill orchestration, explicit corrected-import versioning |

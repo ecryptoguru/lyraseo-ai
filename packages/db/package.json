@@ -34,6 +34,7 @@
     "./visibility": "./src/visibility.ts",
     "./tokens": "./src/tokens.ts",
     "./pages": "./src/pages.ts",
-    "./ga4": "./src/ga4.ts"
+    "./ga4": "./src/ga4.ts",
+    "./bridge": "./src/bridge.ts"
   }
 }

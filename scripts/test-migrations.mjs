@@ -70,6 +70,10 @@ const currentConfig = prefixConfig(
   "twenty",
   migrations.filter((name) => name <= "202611020015_gsc_import_leases"),
 );
+const kernelConfig = prefixConfig(
+  "twenty-one",
+  migrations.filter((name) => name <= "202611020016_worker_dispatch"),
+);
 const databases = [];
 function sql(database, statement, capture = false) {
   return run(
@@ -171,6 +175,69 @@ function snapshot(database, withAudit) {
 const fixture = (name) =>
   readFileSync(join(root, "tests/fixtures/migrations", name), "utf8");
 try {
+  // Upgrade a populated, already closed 016 installation, including its
+  // existing replay and paid dispatch history and legacy browser grants.
+  const kernelDatabase =
+    "lyraseo_replay_kernel_" + randomUUID().replaceAll("-", "");
+  run("docker", [
+    "exec",
+    container,
+    "createdb",
+    "-U",
+    "postgres",
+    kernelDatabase,
+  ]);
+  databases.push(kernelDatabase);
+  migrate(kernelDatabase, currentConfig);
+  sql(kernelDatabase, fixture("dispatch-paid.sql"));
+  sql(kernelDatabase, fixture("dispatch-audits.sql"));
+  migrate(kernelDatabase, kernelConfig);
+  sql(
+    kernelDatabase,
+    'GRANT SELECT,INSERT,UPDATE ON "AuditRun" TO lyraseo_runtime; GRANT SELECT,INSERT ON "AuditPage" TO lyraseo_runtime;',
+  );
+  login(
+    kernelDatabase,
+    "lyraseo_dispatch",
+    "local_dispatch_only",
+    `SELECT lyraseo_kernel.command(gen_random_uuid(),'lyraseo-kernel-a','/api/internal/runtime/dispatch','{"limit":1}',statement_timestamp(),statement_timestamp()+interval '60 seconds');`,
+  );
+  const kernelHistory = () =>
+    snapshot(kernelDatabase, true) +
+    ["WorkDispatch", "InternalRequest", "RuntimePolicy"]
+      .map((table) =>
+        sql(
+          kernelDatabase,
+          `SELECT jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text) FROM "${table}" t`,
+          true,
+        ),
+      )
+      .join("\n");
+  const historyBeforeBridge = kernelHistory();
+  migrate(kernelDatabase);
+  migrate(kernelDatabase);
+  if (historyBeforeBridge !== kernelHistory())
+    throw new Error(
+      "Bridge migration changed prior audit, paid or kernel history.",
+    );
+  const webRights = login(
+    kernelDatabase,
+    "lyraseo_runtime",
+    "local_runtime_only",
+    `SELECT has_table_privilege(current_user,'"AuditRun"','UPDATE'), has_table_privilege(current_user,'"AuditPage"','INSERT'),has_table_privilege(current_user,'"AuditRun"','INSERT'),has_function_privilege(current_user,'lyraseo_audit.web_can_run(text)','EXECUTE');`,
+  );
+  const serviceRights = login(
+    kernelDatabase,
+    "lyraseo_dispatch",
+    "local_dispatch_only",
+    `SELECT has_any_column_privilege(current_user,'"AuditRun"','SELECT,INSERT,UPDATE'),has_any_column_privilege(current_user,'"AuditPage"','SELECT,INSERT,UPDATE'),has_function_privilege(current_user,'lyraseo_audit.check_step(uuid,text)','EXECUTE');`,
+  );
+  if (webRights !== "f|f|t|t" || serviceRights !== "f|f|t")
+    throw new Error("Bridge privilege cutover failed.");
+  console.log(
+    "PASS: populated 21 → 22, identical audit, ledger, replay and dispatch history; restricted reconnect and precise grants.",
+  );
+
   for (const scenario of ["empty", "seven", "twenty"]) {
     const database = `lyraseo_replay_${scenario}_${randomUUID().replaceAll("-", "")}`;
     run("docker", ["exec", container, "createdb", "-U", "postgres", database]);

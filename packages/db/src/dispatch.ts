@@ -30,8 +30,9 @@ type RecoveryResult =
     }
   | InProgress;
 
+type CommandClient = Pick<PrismaClient, "$queryRaw">;
 async function command<Result>(
-  db: PrismaClient,
+  db: CommandClient,
   path: string,
   request: KernelRequest,
 ) {
@@ -42,13 +43,13 @@ async function command<Result>(
      ${request.rawBody}::text,${request.issuedAt}::timestamptz,${request.expiresAt}::timestamptz) AS result`;
   return row!.result;
 }
-export const claimDue = (db: PrismaClient, request: KernelRequest) =>
+export const claimDue = (db: CommandClient, request: KernelRequest) =>
   command<ClaimResult>(db, "/api/internal/runtime/dispatch", request);
-export const ackDelivery = (db: PrismaClient, request: KernelRequest) =>
+export const ackDelivery = (db: CommandClient, request: KernelRequest) =>
   command<DeliveryResult>(db, "/api/internal/runtime/dispatch/ack", request);
-export const deferDelivery = (db: PrismaClient, request: KernelRequest) =>
+export const deferDelivery = (db: CommandClient, request: KernelRequest) =>
   command<DeliveryResult>(db, "/api/internal/runtime/dispatch/defer", request);
-export const recoverDue = (db: PrismaClient, request: KernelRequest) =>
+export const recoverDue = (db: CommandClient, request: KernelRequest) =>
   command<RecoveryResult>(db, "/api/internal/runtime/recover", request);
 
 declare const controlledBinding: unique symbol;

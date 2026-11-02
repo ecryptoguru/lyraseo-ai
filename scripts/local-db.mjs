@@ -156,8 +156,9 @@ const sql = `INSERT INTO lyraseo_kernel.test_environment(database_oid,postmaster
   ON CONFLICT(database_oid) DO UPDATE SET postmaster_started_at=EXCLUDED.postmaster_started_at;
 GRANT USAGE ON SCHEMA public TO lyraseo_runtime;
 GRANT SELECT,INSERT,UPDATE,DELETE ON "Workspace","Membership","Site","SiteGrant" TO lyraseo_runtime;
-GRANT SELECT,INSERT,UPDATE ON "AuditRun" TO lyraseo_runtime;
-GRANT SELECT,INSERT ON "AuditPage","IssueAction","SiteContextRevision" TO lyraseo_runtime;
+GRANT SELECT,INSERT ON "AuditRun" TO lyraseo_runtime;
+GRANT SELECT ON "AuditPage" TO lyraseo_runtime;
+GRANT SELECT,INSERT ON "IssueAction","SiteContextRevision" TO lyraseo_runtime;
 GRANT SELECT,INSERT,UPDATE ON "SiteVerificationChallenge" TO lyraseo_runtime;
 GRANT SELECT,INSERT,UPDATE,DELETE ON "AnalyticsOAuthState","AnalyticsConnection","AnalyticsImport" TO lyraseo_runtime;
 GRANT SELECT,INSERT,UPDATE,DELETE ON "GoogleOAuthState","GoogleConnection","SearchSnapshot","SearchImport" TO lyraseo_runtime;

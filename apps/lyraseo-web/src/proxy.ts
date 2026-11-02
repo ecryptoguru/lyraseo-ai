@@ -3,6 +3,17 @@ import { createServerClient } from "@supabase/ssr";
 import { authSettings } from "./server/auth/settings";
 import { readConfig } from "./server/config";
 export async function proxy(request: NextRequest) {
+  // The raw Node listener owns these five operations. Stock Next can never
+  // authenticate a normalized runtime alias or refresh a cookie for this prefix.
+  if (/^\/api\/internal\/runtime(?:\/|$)/.test(request.nextUrl.pathname)) {
+    return new NextResponse(null, {
+      status: 404,
+      headers: {
+        "Cache-Control": "private, no-store",
+        "X-Robots-Tag": "noindex, nofollow",
+      },
+    });
+  }
   const settings = authSettings();
   if (settings && request.nextUrl.pathname === "/api/mcp") {
     // Bearer endpoint authenticates independently; never refresh or consult browser cookies.
