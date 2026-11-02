@@ -6,6 +6,8 @@ Approved on 2026-11-02. Build the recommended enhancements for the private pilot
 
 The private-pilot branch now includes durable operation services, session-bound site proof, frozen raw audit manifests and evidence, reviewed business context, stable page workspaces, Search Console imports/opportunities, manual evidence-backed draft revisions, private PDF/CSV reports, versioned AI panels, and scoped read-only MCP credentials. These are local implementations with fixture/database/browser evidence. They are not a hosted pilot release. The Cloudflare worker still returns unavailable; provider collection, rendered acquisition and live acceptance remain open.
 
+New audits use the versioned `readiness-v2` contract with reviewed expectations, source-specific completeness, rule evidence references and category coverage. Historical v1 results remain reproducible and unchanged. Comparisons preserve uncertainty and invalidate affected findings when the declared basis changes. The raw profile still cannot supply rendered evidence or a complete readiness score.
+
 | Private-pilot milestone | Implementation state | Acceptance still required |
 | --- | --- | --- |
 | 1. Baseline and private access | Prior16 tasks inventoried; public repository and CI established; tenant/site authorization tests | Google sign-in setup, SMTP/OTP, MFA/recovery and protected hosted acceptance |

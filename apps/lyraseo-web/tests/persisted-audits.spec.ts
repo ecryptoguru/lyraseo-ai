@@ -41,6 +41,7 @@ const run = {
   evaluation: {
     score: null,
     coverage: 0.4,
+    methodologyVersion: "readiness-v1",
     rules: [
       {
         ruleId: "E02",
@@ -54,27 +55,56 @@ const run = {
 test("saved audit component captures, inspects and reviews evidence accessibly", async ({
   page,
 }, testInfo) => {
+  let submitted: Record<string, unknown> = {};
+  const v2 = () => ({
+    ...run,
+    declarations: submitted,
+    methodologyVersion: "readiness-v2",
+    evaluation: {
+      ...run.evaluation,
+      methodologyVersion: "readiness-v2",
+      categoryCoverage: { discovery: 0.25, entity: null },
+      rules: [
+        {
+          ruleId: "D01",
+          scopeKey: run.manifest[0],
+          outcome: "FAIL",
+          reasonCode: "HTTP_ERROR",
+          ruleVersion: "2",
+          evidence: "404",
+          evidenceRefs: [
+            {
+              source: "receipt",
+              requestedUrl: run.manifest[0],
+              fields: ["status"],
+            },
+          ],
+        },
+      ],
+    },
+  });
   let created = false,
     reviewed = false;
   await page.route("**/api/audits**", async (route) => {
     if (route.request().method() === "GET")
       return route.fulfill({
         json: new URL(route.request().url()).searchParams.has("auditId")
-          ? run
+          ? v2()
           : created
-            ? [run]
+            ? [v2()]
             : [],
       });
     const input = route.request().postDataJSON();
     if (input.action === "create") {
       created = true;
+      submitted = input.declarations;
       return route.fulfill({ json: { id: "audit", status: "QUEUED" } });
     }
     if (input.action === "review") {
       reviewed = true;
       return route.fulfill({ json: { ok: true } });
     }
-    return route.fulfill({ json: run });
+    return route.fulfill({ json: v2() });
   });
   await page.goto("/sign-in");
   await page.locator("main").evaluate((main) => {
@@ -86,6 +116,23 @@ test("saved audit component captures, inspects and reviews evidence accessibly",
   await expect(
     page.getByText("Your first saved audit will appear here."),
   ).toBeVisible();
+  await page.getByText("Review optional audit declarations").click();
+  await page.getByLabel("Contact page URL").fill("https://example.com/contact");
+  await page.getByLabel("Intended indexing").selectOption("indexable");
+  await page.getByLabel("Page type", { exact: true }).selectOption("article");
+  await page
+    .getByLabel("Expected canonical URL")
+    .fill("https://example.com/en/?q=UK");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/audit-declarations-expanded-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
   await page
     .getByRole("button", { name: "Confirm pages and start audit" })
     .click();
@@ -94,6 +141,23 @@ test("saved audit component captures, inspects and reviews evidence accessibly",
       exact: false,
     }),
   ).toBeVisible();
+  expect(submitted).toEqual({
+    contactUrl: "https://example.com/contact",
+    pageDeclarations: [
+      {
+        requestedUrl: "https://example.com/",
+        indexingIntent: "indexable",
+        pageType: "article",
+        intendedCanonical: "https://example.com/en/?q=UK",
+      },
+    ],
+  });
+  await expect(page.getByText("readiness-v2", { exact: false })).toBeVisible();
+  await expect(page.getByText("discovery: 25% coverage")).toBeVisible();
+  await page.getByRole("button", { name: "Rerun the same pages" }).click();
+  await expect(
+    page.getByLabel("Confirm up to 25 pages", { exact: false }),
+  ).toBeFocused();
   await expect(page.getByRole("link", { name: "Export CSV" })).toBeVisible();
   await page
     .getByLabel("Reason for your next review action")
@@ -119,7 +183,11 @@ test("viewer can inspect saved audits without mutation controls", async ({
   page,
 }) => {
   await page.route("**/api/audits**", (route) =>
-    route.fulfill({ json: [run] }),
+    route.fulfill({
+      json: new URL(route.request().url()).searchParams.has("auditId")
+        ? run
+        : [run],
+    }),
   );
   await page.goto("/sign-in");
   await page.locator("main").evaluate((main) => {
@@ -133,6 +201,8 @@ test("viewer can inspect saved audits without mutation controls", async ({
       "Your site access allows viewing and exporting saved audits.",
     ),
   ).toBeVisible();
+  await page.getByRole("button", { name: /completed/i }).click();
+  await expect(page.getByText("readiness-v1", { exact: false })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Confirm pages and start audit" }),
   ).toHaveCount(0);

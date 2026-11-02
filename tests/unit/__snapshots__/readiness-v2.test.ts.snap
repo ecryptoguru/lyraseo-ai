@@ -1,0 +1,649 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`freezes every normalized healthy result and asserts there are no unexpected findings 1`] = `
+{
+  "categoryCoverage": {
+    "answer": 1,
+    "discovery": 1,
+    "entity": 1,
+    "extractability": 1,
+  },
+  "categoryScores": {
+    "answer": 1,
+    "discovery": 1,
+    "entity": 1,
+    "extractability": 1,
+  },
+  "coverage": 1,
+  "declarations": {
+    "aboutUrl": "https://example.com/about",
+    "approvedAliases": [
+      "Ex",
+    ],
+    "brandName": "Example",
+    "pageDeclarations": [
+      {
+        "indexingIntent": "indexable",
+        "pageType": "article",
+        "requestedUrl": "https://example.com/",
+      },
+    ],
+    "requiredPolicyUrls": [
+      "https://example.com/policy",
+    ],
+  },
+  "duplicateDestinations": [],
+  "eligible": true,
+  "manifest": [
+    "https://example.com/",
+  ],
+  "methodologyVersion": "readiness-v2",
+  "profile": "GOLDEN_GOOGLE_RENDERED",
+  "rules": [
+    {
+      "category": "discovery",
+      "evidence": "200",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "status",
+            "contentType",
+            "acquired",
+            "finalUrl",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+            "redirects",
+            "status",
+            "finalUrl",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "high",
+      "reasonCode": "HTML_ACQUIRED",
+      "ruleId": "D01",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "discovery",
+      "evidence": "No applicable directives",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "metadata.headers.directives",
+            "metadata.headers.directivesComplete",
+            "metadata.original.directives",
+            "metadata.original.directivesComplete",
+            "metadata.rendered.directives",
+            "metadata.rendered.directivesComplete",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "indexingIntent",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "declarations",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "high",
+      "reasonCode": "NO_NOINDEX",
+      "ruleId": "D02",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "discovery",
+      "evidence": "https://example.com/",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "metadata.headers.canonicalUrls",
+            "metadata.headers.canonicalsComplete",
+            "metadata.original.canonicalUrls",
+            "metadata.original.canonicalsComplete",
+            "metadata.rendered.canonicalUrls",
+            "metadata.rendered.canonicalsComplete",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "intendedCanonical",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "declarations",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "SELF_CANONICAL",
+      "ruleId": "D03",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "discovery",
+      "evidence": "https://example.com/",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "requestedRobotsGoogleAllowed",
+            "robotsGoogleAllowed",
+            "finalUrl",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "robotsPolicy",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "indexingIntent",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "declarations",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "high",
+      "reasonCode": "GOOGLEBOT_ALLOWED",
+      "ruleId": "D04",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "extractability",
+      "evidence": "中文",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "mainText",
+            "mainMediaNames",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "high",
+      "reasonCode": "MAIN_TEXT_PRESENT",
+      "ruleId": "E01",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "extractability",
+      "evidence": "Example",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "headComplete",
+            "titleElements",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "TITLE_PRESENT",
+      "ruleId": "E02",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "extractability",
+      "evidence": "Example",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "h1Texts",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "ONE_H1",
+      "ruleId": "E03",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "extractability",
+      "evidence": "About us",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "linkNames",
+            "detectedLanguage",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "LINKS_NAMED",
+      "ruleId": "E04",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "extractability",
+      "evidence": "1 valid blocks",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "jsonLdComplete",
+            "jsonLd",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "JSON_LD_PARSES",
+      "ruleId": "E05",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "answer",
+      "evidence": "2, 3",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "headingLevels",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "low",
+      "reasonCode": "HEADING_SEQUENCE",
+      "ruleId": "A01",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "answer",
+      "evidence": "true, true",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "headingLevels",
+            "populatedSections",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "low",
+      "reasonCode": "SECTIONS_POPULATED",
+      "ruleId": "A02",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "answer",
+      "evidence": "Overview",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "headingLevels",
+            "headingTexts",
+            "detectedLanguage",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "low",
+      "reasonCode": "HEADING_NAMED",
+      "ruleId": "A03",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "answer",
+      "evidence": "2024-02-29 | 2024-02-29T23:55:00-05:00",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "articleDates",
+            "byline",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "pageType",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "declarations",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "ARTICLE_ATTRIBUTION_PRESENT",
+      "ruleId": "A04",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "entity",
+      "evidence": "example",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "visibleText",
+            "logoNames",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "brandName",
+            "approvedAliases",
+          ],
+          "source": "declarations",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "BRAND_VISIBLE",
+      "ruleId": "T01",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com/",
+    },
+    {
+      "category": "discovery",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "linkNames",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "manifest",
+          ],
+          "source": "manifest",
+        },
+      ],
+      "outcome": "NOT_APPLICABLE",
+      "priority": "medium",
+      "reasonCode": "SINGLE_PAGE",
+      "ruleId": "D05",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com",
+    },
+    {
+      "category": "entity",
+      "evidence": "https://example.com/about",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "detectedLanguage",
+            "linkNames",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "aboutUrl",
+            "contactUrl",
+          ],
+          "source": "declarations",
+        },
+        {
+          "fields": [
+            "manifest",
+          ],
+          "source": "manifest",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "low",
+      "reasonCode": "CONTACT_LINK_OBSERVED",
+      "ruleId": "T02",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com",
+    },
+    {
+      "category": "entity",
+      "evidence": "2 matching fields",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "jsonLdComplete",
+            "jsonLd",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "brandName",
+            "approvedAliases",
+            "officialUrls",
+          ],
+          "source": "declarations",
+        },
+        {
+          "fields": [
+            "manifest",
+          ],
+          "source": "manifest",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "medium",
+      "reasonCode": "ORGANIZATION_MATCH",
+      "ruleId": "T03",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com",
+    },
+    {
+      "category": "entity",
+      "evidence": "https://example.com/policy",
+      "evidenceRefs": [
+        {
+          "fields": [
+            "bodyComplete",
+            "linkNames",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "page",
+        },
+        {
+          "fields": [
+            "acquiredAt",
+            "sha256",
+          ],
+          "requestedUrl": "https://example.com/",
+          "source": "receipt",
+        },
+        {
+          "fields": [
+            "requiredPolicyUrls",
+          ],
+          "source": "declarations",
+        },
+        {
+          "fields": [
+            "manifest",
+          ],
+          "source": "manifest",
+        },
+      ],
+      "outcome": "PASS",
+      "priority": "low",
+      "reasonCode": "POLICY_LINKS_PRESENT",
+      "ruleId": "T04",
+      "ruleVersion": "2",
+      "scopeKey": "https://example.com",
+    },
+  ],
+  "score": 100,
+}
+`;

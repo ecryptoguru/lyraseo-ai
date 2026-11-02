@@ -50,13 +50,11 @@ const page = (requestedUrl = "https://example.com/"): PageEvidence => ({
   acquired: true,
   status: 200,
   contentType: "text/html",
-  headComplete: true,
-  bodyComplete: true,
+  headComplete: false,
+  bodyComplete: false,
   titleElements: [],
-  headingLevels: [1],
-  h1Texts: ["Example"],
-  mainText: "Example",
-  visibleText: "Example",
+  headingLevels: [],
+  h1Texts: [],
   canonicalUrls: [requestedUrl],
   linkNames: [],
   jsonLd: [],
@@ -98,7 +96,7 @@ async function complete(key: string, manifest = ["https://example.com/"]) {
       actor,
       s,
       claim.fence,
-      page(url),
+      { ...page(url), status: 404, acquired: false },
       provenance(url),
     );
   return finishAuditRun(db, actor, s, claim.fence);
@@ -188,7 +186,7 @@ it("keeps review workflow separate from snapshots and removed pages unevaluated"
   ]);
   const original = before.evaluation;
   await reviewAuditIssue(db, actor, scope(before.id), {
-    ruleId: "E02",
+    ruleId: "D01",
     scopeKey: "https://example.com/",
     disposition: "REVIEWED",
     reason: "Reviewed source",
@@ -364,4 +362,63 @@ it("accepts bounded five MiB raw source and rejects cross-origin finals and futu
   await expect(
     admin.auditPage.deleteMany({ where: { auditId: run.id } }),
   ).resolves.toMatchObject({ count: 1 });
+});
+
+it("rejects fabricated rendered evidence at the raw checkpoint", async () => {
+  const run = await createAuditRun(db, actor, request("raw-boundary")),
+    s = scope(run.id),
+    claim = await claimAuditRun(db, actor, s, "test");
+  for (const change of [
+    { robotsGoogleAllowed: true },
+    { headComplete: true },
+    { bodyComplete: true },
+    {
+      metadata: {
+        rendered: {
+          directivesComplete: true,
+          canonicalsComplete: true,
+          directives: [],
+          canonicalUrls: [],
+        },
+      },
+    },
+    { visibleText: "Example" },
+    { pageType: "article" as const },
+  ])
+    await expect(
+      checkpointAuditPage(
+        db,
+        actor,
+        s,
+        claim.fence,
+        { ...page(), ...change },
+        provenance(),
+      ),
+    ).rejects.toThrow("INVALID_PAGE_EVIDENCE");
+  expect(await admin.auditPage.count()).toBe(0);
+});
+it("finishes a legacy queued run under its stored methodology and keeps its historical evaluation intact", async () => {
+  const input = request("legacy-pending");
+  const old = await admin.auditRun.create({
+    data: {
+      ...input,
+      userId: actor.userId,
+      securityVersion: actor.securityVersion,
+      methodologyVersion: "readiness-v1",
+      inputHash: "legacy",
+      declarations: {},
+    },
+  });
+  const s = scope(old.id),
+    claim = await claimAuditRun(db, actor, s, "legacy");
+  await checkpointAuditPage(db, actor, s, claim.fence, page(), provenance());
+  const completed = await finishAuditRun(db, actor, s, claim.fence);
+  const saved = await readAuditRun(db, actor, s);
+  expect(saved.evaluation).toEqual(completed.evaluation);
+  expect(saved.evaluation).toMatchObject({
+    methodologyVersion: "readiness-v1",
+    score: null,
+  });
+  expect(saved.evaluation).not.toHaveProperty("categoryCoverage");
+  expect(saved.evaluation?.rules[0]).not.toHaveProperty("ruleVersion");
 });

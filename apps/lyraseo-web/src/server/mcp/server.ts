@@ -55,6 +55,8 @@ const rule = ({
   priority,
   reasonCode,
   evidence,
+  ruleVersion,
+  evidenceRefs,
 }: RuleResult) => ({
   ruleId,
   scopeKey: scopeKey.slice(0, 2048),
@@ -62,7 +64,18 @@ const rule = ({
   outcome,
   priority,
   reasonCode,
-  ...(evidence ? { evidence: evidence.slice(0, 512) } : {}),
+  ...(evidence
+    ? { evidence: Array.from(evidence).slice(0, 512).join("") }
+    : {}),
+  ...(ruleVersion ? { ruleVersion } : {}),
+  // Origin rules may reference every manifest page. Keep individual tool
+  // results bounded and make the omitted references explicit.
+  ...(evidenceRefs
+    ? {
+        evidenceRefs: evidenceRefs.slice(0, 4),
+        totalEvidenceRefs: evidenceRefs.length,
+      }
+    : {}),
 });
 async function result(work: () => Promise<unknown>) {
   try {
@@ -174,6 +187,10 @@ export function createReadOnlyMcpServer(db: PrismaClient, actor: TokenActor) {
                 score: e.score,
                 coverage: e.coverage,
                 categoryScores: e.categoryScores,
+                categoryCoverage: e.categoryCoverage,
+                contextRevision: e.contextRevision,
+                contextRevisionId: e.contextRevisionId,
+                duplicateDestinationCount: e.duplicateDestinations?.length,
                 eligible: e.eligible,
                 pageCount: e.manifest.length,
                 ruleCount: e.rules.length,

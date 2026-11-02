@@ -74,11 +74,26 @@ export async function renderEvidenceReport(
     return [
       `Acquired: ${String(data.createdAt ?? "unavailable")} | Method: ${String(data.methodologyVersion ?? source.kind)} | Profile: ${String(data.profile ?? "unavailable")}`,
       `Coverage: ${describe(evaluation.coverage)} | Readiness score: ${describe(evaluation.score)}`,
+      ...(data.methodologyVersion === "readiness-v2"
+        ? [
+            "Audit business context revision " +
+              String(object(data.declarations).contextRevision ?? "undeclared"),
+            ...Object.entries(object(evaluation.categoryCoverage)).map(
+              ([category, value]) =>
+                category +
+                " coverage: " +
+                (typeof value === "number"
+                  ? Math.round(value * 100) + "%"
+                  : "not applicable"),
+            ),
+            "The CSV contains the frozen declarations, rule versions, evidence references and capture times.",
+          ]
+        : []),
       "Raw HTTP evidence only. Rendered DOM, actual bot retrieval and downstream citation outcomes are unobserved.",
       ...(Array.isArray(evaluation.rules)
         ? evaluation.rules.slice(0, 100).map((rule) => {
             const r = object(rule);
-            return `${String(r.ruleId)} | ${String(r.scopeKey)} | ${String(r.outcome)} | ${String(r.reasonCode)}`;
+            return `${String(r.ruleId)}${r.ruleVersion ? " v" + String(r.ruleVersion) : ""} | ${String(r.scopeKey)} | ${String(r.outcome)} | ${String(r.reasonCode)}`;
           })
         : ["No rule summary is available; consult the stored CSV evidence."]),
     ];

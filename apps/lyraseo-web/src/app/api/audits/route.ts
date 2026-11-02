@@ -13,7 +13,7 @@ import {
 } from "@lyraseo/db/audits";
 import { runRawAuditStep } from "@/server/acquisition/runner";
 import { publicHttpsTransport } from "@/server/acquisition/transport";
-import type { AuditEvaluation } from "@lyraseo/visibility";
+import { declarationsSchema, type AuditEvaluation } from "@lyraseo/visibility";
 
 const headers = { "Cache-Control": "private, no-store" };
 function auditView(run: Awaited<ReturnType<typeof readAuditRun>>) {
@@ -55,6 +55,7 @@ const command = z.discriminatedUnion("action", [
     .extend({
       action: z.literal("create"),
       idempotencyKey: z.string().min(1).max(128),
+      declarations: declarationsSchema.optional(),
       manifest: z.array(z.string().max(2048)).min(1).max(25),
     })
     .strict(),
@@ -82,6 +83,19 @@ function failure(error: unknown) {
       { error: "Sign in again to continue." },
       { status: 401, headers },
     );
+  if (
+    code === "INVALID_AUDIT_INPUT" ||
+    (error instanceof z.ZodError &&
+      error.issues.some((issue) => issue.path[0] === "declarations"))
+  ) {
+    return Response.json(
+      {
+        error:
+          "Check the audit declarations. Use absolute HTTP or HTTPS URLs, select pages from this manifest, and keep about, contact and policy links on the verified site.",
+      },
+      { status: 409, headers },
+    );
+  }
   if (
     error instanceof z.ZodError ||
     /^(INVALID_|SITE_|IDEMPOTENCY_|AUDIT_|LEASE_|IMMUTABLE_)/.test(code)
@@ -143,6 +157,7 @@ export async function POST(request: Request) {
           workspaceId: input.workspaceId,
           siteId: input.siteId,
           manifest: input.manifest,
+          declarations: input.declarations,
           idempotencyKey: input.idempotencyKey,
           profile: "LOCAL_RAW_V1",
         });
@@ -237,6 +252,18 @@ export async function GET(request: Request) {
         return '"' + text.replace(/"/g, '""') + '"';
       };
       const evaluation = run.evaluation as unknown as AuditEvaluation | null;
+      const current = run.methodologyVersion === "readiness-v2";
+      const receipts = new Map(
+        run.pages.map((p) => [
+          p.requestedUrl,
+          {
+            requestedUrl: p.requestedUrl,
+            acquiredAt: p.provenance.acquiredAt,
+            sha256: p.provenance.sha256,
+            robotsPolicy: p.provenance.robotsPolicy,
+          },
+        ]),
+      );
       const rows = [
         [
           "Audit",
@@ -249,6 +276,15 @@ export async function GET(request: Request) {
           "URL",
           "Outcome",
           "Reason",
+          ...(current
+            ? [
+                "Rule version",
+                "Category coverage",
+                "Evidence excerpt",
+                "Evidence references",
+                "Capture receipts",
+              ]
+            : []),
         ],
         ...(evaluation?.rules ?? []).map((rule) => [
           run.id,
@@ -262,6 +298,28 @@ export async function GET(request: Request) {
           rule.scopeKey,
           rule.outcome,
           rule.reasonCode,
+          ...(current
+            ? [
+                rule.ruleVersion,
+                evaluation?.categoryCoverage?.[rule.category],
+                rule.evidence,
+                JSON.stringify(rule.evidenceRefs),
+                JSON.stringify(
+                  rule.evidenceRefs
+                    ?.filter(
+                      (ref) => ref.source === "receipt" && ref.requestedUrl,
+                    )
+                    .map((ref) => {
+                      const receipt = receipts.get(ref.requestedUrl!);
+                      if (!receipt) return null;
+                      const { robotsPolicy, ...page } = receipt;
+                      return ref.fields.includes("robotsPolicy")
+                        ? { requestedUrl: page.requestedUrl, robotsPolicy }
+                        : page;
+                    }),
+                ),
+              ]
+            : []),
         ]),
       ];
       return new Response(

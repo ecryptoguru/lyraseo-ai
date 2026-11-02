@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import {
   acquireRawPage,
+  replayGoogleRobots,
   boundedRawAnchorText,
   extractRawHtml,
   type PublicTransport,
@@ -203,3 +204,310 @@ it.each([
     expect(bounded.isWellFormed()).toBe(true);
   },
 );
+
+it.each([
+  [
+    "specific group overrides wildcard",
+    "User-agent: *\nDisallow: /private\nUser-agent: Googlebot\nAllow: /private\nUser-agent: LyraseoAudit\nAllow: /",
+    "private",
+    true,
+  ],
+  [
+    "longest path",
+    "User-agent: Googlebot\nAllow: /\nDisallow: /private",
+    "private",
+    false,
+  ],
+  [
+    "allow wins tie",
+    "User-agent: Googlebot\nDisallow: /private\nAllow: /private",
+    "private",
+    true,
+  ],
+  [
+    "encoded unreserved path",
+    "User-agent: Googlebot\nDisallow: /%70rivate",
+    "private",
+    false,
+  ],
+  [
+    "encoded reserved slash",
+    "User-agent: Googlebot\nDisallow: /a%2fb",
+    "a%2Fb",
+    false,
+  ],
+  [
+    "literal slash stays distinct",
+    "User-agent: Googlebot\nDisallow: /a%2fb",
+    "a/b",
+    true,
+  ],
+] as const)("robots policy: %s", async (_, policy, path, allowed) => {
+  const receipt = await acquireRawPage(origin + path, origin, async (url) =>
+    url.endsWith("robots.txt")
+      ? new Response(policy)
+      : new Response("<p>Fixture</p>", {
+          headers: { "content-type": "text/html" },
+        }),
+  );
+  expect(receipt.evidence).toMatchObject({
+    acquired: true,
+    robotsGoogleAllowed: allowed,
+    requestedRobotsGoogleAllowed: allowed,
+  });
+});
+it.each([
+  [404, true],
+  [401, false],
+  [403, false],
+  [503, false],
+] as const)("robots status %i", async (status, acquired) => {
+  const requests: string[] = [];
+  const receipt = await acquireRawPage(origin, origin, async (url) => {
+    requests.push(url);
+    return url.endsWith("robots.txt")
+      ? new Response("", { status })
+      : new Response("<p>Fixture</p>", {
+          headers: { "content-type": "text/html" },
+        });
+  });
+  expect(receipt.evidence.acquired).toBe(acquired);
+  expect(requests).toHaveLength(acquired ? 2 : 1);
+  expect(receipt.provenance.robotsPolicy).toMatchObject({
+    status,
+    state: acquired ? "no-file" : "unavailable",
+  });
+  expect(receipt.provenance.robotsPolicy.sha256).toBeUndefined();
+  expect(replayGoogleRobots(receipt.provenance.robotsPolicy, origin)).toBe(
+    acquired ? true : undefined,
+  );
+
+  expect(receipt.evidence.robotsGoogleAllowed).toBe(
+    acquired ? true : undefined,
+  );
+});
+it("retains requested and final Google observations across redirects; crawler policy applies at every hop", async () => {
+  for (const forbidCrawler of [false, true]) {
+    const requests: string[] = [];
+    const receipt = await acquireRawPage(
+      origin + "start",
+      origin,
+      async (url) => {
+        requests.push(url);
+        if (url.endsWith("robots.txt"))
+          return new Response(
+            "User-agent: Googlebot\nDisallow: /private\nUser-agent: LyraseoAudit\n" +
+              (forbidCrawler ? "Disallow: /private" : "Allow: /"),
+          );
+        if (url.endsWith("start"))
+          return new Response(null, {
+            status: 302,
+            headers: { location: "/private" },
+          });
+        return new Response("<p>Fixture</p>", {
+          headers: { "content-type": "text/html" },
+        });
+      },
+    );
+    expect(receipt.evidence.requestedRobotsGoogleAllowed).toBe(true);
+    if (forbidCrawler) {
+      expect(receipt.provenance.error).toBe("ROBOTS_DISALLOWED");
+      expect(requests).not.toContain(origin + "private");
+    } else {
+      expect(receipt.evidence.robotsGoogleAllowed).toBe(false);
+      expect(receipt.evidence.finalUrl).toBe(origin + "private");
+      const run = evaluateAudit({
+        siteOrigin: origin,
+        manifest: [origin, origin + "start"],
+        pages: [receipt.evidence],
+        pageDeclarations: [
+          { requestedUrl: origin + "start", indexingIntent: "indexable" },
+        ],
+        methodologyVersion: "readiness-v2",
+      });
+      expect(
+        run.rules.find(
+          (r) => r.ruleId === "D04" && r.scopeKey === origin + "start",
+        ),
+      ).toMatchObject({
+        outcome: "WARNING",
+        reasonCode: "GOOGLEBOT_DISALLOWED",
+      });
+    }
+  }
+});
+it("indeterminate robots source cannot admit a fetch", async () => {
+  const receipt = await acquireRawPage(origin, origin, async (url) => {
+    expect(url).toBe(origin + "robots.txt");
+    return new Response("<html>login</html>");
+  });
+  expect(receipt.provenance.error).toBe("ROBOTS_INDETERMINATE");
+  expect(receipt.provenance.robotsPolicy).toMatchObject({
+    state: "indeterminate",
+    status: 200,
+    sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+  });
+  expect(receipt.evidence.robotsGoogleAllowed).toBeUndefined();
+});
+it("keeps a conclusive header directive when the HTML body is unreadable", async () => {
+  const receipt = await acquireRawPage(origin, origin, async (url) =>
+    url.endsWith("robots.txt")
+      ? new Response("", { status: 404 })
+      : new Response("", {
+          headers: {
+            "content-type": "text/html",
+            "x-robots-tag": "googlebot: noindex",
+          },
+        }),
+  );
+  const run = evaluateAudit({
+    siteOrigin: origin,
+    manifest: [origin],
+    pages: [receipt.evidence],
+    pageDeclarations: [{ requestedUrl: origin, indexingIntent: "indexable" }],
+    methodologyVersion: "readiness-v2",
+  });
+  expect(run.rules.find((r) => r.ruleId === "D02")).toMatchObject({
+    outcome: "FAIL",
+    reasonCode: "NOINDEX_ON_INTENDED_PAGE",
+  });
+  expect(run.score).toBeNull();
+});
+
+it("captures the redirected policy's byte digest, applicable Google group and requested/final decisions", async () => {
+  const { createHash } = await import("node:crypto");
+  const policy =
+    "User-agent: *\r\nAllow: /\r\nUser-agent: Googlebot\r\nDisallow: /private\r\nAllow: /private/public\r\n# original bytes é\r\n";
+  const receipt = await acquireRawPage(
+    origin + "start",
+    origin,
+    async (url) => {
+      if (url.endsWith("robots.txt"))
+        return new Response(null, {
+          status: 302,
+          headers: { location: "/policy.txt" },
+        });
+      if (url.endsWith("policy.txt")) return new Response(policy);
+      if (url.endsWith("/start"))
+        return new Response(null, {
+          status: 302,
+          headers: { location: "/private" },
+        });
+      return new Response("<p>fixture</p>", {
+        headers: { "content-type": "text/html" },
+      });
+    },
+  );
+  const source = receipt.provenance.robotsPolicy;
+  expect(source).toMatchObject({
+    requestedUrl: origin + "robots.txt",
+    finalUrl: origin + "policy.txt",
+    status: 200,
+    state: "available",
+    sha256: createHash("sha256").update(policy).digest("hex"),
+    googleGroup: {
+      agent: "googlebot",
+      rules: [
+        { directive: "disallow", pattern: "/private" },
+        { directive: "allow", pattern: "/private/public" },
+      ],
+    },
+    requested: { url: origin + "start", allowed: true },
+    final: { url: origin + "private", allowed: false },
+  });
+  expect(source.sha256).not.toBe(receipt.provenance.sha256);
+  expect(Number.isFinite(Date.parse(source.acquiredAt))).toBe(true);
+  const run = evaluateAudit({
+    siteOrigin: origin,
+    manifest: [origin, origin + "start"],
+    pages: [receipt.evidence],
+    pageDeclarations: [
+      { requestedUrl: origin + "start", indexingIntent: "indexable" },
+    ],
+    methodologyVersion: "readiness-v2",
+  });
+  expect(
+    run.rules.find((r) => r.ruleId === "D04" && r.scopeKey.endsWith("/start"))
+      ?.evidenceRefs,
+  ).toContainEqual({
+    source: "receipt",
+    requestedUrl: origin + "start",
+    fields: ["robotsPolicy"],
+  });
+});
+
+it("over-budget effective policies preserve crawler enforcement but withhold a D04 verdict", async () => {
+  for (const policy of [
+    "User-agent: Googlebot\n" +
+      Array.from({ length: 129 }, (_, i) => "Disallow: /p" + i).join("\n"),
+    "User-agent: Googlebot\nDisallow: /" + "x".repeat(10000),
+  ]) {
+    const receipt = await acquireRawPage(origin, origin, async (url) =>
+      url.endsWith("robots.txt")
+        ? new Response(policy)
+        : new Response("<p>fixture</p>", {
+            headers: { "content-type": "text/html" },
+          }),
+    );
+    expect(receipt.evidence.acquired).toBe(true);
+    expect(receipt.evidence.robotsGoogleAllowed).toBeUndefined();
+    expect(receipt.provenance.robotsPolicy).toMatchObject({
+      state: "evidence-limited",
+      final: { url: origin, allowed: true },
+    });
+    expect(receipt.provenance.robotsPolicy.googleGroup).toBeUndefined();
+    expect(
+      replayGoogleRobots(receipt.provenance.robotsPolicy, origin),
+    ).toBeUndefined();
+    expect(JSON.stringify(receipt.provenance.robotsPolicy).length).toBeLessThan(
+      1500,
+    );
+  }
+});
+it("archives only the effective group, preserves encoded rules, and replays with the same parser", async () => {
+  const text =
+    "User-agent: *\nDisallow: /" +
+    "x".repeat(9000) +
+    "\nUser-agent: Googlebot\nDisallow: /%70rivate\nUser-agent: other\nDisallow: /unrelated-secret\nUser-agent: Googlebot\nAllow: /private/public";
+  const receipt = await acquireRawPage(
+    origin + "private",
+    origin,
+    async (url) =>
+      url.endsWith("robots.txt")
+        ? new Response(text)
+        : new Response("<p>fixture</p>", {
+            headers: { "content-type": "text/html" },
+          }),
+  );
+  expect(receipt.provenance.robotsPolicy).toMatchObject({
+    state: "available",
+    googleGroup: {
+      agent: "googlebot",
+      rules: [
+        { directive: "disallow", pattern: "/%70rivate" },
+        { directive: "allow", pattern: "/private/public" },
+      ],
+    },
+  });
+  const frozen = JSON.parse(JSON.stringify(receipt.provenance.robotsPolicy));
+  expect(replayGoogleRobots(frozen, origin + "private")).toBe(false);
+  expect(replayGoogleRobots(frozen, origin + "private/public")).toBe(true);
+  expect(JSON.stringify(frozen)).not.toContain("unrelated-secret");
+});
+it("malformed UTF-8 policy keeps its byte digest and cannot grant permission", async () => {
+  const { createHash } = await import("node:crypto");
+  const bytes = new Uint8Array([255]);
+  const receipt = await acquireRawPage(origin, origin, async (url) => {
+    expect(url).toBe(origin + "robots.txt");
+    return new Response(bytes);
+  });
+  expect(receipt.evidence.acquired).toBe(false);
+  expect(receipt.provenance.robotsPolicy).toMatchObject({
+    state: "indeterminate",
+    status: 200,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+  expect(
+    replayGoogleRobots(receipt.provenance.robotsPolicy, origin),
+  ).toBeUndefined();
+});

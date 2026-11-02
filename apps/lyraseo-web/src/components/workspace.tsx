@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   ArrowUpRight,
   ArrowRight,
@@ -87,6 +87,11 @@ function download(content: string, name: string, type: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+// Hydration uses the server snapshot until React has committed its handlers.
+const subscribeToClientReady = () => () => {};
+const getClientReady = () => true;
+const getServerReady = () => false;
+
 export function Workspace({
   view,
   initialTheme = "system",
@@ -94,6 +99,11 @@ export function Workspace({
   view: string;
   initialTheme?: string;
 }) {
+  const clientReady = useSyncExternalStore(
+    subscribeToClientReady,
+    getClientReady,
+    getServerReady,
+  );
   const [menu, setMenu] = useState(false),
     [query, setQuery] = useState(""),
     [filter, setFilter] = useState("all"),
@@ -845,15 +855,26 @@ export function Workspace({
                 <textarea
                   id="draft"
                   value={draft}
+                  disabled={!clientReady}
+                  aria-busy={!clientReady}
+                  aria-describedby={
+                    !clientReady ? "draft-preparing" : undefined
+                  }
                   onChange={(e) => setDraft(e.target.value)}
                   rows={12}
                 />
+                {!clientReady && (
+                  <p id="draft-preparing" className="small muted" role="status">
+                    Preparing sample editor…
+                  </p>
+                )}
                 <div className="editor-footer">
                   <span className="small muted">
                     {draft.length} characters · Browser session only
                   </span>
                   <button
                     className="button button-secondary"
+                    disabled={!clientReady}
                     onClick={() =>
                       download(
                         draft,

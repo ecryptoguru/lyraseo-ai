@@ -150,12 +150,18 @@ importers:
 
   packages/visibility:
     dependencies:
+      entities:
+        specifier: 7.0.1
+        version: 7.0.1
       htmlparser2:
         specifier: 10.1.0
         version: 10.1.0
       robots-parser:
         specifier: 3.0.1
         version: 3.0.1
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 5.9.3

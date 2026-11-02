@@ -35,11 +35,13 @@ Raw local acquisition additionally requires `LYRA_LOCAL_RAW_AUDITS=true`, config
 1. Sign in, choose the correct workspace, and register a site you control. Owner/admin management is separate from an editor’s site grant.
 2. Issue a new ownership challenge. Place the one-time file at the exact displayed well-known URL and verify it from the same signed-in session before expiry. A newer challenge replaces the previous pending challenge.
 3. Review business context. Future audits identify the context revision they used; updating context does not rewrite earlier evidence.
-4. Confirm a small same-origin manifest, including the homepage, with at most 25 pages. Start the audit explicitly. The local driver acquires one page per POST and checkpoints each completed page. Reopen and resume if the tab closes.
+4. Confirm a small same-origin manifest, including the homepage, with at most 25 pages. Review the optional declarations for identity, official/contact/policy URLs, page type, indexing intent and expected canonical. Declarations describe expectations; they do not supply observed page evidence. Start the audit explicitly. The local driver acquires one page per POST and checkpoints each completed page. Reopen and resume if the tab closes.
 5. Inspect the saved HTTP receipt, raw-source availability, rule outcome and missing-evidence explanation. Scripts and subresources are not executed. Raw title/canonical/anchor diagnostics are labelled as raw observations; rendered-head/body checks remain UNKNOWN without rendered evidence. A raw-only audit does not earn a complete numeric score.
 6. Correct a raw-observable defect on the controlled site, such as a page returning 404 that should return 200. Rerun the same manifest and compare the saved runs. Include a deliberately unreadable page to verify that it stays unevaluated rather than becoming an invented pass.
 7. Register exact URLs in page workspaces. Regional paths, trailing slashes and meaningful parameters stay distinct. Record changes or claim a task without changing measured outcomes. Link a saved draft revision when recording a change.
 8. Create a private evidence report from explicitly selected saved sources, using its independent title and source controls. Inspect both PDF and CSV for source dates, scope, context, coverage and limitations. Report downloads reauthorize current site access.
+
+New audits freeze the `readiness-v2` methodology, acquisition profile, reviewed declarations and business-context revision at admission. Saved `readiness-v1` runs retain their original evaluator and numbers. Comparisons require compatible versions and sources; a changed expectation, missing page or unknown outcome cannot become a verified fix. Report snapshots retain the originally selected evidence.
 
 ## Optional Google connections
 
