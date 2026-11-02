@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { useClientReady } from "./use-client-ready";
 import { useRouter } from "next/navigation";
 import type { SiteContext } from "@lyraseo/db/sites";
 type Revision = {
@@ -113,6 +114,7 @@ export function SiteSettings({
   initialRevisions: Revision[];
   verifiedAt: string | null;
 }) {
+  const clientReady = useClientReady();
   const [revisions, setRevisions] = useState(initialRevisions),
     [draft, setDraft] = useState<SiteContext>(
       initialRevisions[0]?.content ?? blank(),
@@ -269,6 +271,9 @@ export function SiteSettings({
               });
             }}
           >
+            {!clientReady && (
+              <p role="status">Preparing reviewed context editor…</p>
+            )}
             {(Object.keys(labels) as (keyof SiteContext)[]).map((key) => {
               const list = Array.isArray(draft[key]);
               return (
@@ -282,7 +287,7 @@ export function SiteSettings({
                     id={`context-${key}`}
                     rows={list ? 4 : 3}
                     maxLength={list ? 32768 : key === "brandName" ? 512 : 4000}
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                     value={
                       list
                         ? (draft[key] as string[]).join("\n")
@@ -300,13 +305,16 @@ export function SiteSettings({
                 </div>
               );
             })}
-            <button className="button button-primary" disabled={busy}>
+            <button
+              className="button button-primary"
+              disabled={!clientReady || busy}
+            >
               {busy ? "Working…" : "Save reviewed context"}
             </button>
             <button
               type="button"
               className="button button-secondary"
-              disabled={busy}
+              disabled={!clientReady || busy}
               onClick={() =>
                 execute(async () => {
                   const response = await fetch(
@@ -327,7 +335,7 @@ export function SiteSettings({
             <button
               type="button"
               className="button button-secondary"
-              disabled={busy}
+              disabled={!clientReady || busy}
               onClick={() => {
                 setDraft(revisions[0]?.content ?? blank());
                 setExpected(revisions[0]?.revision ?? 0);

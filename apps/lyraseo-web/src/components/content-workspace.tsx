@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useClientReady } from "./use-client-ready";
 type Source = { id: string; label: string; kind: "audit" | "gsc" };
 type DraftBody = {
   title: string;
@@ -33,6 +34,7 @@ export function ContentWorkspace({
   siteId: string;
   editable: boolean;
 }) {
+  const clientReady = useClientReady();
   const [drafts, setDrafts] = useState<Draft[]>([]),
     [reports, setReports] = useState<Report[]>([]),
     [sources, setSources] = useState<Source[]>([]);
@@ -189,8 +191,11 @@ export function ContentWorkspace({
         </p>
         {editable && collectionEnabled && (
           <>
+            {!clientReady && (
+              <p role="status">Preparing draft and report controls…</p>
+            )}
             {!selected && (
-              <fieldset disabled={busy}>
+              <fieldset disabled={!clientReady || busy}>
                 <legend>
                   Select up to five audits and five search imports
                 </legend>
@@ -267,7 +272,7 @@ export function ContentWorkspace({
                   <select
                     className="audit-input"
                     value={kind}
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                     onChange={(event) =>
                       setKind(event.target.value as "brief" | "draft")
                     }
@@ -285,7 +290,7 @@ export function ContentWorkspace({
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 required
-                disabled={busy}
+                disabled={!clientReady || busy}
               />
               <label htmlFor="draft-body">Editable Markdown draft</label>
               <textarea
@@ -295,7 +300,7 @@ export function ContentWorkspace({
                 maxLength={100000}
                 value={body}
                 onChange={(event) => setBody(event.target.value)}
-                disabled={busy}
+                disabled={!clientReady || busy}
               />
               <label htmlFor="draft-assumptions">
                 Assumptions to verify, one per line
@@ -306,7 +311,7 @@ export function ContentWorkspace({
                 rows={3}
                 value={assumptions}
                 onChange={(event) => setAssumptions(event.target.value)}
-                disabled={busy}
+                disabled={!clientReady || busy}
               />
               {citations.map((citation, index) => (
                 <div key={citation.sourceId}>
@@ -325,14 +330,16 @@ export function ContentWorkspace({
                       })
                     }
                     required
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                   />
                 </div>
               ))}
               <div className="pilot-tabs">
                 <button
                   className="button button-primary"
-                  disabled={busy || (!selected && !chosen.length)}
+                  disabled={
+                    !clientReady || busy || (!selected && !chosen.length)
+                  }
                 >
                   {busy
                     ? "Saving…"
@@ -344,7 +351,7 @@ export function ContentWorkspace({
                   <button
                     className="button button-secondary"
                     type="button"
-                    disabled={busy}
+                    disabled={!clientReady || busy}
                     onClick={() => {
                       setSelected(null);
                       setTitle("");
@@ -455,10 +462,10 @@ export function ContentWorkspace({
               className="audit-input"
               value={reportTitle}
               maxLength={200}
-              disabled={busy}
+              disabled={!clientReady || busy}
               onChange={(event) => setReportTitle(event.target.value)}
             />
-            <fieldset disabled={busy}>
+            <fieldset disabled={!clientReady || busy}>
               <legend>
                 Report evidence: select up to five audits and five search
                 imports
@@ -487,7 +494,10 @@ export function ContentWorkspace({
                 <p>No saved evidence is available yet.</p>
               )}
             </fieldset>
-            <fieldset disabled={busy} aria-describedby="report-comparison-help">
+            <fieldset
+              disabled={!clientReady || busy}
+              aria-describedby="report-comparison-help"
+            >
               <legend>Optional audit comparison</legend>
               <p id="report-comparison-help">
                 Choose two distinct completed audits from the report evidence
@@ -554,7 +564,12 @@ export function ContentWorkspace({
             </fieldset>
             <button
               className="button button-primary"
-              disabled={busy || !reportChosen.length || !reportTitle.trim()}
+              disabled={
+                !clientReady ||
+                busy ||
+                !reportChosen.length ||
+                !reportTitle.trim()
+              }
               onClick={() =>
                 void perform(async () => {
                   setReportMessage("");

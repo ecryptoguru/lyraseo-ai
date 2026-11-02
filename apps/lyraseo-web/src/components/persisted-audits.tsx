@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { useClientReady } from "./use-client-ready";
 import {
   auditLines,
   AuditDeclarationsForm,
@@ -48,6 +49,7 @@ export function PersistedAudits({
   editable: boolean;
   enabled: boolean;
 }) {
+  const clientReady = useClientReady();
   const [runs, setRuns] = useState<Summary[]>([]),
     [selected, setSelected] = useState<SavedRun | null>(null);
   const [message, setMessage] = useState("Loading audit history…"),
@@ -161,6 +163,7 @@ export function PersistedAudits({
               });
             }}
           >
+            {!clientReady && <p role="status">Preparing audit controls…</p>}
             <label htmlFor="audit-pages">
               Confirm up to 25 pages, one URL per line. Include the homepage.
             </label>
@@ -171,15 +174,20 @@ export function PersistedAudits({
               rows={5}
               value={manifest}
               onChange={(event) => setManifest(event.target.value)}
-              disabled={busy}
+              disabled={!clientReady || busy}
               required
             />
-            <AuditDeclarationsForm
-              key={draft.revision}
-              initial={draft.initial}
-              pages={auditLines(manifest)}
-            />
-            <button className="button button-primary" disabled={busy}>
+            <fieldset disabled={!clientReady} aria-label="Audit declarations">
+              <AuditDeclarationsForm
+                key={draft.revision}
+                initial={draft.initial}
+                pages={auditLines(manifest)}
+              />
+            </fieldset>
+            <button
+              className="button button-primary"
+              disabled={!clientReady || busy}
+            >
               {busy ? "Capturing evidence…" : "Confirm pages and start audit"}
             </button>
           </form>
