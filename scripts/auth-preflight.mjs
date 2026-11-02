@@ -4,7 +4,14 @@ const require = createRequire(
   new URL("../packages/db/package.json", import.meta.url),
 );
 const { Client } = require("pg");
+const kernelTables = [
+  "WorkDispatch",
+  "InternalRequest",
+  "RuntimePolicy",
+  "RuntimePolicyChange",
+];
 const tables = [
+  ...kernelTables,
   "PageIdentity",
   "PageJournal",
   "ApiToken",
@@ -138,6 +145,7 @@ export async function checkDatabase(url, identity) {
         "Product migrations are missing or runtime role owns product tables",
       );
     const scoped = [
+      ...kernelTables,
       "PageIdentity",
       "PageJournal",
       "ApiToken",
@@ -183,6 +191,26 @@ export async function checkDatabase(url, identity) {
     );
     if (browser.length)
       throw new Error("Browser roles have product-table privileges");
+    const {
+      rows: [kernel],
+    } = await client.query(
+      `SELECT
+       has_schema_privilege(current_user,'lyraseo_kernel','USAGE,CREATE')
+       OR EXISTS (SELECT FROM pg_proc WHERE pronamespace='lyraseo_kernel'::regnamespace
+         AND has_function_privilege(current_user,oid,'EXECUTE'))
+       OR EXISTS (SELECT FROM pg_class WHERE relnamespace='public'::regnamespace
+         AND relname=ANY($1) AND (has_any_column_privilege(current_user,oid,'SELECT,INSERT,UPDATE,REFERENCES')
+           OR has_table_privilege(current_user,oid,'DELETE,TRUNCATE,TRIGGER')))
+       OR has_table_privilege(current_user,'public."UsageReceipt"','UPDATE,DELETE,TRUNCATE,TRIGGER')
+       OR has_any_column_privilege(current_user,'public."UsageReceipt"','UPDATE')
+       OR EXISTS (SELECT FROM pg_roles WHERE rolname IN ('lyraseo_kernel_owner','lyraseo_dispatch','lyraseo_operator')
+         AND pg_has_role(current_user,oid,'MEMBER')) AS excessive`,
+      [[...kernelTables, "OutboxEvent"]],
+    );
+    if (kernel.excessive)
+      throw new Error(
+        "Application role can access protected kernel or receipt state",
+      );
     if (identity) {
       await client.query(
         "SELECT id::text,user_id::text,created_at,refreshed_at,not_after FROM lyraseo_private.session_metadata WHERE false",

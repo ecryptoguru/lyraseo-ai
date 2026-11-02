@@ -18,9 +18,16 @@ pnpm build
 pnpm test:e2e
 ```
 
-`db:local` only prepares the named local PostgreSQL 17 container on 127.0.0.1:54329. Integration tests reset their disposable test database. They must not be pointed at a hosted or customer database. `test:migrations` creates separate temporary local databases, exercises an empty migration replay and a populated seven-migration baseline upgrade, verifies preserved access/operation/ledger facts, then drops only the databases it created.
+`db:local` only prepares the named local PostgreSQL 17 container on 127.0.0.1:54329. Integration tests reset their disposable test database. They must not be pointed at a hosted or customer database. `test:migrations` creates separate temporary local databases, exercises empty, populated seven-migration and populated twenty-migration upgrades, verifies exact audit, outbox, receipt and ledger history, then drops only the databases it created.
 
 The crawler fixture is exercised by `tests/integration/audit-journey.test.ts` using the production acquisition/evaluation services, controlled HTTP responses and real restricted-role PostgreSQL. Its mapped test transport is not a production DNS or Cloudflare isolation proof. Browser fixtures mount the actual components with controlled API responses; actual-handler PostgreSQL tests separately cover route/service wiring. A protected, authenticated, hosted walkthrough is still required.
+
+## Local dispatch cutover
+
+1. Stop local admissions and every legacy publisher before migration 016. Await in-flight sends and discard any prefetched operation references. A database lock cannot recall a message held by another process.
+2. For an upgrade with archived events, run `LYRA_LOCAL_OUTBOX_DRAINED=true pnpm db:local` only after that drain. The bootstrap also requires that no other client remain connected during the cutover check. Fresh bootstrap uses `pnpm db:local`.
+3. Verify all eight policy rows are disabled and the restricted web login cannot read or update the outbox. Compare the original operation, receipt, budget and archived-event records. Start the updated admission code only after those checks pass. Rollback keeps admissions quiesced and dispatch closed.
+4. In disposable fixtures only, `lyraseo_operator` can read a named policy and change its expected revision. `lyraseo_dispatch` can exercise opaque controlled audit references. The disposable bootstrap registers the database OID and the current PostgreSQL postmaster start time. Restarting PostgreSQL or restoring a physical copy closes controlled delivery. Rerun the validated local `pnpm db:local` bootstrap only on the intended disposable instance to requalify it. Neither connection belongs in normal web initialization. Existing local audits keep their browser driver. Paid reservations stay quarantined or available for financial reconciliation. There is no queue or external publisher in this tranche.
 
 ## Private authentication and rollout
 

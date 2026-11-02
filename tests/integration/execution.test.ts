@@ -5,6 +5,7 @@ import {
   admitOperation,
   beginAttempt,
   claimOperation,
+  cancelInvalidQueuedOperation,
   settleOperation,
 } from "../../packages/db/src/accounting";
 import {
@@ -42,44 +43,27 @@ const request = (id: string) => ({
   tariffVersion: "synthetic-test-v1",
 });
 
-it("retains failed publications and sends only persisted operation references", async () => {
-  const op = await admitOperation(db, actor, request("delivery"));
-  expect(
-    await publishOperations(
+it("disables every legacy send, including retries", async () => {
+  await admitOperation(db, actor, request("delivery"));
+  let sends = 0;
+  for (const paused of [false, true, false]) {
+    const result = await publishOperations(
       db,
       actor,
       {
         send: async () => {
-          throw new Error("offline");
+          sends++;
         },
       },
-      { paused: false },
-    ),
-  ).toEqual({ published: 0, skipped: 0, failed: 1 });
-  const sent: unknown[] = [];
-  const queue = {
-    send: async (message: unknown) => {
-      sent.push(message);
-    },
-  };
-  expect(
-    (await publishOperations(db, actor, queue, { paused: true })).published,
-  ).toBe(0);
-  expect(
-    (await publishOperations(db, actor, queue, { paused: false })).published,
-  ).toBe(1);
-  await publishOperations(db, actor, queue, { paused: false });
-  expect(sent).toEqual([{ operationId: op.id }]);
+      { paused },
+    );
+    expect(result.disposition).toBe("DISABLED");
+  }
+  expect(sends).toBe(0);
 });
 
-it("recovers an expired lease before intent and republishes without reserving twice", async () => {
+it("recovers an expired lease before intent without sending or reserving twice", async () => {
   const op = await admitOperation(db, actor, request("crash"));
-  await publishOperations(
-    db,
-    actor,
-    { send: async () => {} },
-    { paused: false },
-  );
   const first = await claimOperation(db, actor, op.id, "crashed");
   await admin.operation.update({
     where: { id: op.id },
@@ -88,14 +72,11 @@ it("recovers an expired lease before intent and republishes without reserving tw
   expect((await recoverOperations(db, actor)).recovered).toBe(1);
   expect(
     (
-      await publishOperations(
-        db,
-        actor,
-        { send: async () => {} },
-        { paused: false },
-      )
-    ).published,
-  ).toBe(1);
+      await admin.outboxEvent.findUniqueOrThrow({
+        where: { operationId: op.id },
+      })
+    ).deliveredAt,
+  ).toBeNull();
   const second = await claimOperation(db, actor, op.id, "retry");
   expect(second.fence).toBeGreaterThan(first.fence);
   await expect(beginAttempt(db, actor, op.id, first.fence)).rejects.toThrow(
@@ -180,11 +161,11 @@ it("reauthorizes reads and publications after site access is revoked", async () 
     },
     { paused: false },
   );
-  expect(result).toEqual({ published: 0, skipped: 1, failed: 0 });
+  expect(result.disposition).toBe("DISABLED");
 });
 
 it.each(["revoked", "security"])(
-  "progresses past 21 older %s rows over bounded publication sweeps",
+  "releases 21 definitively invalid %s reservations while retaining valid work",
   async (reason) => {
     const old = [];
     for (let i = 0; i < 21; i++)
@@ -208,15 +189,9 @@ it.each(["revoked", "security"])(
       workspaceId: "b",
       siteId: "b-site",
     });
-    const sent: string[] = [];
-    const queue = {
-      send: async ({ operationId }: { operationId: string }) => {
-        sent.push(operationId);
-      },
-    };
-    for (let i = 0; i < 3; i++)
-      await publishOperations(db, currentActor, queue, { paused: false });
-    expect(sent).toEqual([valid.id]);
+    // The ledger may still release definitively invalid work while publication is off.
+    for (const op of [...old, valid])
+      await cancelInvalidQueuedOperation(db, currentActor, op.id);
     expect(
       await admin.operation.count({
         where: { id: { in: old.map((op) => op.id) }, status: "CANCELLED" },
@@ -239,51 +214,3 @@ it.each(["revoked", "security"])(
     ).toBe("0.3");
   },
 );
-
-it("does not let a delayed old send acknowledgement erase recovery redelivery", async () => {
-  const op = await admitOperation(db, actor, request("delayed-ack"));
-  let sends = 0;
-  await publishOperations(
-    db,
-    actor,
-    {
-      send: async () => {
-        sends++;
-        await claimOperation(db, actor, op.id, "consumer-before-ack");
-        await admin.operation.update({
-          where: { id: op.id },
-          data: { leaseUntil: new Date(0) },
-        });
-        expect((await recoverOperations(db, actor)).recovered).toBe(1);
-      },
-    },
-    { paused: false },
-  );
-  const event = await admin.outboxEvent.findUniqueOrThrow({
-    where: { operationId: op.id },
-  });
-  expect(event.deliveredAt).toBeNull();
-  expect(event.attempts).toBe(0);
-  expect(
-    (
-      await publishOperations(
-        db,
-        actor,
-        {
-          send: async () => {
-            sends++;
-          },
-        },
-        { paused: false },
-      )
-    ).published,
-  ).toBe(1);
-  expect(sends).toBe(2);
-  expect(
-    (
-      await admin.outboxEvent.findUniqueOrThrow({
-        where: { operationId: op.id },
-      })
-    ).deliveredAt,
-  ).not.toBeNull();
-});
