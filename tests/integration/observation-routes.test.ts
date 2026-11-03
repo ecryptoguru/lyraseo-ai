@@ -47,7 +47,7 @@ beforeEach(async () => {
     join(await realpath(tmpdir()), "lyraseo-observation-route-"),
   );
   store = await localAuditArtifactStore(root);
-  authority = await enrollTestArtifactAuthority(admin);
+  authority = await enrollTestArtifactAuthority(admin, store);
   bindLocalArtifactStore(db, store, authority);
 });
 afterEach(async () => {

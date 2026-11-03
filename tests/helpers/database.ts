@@ -1,7 +1,10 @@
 import { createDatabase } from "../../packages/db/src";
 // Focused migration work can reserve an independently created local fixture DB.
 const ownedName = process.env.LYRA_TEST_DB_NAME;
-if (ownedName && !/^lyraseo_p2a[12]_[a-f0-9]{12}$/.test(ownedName))
+if (
+  ownedName &&
+  !/^(?:lyraseo_p2a[12]|lyraseo_origin)_[a-f0-9]{12}$/.test(ownedName)
+)
   throw Error("INVALID_LOCAL_TEST_DATABASE");
 const databaseName = ownedName ?? "lyraseo_test";
 export const adminUrl = `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${databaseName}`;
@@ -10,7 +13,7 @@ export async function resetDatabase() {
   const db = createDatabase(adminUrl);
   try {
     await db.$executeRawUnsafe(
-      'TRUNCATE TABLE "ProductUser", "Workspace", "StaffGrant", "StepUpGrant", "BudgetPeriod", "ProductSession" CASCADE',
+      'TRUNCATE TABLE lyraseo_origin.blob_store_binding,lyraseo_origin.store_namespace,lyraseo_origin.source_store_key,lyraseo_origin.store_registration,"ProductUser", "Workspace", "StaffGrant", "StepUpGrant", "BudgetPeriod", "ProductSession" CASCADE',
     );
   } finally {
     await db.$disconnect();

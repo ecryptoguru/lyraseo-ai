@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import {
   mkdtemp,
+  mkdir,
   realpath,
   rm,
   chmod,
@@ -15,10 +16,12 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   localAuditArtifactStore as openLocalStore,
   faultAfterMutation,
+  provisionLocalArtifactNamespace,
   type ArtifactVersion,
 } from "../../packages/db/src/artifact-store";
 
 let root: string;
+let origin: string;
 const openStores = new Set<Awaited<ReturnType<typeof openLocalStore>>>();
 async function localAuditArtifactStore(
   ...args: Parameters<typeof openLocalStore>
@@ -39,9 +42,21 @@ const version = (): ArtifactVersion => ({
   sourceHash: digest,
   storedLength: bytes.length,
   storedHash: digest,
+  get origin() {
+    return origin;
+  },
 });
 beforeEach(async () => {
   root = await mkdtemp(join(await realpath(tmpdir()), "lyraseo-private-"));
+  const provisioner = await openLocalStore(root);
+  const physical = await provisionLocalArtifactNamespace(provisioner, "a");
+  origin = JSON.stringify({
+    ...physical,
+    storeId: randomUUID(),
+    namespaceId: randomUUID(),
+    workspaceId: "a",
+  });
+  await provisioner.close();
 });
 afterEach(async () => {
   await Promise.all([...openStores].map((s) => s.close()));
@@ -256,4 +271,17 @@ it("round1 closing waits for pinned work and rejects subsequent operations", asy
   await put;
   await closed;
   await store.close();
+});
+
+it("origin inspection and read paths never initialize an unstamped namespace", async () => {
+  const store = await localAuditArtifactStore(root),
+    v = { ...version(), workspaceId: "unprovisioned", origin: undefined };
+  const namespace = createHash("sha256").update(v.workspaceId).digest("hex");
+  await mkdir(join(root, namespace), { mode: 0o700 });
+  const before = await readdir(root);
+  await store.statVersion(v).catch(() => false);
+  await store.inventoryPage(v.workspaceId, null, 10).catch(() => []);
+  await store.openBounded(v).catch(() => undefined);
+  expect(await readdir(root)).toEqual(before);
+  expect(await readdir(join(root, namespace))).toEqual([]);
 });

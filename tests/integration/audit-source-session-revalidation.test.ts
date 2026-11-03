@@ -88,7 +88,7 @@ beforeEach(async () => {
     join(await realpath(tmpdir()), "lyraseo-session-source-"),
   );
   store = await localAuditArtifactStore(root);
-  authority = await enrollTestArtifactAuthority(admin);
+  authority = await enrollTestArtifactAuthority(admin, store);
   bindLocalArtifactStore(db, store, authority);
   seams.db = db;
   seams.resolve = async () => actor;

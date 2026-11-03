@@ -12,6 +12,7 @@ import {
 import {
   artifactStore,
   witnessedNormalizedObservation,
+  artifactOriginKeyId,
   verifiedNormalizedPublication,
   verifyReturnedBytes,
   type ObservationReservation,
@@ -86,13 +87,30 @@ export async function recordPrivateObservation(
       Date.parse(source.manifest.rawExpiresAt) <= Date.now()
     )
       throw Error("SOURCE_EXPIRED");
-    return { source, context: row.context, replay: replay?.replay };
+    if (replay?.replay)
+      return {
+        source,
+        context: row.context,
+        replay: replay.replay,
+        origin: "",
+      };
+    const [origin] = await tx.$queryRaw<
+      { origin: string }[]
+    >`SELECT lyraseo_origin.observation_context(${s.siteId},${panelId},${actor.securityVersion}::integer,${actor.sessionId},${artifactOriginKeyId(db)}) AS origin`;
+    if (!origin) throw Error("ARTIFACT_UNAVAILABLE");
+    return {
+      source,
+      context: row.context,
+      replay: replay?.replay,
+      origin: origin.origin,
+    };
   });
   if (prepared.replay) return prepared.replay;
-  const witness = witnessedNormalizedObservation(
+  const witness = await witnessedNormalizedObservation(
     db,
     prepared.source,
     prepared.context,
+    prepared.origin,
   );
   const reservation = await withActor(db, actor, s.workspaceId, async (tx) => {
     const [row] = await tx.$queryRaw<

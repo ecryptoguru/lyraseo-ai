@@ -1,3 +1,4 @@
+import { webOrigin } from "../helpers/artifact-origin";
 import { enrollTestArtifactAuthority } from "../helpers/artifact-authority";
 import {
   witnessedObservation,
@@ -33,6 +34,7 @@ import {
 import {
   localAuditArtifactStore,
   faultAfterMutation,
+  localArtifactFaultFacade,
   type AuditArtifactStore,
 } from "../../packages/db/src/artifact-store";
 import {
@@ -89,7 +91,7 @@ beforeEach(async () => {
   await seedTenants();
   root = await mkdtemp(join(await realpath(tmpdir()), "lyraseo-source-"));
   store = await localAuditArtifactStore(root);
-  authority = await enrollTestArtifactAuthority(admin);
+  authority = await enrollTestArtifactAuthority(admin, store);
   bindLocalArtifactStore(db, store, authority);
 });
 afterEach(async () => {
@@ -232,12 +234,11 @@ it("rejects changed content in a reserved slot, never downgrades a selected chec
   const receipt = await acquireRawPage(urls[0]!, urls[0]!, transport);
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      async putImmutable() {
-        throw Error("unavailable");
+    localArtifactFaultFacade(store, {
+      before: (operation) => {
+        if (operation === "put") throw Error("unavailable");
       },
-    },
+    }),
     authority,
   );
   await expect(
@@ -274,13 +275,11 @@ it("rejects changed content in a reserved slot, never downgrades a selected chec
   ).rejects.toThrow(/ARTIFACT_REQUIRED/);
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      async putImmutable(v, b) {
-        await store.putImmutable(v, b);
-        await cancelAuditRun(db, actor, scope);
+    localArtifactFaultFacade(store, {
+      after: async (operation) => {
+        if (operation === "put") await cancelAuditRun(db, actor, scope);
       },
-    },
+    }),
     authority,
   );
   await expect(
@@ -400,10 +399,9 @@ it("rejects a revoked editor between put and publication", async () => {
   const observed = await acquireRawPage(urls[0]!, urls[0]!, transport);
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      async putImmutable(v, b) {
-        await store.putImmutable(v, b);
+    localArtifactFaultFacade(store, {
+      after: async (operation) => {
+        if (operation !== "put") return;
         await admin.membership.update({
           where: {
             workspaceId_userId: { workspaceId: "a", userId: actor.userId },
@@ -411,7 +409,7 @@ it("rejects a revoked editor between put and publication", async () => {
           data: { role: "EDITOR" },
         });
       },
-    },
+    }),
     authority,
   );
   await expect(
@@ -480,11 +478,12 @@ it("round1 direct reserve cannot echo a real descriptor as proof of a put or par
       (tx) =>
         tx.$queryRaw`SELECT lyraseo_audit.web_artifact_commit('a-site',${scope.auditId},0,${lease.fence}::integer,${JSON.stringify(input)}::json,NULL)`,
     );
-  const witnessed = witnessedObservation(
+  const witnessed = await witnessedObservation(
     db,
     lease,
     "web/" + scope.auditId + "/" + lease.fence,
     receipt,
+    await webOrigin(db, actor, scope, lease.fence),
   );
   const forged = structuredClone(witnessed);
   forged.evidence.linkNames[0]!.name = "made up";
@@ -495,11 +494,12 @@ it("round1 direct reserve cannot echo a real descriptor as proof of a put or par
     forged.provenance,
     originalBody(receipt)!,
   );
-  const copied = witnessedObservation(
+  const copied = await witnessedObservation(
     db,
     lease,
     "web/" + scope.auditId + "/" + lease.fence,
     reconstructed,
+    await webOrigin(db, actor, scope, lease.fence),
   );
   expect(copied.captureConfirmation).toBeNull();
   await expect(data(copied)).rejects.toThrow(/CONFIRMATION_REQUIRED/);
@@ -626,12 +626,7 @@ it("round1 the attestor checks actual returned object bytes before issuing publi
   const scope = await create();
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      async openBounded(v) {
-        return new Uint8Array(v.storedLength);
-      },
-    },
+    localArtifactFaultFacade(store, { readMutation: "zeros" }),
     authority,
   );
   await expect(runRawAuditStep(db, actor, scope, transport)).rejects.toThrow(

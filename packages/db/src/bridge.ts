@@ -3,6 +3,7 @@ import {
   attestArtifactReceipt,
   verifiedPublication,
   witnessedObservation,
+  artifactOriginKeyId,
   verifyReturnedBytes,
   type ArtifactReservation,
   STORAGE,
@@ -216,8 +217,16 @@ export async function commitStep(
       methodologyVersion: "readiness-v2",
       profile: "CONTROLLED_RAW_TEST_V1",
     };
+    const origin = await inTime(db, deadline, async (tx) => {
+      checkKey();
+      signal.throwIfAborted();
+      const [row] = await tx.$queryRaw<
+        { origin: string }[]
+      >`SELECT lyraseo_origin.step_context(${rid}::uuid,${attempt.proof},${artifactOriginKeyId(db)}) AS origin`;
+      return row!.origin;
+    });
     const raw = JSON.stringify(
-      witnessedObservation(db, run, "step/" + rid, receipt),
+      await witnessedObservation(db, run, "step/" + rid, receipt, origin),
     );
     const reservation = await inTime(db, deadline, async (tx) => {
       checkKey();

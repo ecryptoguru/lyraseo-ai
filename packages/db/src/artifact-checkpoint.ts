@@ -15,6 +15,7 @@ import {
   type AuditFacts,
 } from "./audit-evidence";
 import {
+  assertLocalArtifactOrigin,
   type ArtifactVersion,
   type AuditArtifactStore,
 } from "./artifact-store";
@@ -30,6 +31,7 @@ export type LocalArtifactAuthority = { keyId: string; secret: Uint8Array };
 export interface ArtifactReservation {
   version: ArtifactVersion | null;
   binding: string;
+  origin: string;
 }
 const authorities = new WeakMap<PrismaClient, LocalArtifactAuthority>();
 const stores = new WeakMap<PrismaClient, AuditArtifactStore>();
@@ -52,6 +54,38 @@ export function bindLocalArtifactStore(
     });
   else authorities.delete(db);
   stores.set(db, store);
+}
+/** Public key selector only; secret/witness remain process-private. */
+export function artifactOriginKeyId(db: PrismaClient) {
+  const key = authorities.get(db);
+  if (!key) throw Error("ARTIFACT_UNAVAILABLE");
+  return key.keyId;
+}
+async function witnessOrigin(db: PrismaClient, origin: string) {
+  const store = stores.get(db),
+    key = authorities.get(db);
+  if (!store || !key || typeof origin !== "string")
+    throw Error("ARTIFACT_UNAVAILABLE");
+  let workspace: string;
+  try {
+    workspace = JSON.parse(origin).workspaceId;
+  } catch {
+    throw Error("ARTIFACT_UNAVAILABLE");
+  }
+  await assertLocalArtifactOrigin(store, workspace, origin).catch(() => {
+    throw Error("ARTIFACT_UNAVAILABLE");
+  });
+  if (stores.get(db) !== store || authorities.get(db) !== key)
+    throw Error("ARTIFACT_UNAVAILABLE");
+  return { store, key };
+}
+function sameBinding(
+  db: PrismaClient,
+  store: AuditArtifactStore,
+  key: LocalArtifactAuthority,
+) {
+  if (stores.get(db) !== store || authorities.get(db) !== key)
+    throw Error("ARTIFACT_UNAVAILABLE");
 }
 export function artifactStore(db: PrismaClient) {
   return stores.get(db);
@@ -132,6 +166,7 @@ export async function putReserved(
     return;
   }
   if (!bytes) throw Error("INVALID_ARTIFACT");
+  if (!version.origin) throw Error("ARTIFACT_UNAVAILABLE");
   try {
     await store.putImmutable(version, bytes);
   } catch {
@@ -147,6 +182,7 @@ function receiptMac(
   purpose: string,
   binding: string,
   receipt: AcquisitionReceipt,
+  origin: string,
 ) {
   const key = authorities.get(db);
   if (!key) throw Error("ARTIFACT_UNAVAILABLE");
@@ -155,11 +191,13 @@ function receiptMac(
   const message = [
     purpose,
     binding,
+    origin,
     digest(receipt.evidence),
     digest(receipt.provenance),
   ].join("\n");
   return {
     keyId: key.keyId,
+    origin,
     mac: createHmac("sha256", key.secret).update(message).digest("hex"),
   };
 }
@@ -169,18 +207,30 @@ function wireReceipt(receipt: AcquisitionReceipt): AcquisitionReceipt {
   delete provenance.rawHtml;
   return { evidence: receipt.evidence, provenance };
 }
-export function witnessedObservation(
+export async function witnessedObservation(
   db: PrismaClient,
   run: AuditFacts,
   context: string,
   receipt: AcquisitionReceipt,
+  origin: string,
 ) {
+  await witnessOrigin(db, origin);
   attestArtifactReceipt(run, receipt);
   const submitted = wireReceipt(receipt);
   const captureConfirmation = isOriginalObservation(receipt)
-    ? receiptMac(db, "audit-observation-v1", context, submitted)
+    ? receiptMac(db, "audit-observation-v1", context, submitted, origin)
     : null;
-  return { ...submitted, captureConfirmation };
+  return {
+    ...submitted,
+    captureConfirmation,
+    originAssertion: receiptMac(
+      db,
+      "audit-origin-v1",
+      context,
+      submitted,
+      origin,
+    ),
+  };
 }
 export function verifyReturnedBytes(
   version: ArtifactVersion,
@@ -207,9 +257,12 @@ export async function verifiedPublication(
   reservation: ArtifactReservation,
 ) {
   const attested = attestArtifactReceipt(run, receipt),
-    store = artifactStore(db);
+    { store, key } = await witnessOrigin(db, reservation.origin);
   if (!store || !reservation.binding) throw Error("ARTIFACT_UNAVAILABLE");
+  if (reservation.version && reservation.version.origin !== reservation.origin)
+    throw Error("ARTIFACT_UNAVAILABLE");
   await putReserved(store, reservation.version, attested.source);
+  sameBinding(db, store, key);
   if (reservation.version) {
     const returned = await store.openBounded(reservation.version).catch(() => {
       throw Error("ARTIFACT_UNAVAILABLE");
@@ -223,6 +276,8 @@ export async function verifiedPublication(
     )
       throw Error("INVALID_PAGE_EVIDENCE");
   }
+  await witnessOrigin(db, reservation.origin);
+  sameBinding(db, store, key);
   attestArtifactReceipt(run, receipt);
   const submitted = wireReceipt(receipt);
   return {
@@ -234,11 +289,13 @@ export async function verifiedPublication(
       "audit-publication-v1",
       reservation.binding,
       submitted,
+      reservation.origin,
     ),
   };
 }
 /** Controlled operator recovery only. Mark under DB locks, delete and verify outside the DB,
- * then record the result for that exact orphan generation. No READY/retained object is eligible. */
+ * then record the result for that exact orphan generation. No READY/retained object is eligible.
+ * This existing pre-deadline operation is not qualified expiry/deletion maintenance. */
 export async function recoverAuditArtifactOrphans(
   db: PrismaClient,
   store: AuditArtifactStore,
@@ -264,11 +321,13 @@ export async function recoverAuditArtifactOrphans(
 }
 
 /** A fixture source seal has no provider or wire-capture authority. */
-export function witnessedNormalizedObservation(
+export async function witnessedNormalizedObservation(
   db: PrismaClient,
   source: NormalizedObservation,
   binding: string,
+  origin: string,
 ) {
+  await witnessOrigin(db, origin);
   checkedObservationSource(source);
   const submitted = {
     evidence: source.manifest,
@@ -281,6 +340,7 @@ export function witnessedNormalizedObservation(
       [
         "observation-fixture-source-v1",
         binding,
+        origin,
         createHash("sha256")
           .update(JSON.stringify(submitted.evidence))
           .digest("hex"),
@@ -290,7 +350,7 @@ export function witnessedNormalizedObservation(
       ].join("\n"),
     )
     .digest("hex");
-  return { submitted, confirmation: { keyId: key.keyId, mac } };
+  return { submitted, confirmation: { keyId: key.keyId, origin, mac } };
 }
 export type ObservationReservation = {
   id: string;
@@ -298,6 +358,7 @@ export type ObservationReservation = {
   state: "STAGED" | "FINALIZED";
   proof: string;
   binding: string;
+  origin: string;
   versions: { promptId: string; version: ArtifactVersion | null }[];
 };
 /** Publication is independent of the source MAC and requires every exact stored generation. */
@@ -307,8 +368,7 @@ export async function verifiedNormalizedPublication(
   reservation: ObservationReservation,
 ) {
   checkedObservationSource(source);
-  const store = artifactStore(db),
-    key = authorities.get(db);
+  const { store, key } = await witnessOrigin(db, reservation.origin);
   if (
     !store ||
     !key ||
@@ -331,8 +391,11 @@ export async function verifiedNormalizedPublication(
       version.sourceLength !== slot.answerLength
     )
       throw Error("INVALID_ARTIFACT");
+    if (version.origin !== reservation.origin)
+      throw Error("ARTIFACT_UNAVAILABLE");
     const bytes = answerRepresentation(source, i);
     await putReserved(store, version, bytes);
+    sameBinding(db, store, key);
     const returned = verifyReturnedBytes(
       version,
       await store.openBounded(version).catch(() => {
@@ -341,6 +404,7 @@ export async function verifiedNormalizedPublication(
     );
     verifyAnswerRepresentation(source, i, returned);
   }
+  await witnessOrigin(db, reservation.origin);
   checkedObservationSource(source);
   if (authorities.get(db) !== key || artifactStore(db) !== store)
     throw Error("ARTIFACT_UNAVAILABLE");
@@ -353,6 +417,7 @@ export async function verifiedNormalizedPublication(
       [
         "observation-fixture-publication-v1",
         reservation.binding,
+        reservation.origin,
         createHash("sha256")
           .update(JSON.stringify(submitted.evidence))
           .digest("hex"),
@@ -362,5 +427,8 @@ export async function verifiedNormalizedPublication(
       ].join("\n"),
     )
     .digest("hex");
-  return { submitted, confirmation: { keyId: key.keyId, mac } };
+  return {
+    submitted,
+    confirmation: { keyId: key.keyId, origin: reservation.origin, mac },
+  };
 }

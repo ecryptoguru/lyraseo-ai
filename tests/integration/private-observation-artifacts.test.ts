@@ -1,3 +1,4 @@
+import { observationOrigin } from "../helpers/artifact-origin";
 import { beforeEach, afterEach, afterAll, expect, it } from "vitest";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import {
 import { bindLocalArtifactStore } from "../../packages/db/src/artifact-checkpoint";
 import {
   localAuditArtifactStore,
+  localArtifactFaultFacade,
   type AuditArtifactStore,
 } from "../../packages/db/src/artifact-store";
 import {
@@ -94,7 +96,7 @@ beforeEach(async () => {
   await seedTenants();
   root = await mkdtemp(join(await realpath(tmpdir()), "lyraseo-observation-"));
   store = await localAuditArtifactStore(root);
-  authority = await enrollTestArtifactAuthority(admin);
+  authority = await enrollTestArtifactAuthority(admin, store);
   bindLocalArtifactStore(db, store, authority);
 });
 afterEach(async () => {
@@ -171,12 +173,11 @@ it("does not publish any run or refs after injected storage failure; exact retry
     e = evidence();
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      putImmutable: async () => {
-        throw Error();
+    localArtifactFaultFacade(store, {
+      before: (operation) => {
+        if (operation === "put") throw Error();
       },
-    },
+    }),
     authority,
   );
   await expect(
@@ -363,7 +364,12 @@ async function staged(p: Awaited<ReturnType<typeof panel>>, e = evidence()) {
         { context: string }[]
       >`SELECT lyraseo_observation.source_context(${scope.siteId},${p.id},0,${actor.sessionId}) AS context`,
   );
-  const witness = witnessedNormalizedObservation(db, source, context!.context);
+  const witness = await witnessedNormalizedObservation(
+    db,
+    source,
+    context!.context,
+    await observationOrigin(db, actor, scope, p.id),
+  );
   const reserve = () =>
     withActor(db, actor, "a", async (tx) => {
       const [row] = await tx.$queryRaw<
@@ -470,14 +476,7 @@ it("reparses and rejects forged backend bytes before issuing publication confirm
   const pending = await staged(await panel());
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      openBounded: async (version) => {
-        const bytes = await store.openBounded(version);
-        bytes[0] ^= 1;
-        return bytes;
-      },
-    },
+    localArtifactFaultFacade(store, { readMutation: "flip" }),
     authority,
   );
   await expect(
@@ -491,15 +490,13 @@ it("cancellation during physical I/O denies publication and leaves tracked orpha
     e = evidence();
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      openBounded: async (version) => {
-        const bytes = await store.openBounded(version),
-          pending = await admin.visibilityRecording.findFirstOrThrow();
+    localArtifactFaultFacade(store, {
+      after: async (operation) => {
+        if (operation !== "read") return;
+        const pending = await admin.visibilityRecording.findFirstOrThrow();
         await retireObservationAnswers(db, actor, scope, pending.runId);
-        return bytes;
       },
-    },
+    }),
     authority,
   );
   await expect(
@@ -517,17 +514,15 @@ it("security epoch revocation during I/O denies every final write", async () => 
   const p = await panel();
   bindLocalArtifactStore(
     db,
-    {
-      ...store,
-      openBounded: async (version) => {
-        const bytes = await store.openBounded(version);
-        await admin.productUser.update({
-          where: { id: "owner" },
-          data: { securityVersion: 1 },
-        });
-        return bytes;
+    localArtifactFaultFacade(store, {
+      after: async (operation) => {
+        if (operation === "read")
+          await admin.productUser.update({
+            where: { id: "owner" },
+            data: { securityVersion: 1 },
+          });
       },
-    },
+    }),
     authority,
   );
   await expect(
@@ -687,7 +682,12 @@ it("rejects facts normalized against forged reviewed-panel aliases even with a v
         { context: string }[]
       >`SELECT lyraseo_observation.source_context(${scope.siteId},${p.id},0,${actor.sessionId}) AS context`,
   );
-  const witness = witnessedNormalizedObservation(db, source, context!.context);
+  const witness = await witnessedNormalizedObservation(
+    db,
+    source,
+    context!.context,
+    await observationOrigin(db, actor, scope, p.id),
+  );
   await expect(
     withActor(
       db,

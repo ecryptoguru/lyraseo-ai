@@ -3,6 +3,7 @@ import {
   attestArtifactReceipt,
   verifiedPublication,
   witnessedObservation,
+  artifactOriginKeyId,
   verifyReturnedBytes,
   type ArtifactReservation,
   STORAGE,
@@ -473,21 +474,31 @@ export async function checkpointPrivateAudit(
 ) {
   const scopedTx = <T>(work: (tx: Tx) => Promise<T>) =>
     withActor(db, actor, scope.workspaceId, work);
-  const { reservation, initialRun } = await scopedTx(async (tx) => {
+  const prepared = await scopedTx(async (tx) => {
     const run = await scoped(tx, actor, scope, "run");
-    const raw = JSON.stringify(
-      witnessedObservation(
-        db,
-        run,
-        "web/" + scope.auditId + "/" + fence,
-        receipt,
-      ),
-    );
+    const [row] = await tx.$queryRaw<
+      { origin: string }[]
+    >`SELECT lyraseo_origin.web_context(${scope.siteId},${scope.auditId},${actor.securityVersion}::integer,${fence}::integer,${artifactOriginKeyId(db)}) AS origin`;
+    if (!row) throw Error("ARTIFACT_UNAVAILABLE");
+    return { run, origin: row.origin };
+  });
+  const raw = JSON.stringify(
+    await witnessedObservation(
+      db,
+      prepared.run,
+      "web/" + scope.auditId + "/" + fence,
+      receipt,
+      prepared.origin,
+    ),
+  );
+  const reservation = await scopedTx(async (tx) => {
+    await scoped(tx, actor, scope, "run");
     const [row] = await tx.$queryRaw<
       { result: ArtifactReservation }[]
     >`SELECT lyraseo_audit.web_artifact_reserve(${scope.siteId},${scope.auditId},${actor.securityVersion}::integer,${fence}::integer,${raw}::json) AS result`;
-    return { reservation: row!.result, initialRun: run };
+    return row!.result;
   });
+  const initialRun = prepared.run;
   const data = JSON.stringify(
     await verifiedPublication(db, initialRun, receipt, reservation),
   );

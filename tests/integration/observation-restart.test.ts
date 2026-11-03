@@ -1,3 +1,4 @@
+import { observationOrigin } from "../helpers/artifact-origin";
 import { fork, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -50,6 +51,7 @@ const recording = {
 };
 const hash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
+let provisionedRootEntries: string[];
 let root: string,
   store: AuditArtifactStore,
   authority: Awaited<ReturnType<typeof enrollTestArtifactAuthority>>;
@@ -70,7 +72,8 @@ beforeEach(async () => {
     join(await realpath(tmpdir()), "lyraseo-observation-restart-"),
   );
   store = await localAuditArtifactStore(root);
-  authority = await enrollTestArtifactAuthority(admin);
+  authority = await enrollTestArtifactAuthority(admin, store);
+  provisionedRootEntries = await readdir(root);
   bindLocalArtifactStore(db, store, authority);
 });
 afterEach(async () => {
@@ -264,8 +267,11 @@ it.each(["reserved", "verified-io", "finalized"] as const)(
     );
     expect(before.runs.length).toBe(phase === "finalized" ? 1 : 0);
     expect(before.refs.length).toBe(phase === "finalized" ? 1 : 0);
-    if (phase === "reserved") expect(await readdir(root)).toHaveLength(0);
-    else
+    if (phase === "reserved") {
+      expect(await readdir(root)).toEqual(provisionedRootEntries);
+      const namespace = createHash("sha256").update("a").digest("hex");
+      expect(await readdir(join(root, namespace))).toEqual([]);
+    } else
       expect(
         await store.statVersion({
           workspaceId: before.blobs[0]!.workspaceId,
@@ -463,7 +469,12 @@ it("denies actual runtime private INSERT even with an exact STAGED compact reser
           { context: string }[]
         >`SELECT lyraseo_observation.source_context(${scope.siteId},${p.id},0,${actor.sessionId}) AS context`,
     ),
-    witness = witnessedNormalizedObservation(db, source, context!.context);
+    witness = await witnessedNormalizedObservation(
+      db,
+      source,
+      context!.context,
+      await observationOrigin(db, actor, scope, p.id),
+    );
   await withActor(
     db,
     actor,

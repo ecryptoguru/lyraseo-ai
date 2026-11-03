@@ -8,6 +8,7 @@ import {
 import { bindLocalArtifactStore } from "../../../packages/db/src/artifact-checkpoint";
 import {
   localAuditArtifactStore,
+  localArtifactFaultFacade,
   type AuditArtifactStore,
 } from "../../../packages/db/src/artifact-store";
 import type { Actor } from "../../../packages/db/src/context";
@@ -64,33 +65,9 @@ process.once("message", async (input: ObservationProcessInput) => {
       io[kind] = io[kind]! + 1;
       if (input.rejectIO) throw Error("UNEXPECTED_OBJECT_IO");
     };
-    const backend: AuditArtifactStore = {
-      ...store,
-      putImmutable: async (version, bytes) => {
-        touched("put");
-        await store!.putImmutable(version, bytes);
-      },
-      statVersion: async (version) => {
-        touched("stat");
-        return store!.statVersion(version);
-      },
-      openBounded: async (version) => {
-        touched("read");
-        return store!.openBounded(version);
-      },
-      recoverReservedVersion: async (version) => {
-        touched("recover");
-        return store!.recoverReservedVersion(version);
-      },
-      deleteExactVersion: async (version) => {
-        touched("delete");
-        await store!.deleteExactVersion(version);
-      },
-      inventoryPage: async (workspace, after, limit) => {
-        touched("inventory");
-        return store!.inventoryPage(workspace, after, limit);
-      },
-    };
+    const backend = localArtifactFaultFacade(store, {
+      before: (operation) => touched(operation),
+    });
     let transaction = 0;
     const transact = client.$transaction.bind(client) as (
       ...args: unknown[]
