@@ -702,6 +702,67 @@ model AuditEvaluationScratch {
   @@index([expiresAt, pageId])
 }
 
+// Controlled local active-store expiry. SQL owns all writes and the private enrollment.
+model ArtifactExpiryPlan {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ policyVersion String
+ workspaceId String
+ siteId String
+ environmentId String @db.Uuid
+ databaseOid Unsupported("oid")
+ postmasterStartedAt DateTime @db.Timestamptz(6)
+ storeId String @db.Uuid
+ namespaceId String @db.Uuid
+ plannedAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ expiresAt DateTime @db.Timestamptz(6)
+ manifest Json
+ manifestHash String
+ paused Boolean @default(false)
+ rotation Int @default(0)
+ classCursors Json @default("{}")
+}
+
+model ArtifactExpiryItem {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ class String
+ logicalKey String @unique
+ workspaceId String
+ siteId String
+ blobId String? @db.Uuid
+ generation String? @db.Uuid
+ ownerKind String?
+ deadline DateTime @db.Timestamp(3)
+ fingerprint String
+ origin String?
+ version Json?
+ currentPlanId String @db.Uuid
+ status String @default("READY")
+ attemptSequence BigInt @default(0)
+ token String? @db.Uuid
+ workerTokenHash String?
+ leaseUntil DateTime? @db.Timestamptz(6)
+ nextRetryAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ completedAt DateTime? @db.Timestamptz(6)
+
+ @@index([status,nextRetryAt,id])
+ @@index([workspaceId,siteId,class,deadline,id])
+}
+
+model ArtifactExpiryEvent {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ planId String @db.Uuid
+ itemId String @db.Uuid
+ sequence BigInt
+ token String? @db.Uuid
+ outcome String
+ reason String
+ proofDigest String?
+ proofAt DateTime? @db.Timestamptz(6)
+ createdAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+ @@index([planId,itemId,sequence])
+}
+
 model VisibilityRecording {
  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
  runId String @unique @default(dbgenerated("gen_random_uuid()::text"))

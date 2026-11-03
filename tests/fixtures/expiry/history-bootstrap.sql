@@ -1,0 +1,11 @@
+GRANT USAGE ON SCHEMA public TO lyraseo_runtime;
+GRANT SELECT,INSERT,UPDATE,DELETE ON "Workspace","Membership","Site","SiteGrant" TO lyraseo_runtime;
+GRANT SELECT,INSERT ON "AuditRun" TO lyraseo_runtime;
+GRANT SELECT ON "AuditPage" TO lyraseo_runtime;
+GRANT SELECT,INSERT,UPDATE ON "ContentDraft" TO lyraseo_runtime;
+GRANT SELECT,INSERT ON "ContentRevision","EvidenceReport" TO lyraseo_runtime;
+GRANT SELECT,INSERT,UPDATE ON "VisibilityPanel" TO lyraseo_runtime;
+GRANT SELECT,INSERT ON "VisibilityRun" TO lyraseo_runtime;
+GRANT SELECT ON "ProductUser" TO lyraseo_runtime;
+GRANT SELECT ON "ProviderIdentity","StaffGrant" TO lyraseo_runtime;
+GRANT SELECT,INSERT,UPDATE ON "OperationQuote","StepUpGrant","BudgetPeriod","Operation" TO lyraseo_runtime;

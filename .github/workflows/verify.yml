@@ -14,7 +14,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 50
     env:
       LYRA_AUTH_ENABLED: "false"
       ALLOW_LOCAL_FIXTURES: "true"
@@ -38,6 +38,8 @@ jobs:
       - run: pnpm format:check
       - run: pnpm test:unit
       - run: pnpm test:integration
+      - name: Required private artifact expiry and unsafe-role gate
+        run: pnpm test:private-artifact-expiry
       - name: Real Workers carrier and signed Node bridge
         run: pnpm test:worker
       - name: Replay empty and populated database migrations

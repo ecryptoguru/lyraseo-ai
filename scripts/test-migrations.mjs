@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   cpSync,
   mkdirSync,
@@ -90,6 +90,24 @@ const observationArtifactConfig = prefixConfig(
   "twenty-five",
   migrations.filter((n) => n <= "202611030003_private_observation_artifacts"),
 );
+const originConfig = prefixConfig(
+  "twenty-six",
+  migrations.filter((n) => n <= "202611030004_artifact_origin_binding"),
+);
+if (
+  createHash("sha256")
+    .update(
+      readFileSync(
+        join(
+          migrationRoot,
+          "202611030004_artifact_origin_binding/migration.sql",
+        ),
+      ),
+    )
+    .digest("hex") !==
+  "16ad4be15f46ca07e6a71484ceb6b5a9681a853023c9e700825260ece0c6cea7"
+)
+  throw Error("Accepted migration 26 changed bytes");
 const databases = [];
 function sql(database, statement, capture = false) {
   return run(
@@ -194,7 +212,7 @@ try {
   // Upgrade a populated, already closed 016 installation, including its
   // existing replay and paid dispatch history and legacy browser grants.
   const kernelDatabase =
-    "lyraseo_replay_kernel_" + randomUUID().replaceAll("-", "");
+    "lyraseo_expiry_" + randomUUID().replaceAll("-", "").slice(0, 12);
   run("docker", [
     "exec",
     container,
@@ -409,7 +427,7 @@ try {
       true,
     );
   const before26 = originHistory();
-  migrate(kernelDatabase);
+  migrate(kernelDatabase, originConfig);
   if (before26 !== originHistory())
     throw Error(
       "Origin migration changed historical rows, clocks, measurement or financial history",
@@ -436,8 +454,76 @@ try {
   console.log(
     "PASS: populated 25 -> 26 preserves all prior histories and clocks, performs no origin enrollment/backfill, and denies product roles registration/binding access.",
   );
+  // Admin-authored synthetic 26 origin metadata is replay evidence only. No
+  // physical root is enrolled and no expiry claim is made for this fixture.
+  sql(
+    kernelDatabase,
+    `
+    INSERT INTO lyraseo_origin.store_registration(id,root_identity,assertion_version,backend,qualification,provenance_digest)
+    VALUES('00000000-0000-4000-8000-000000000027',
+      '{"identity":["1","2"],"stamp":["3","4"],"instance":"synthetic-replay-only"}',
+      'STORE_ORIGIN_V1','POSIX_FD_V1','LOCAL_TEST_ONLY',repeat('a',64));
+    INSERT INTO lyraseo_origin.source_store_key(key_id,store_id,provenance_digest)
+    VALUES('00000000-0000-4000-8000-000000000028','00000000-0000-4000-8000-000000000027',repeat('b',64));
+    INSERT INTO lyraseo_origin.store_namespace(id,store_id,workspace_id,namespace_identity,provenance_digest)
+    VALUES('00000000-0000-4000-8000-000000000029','00000000-0000-4000-8000-000000000027',
+      'controlled-workspace','{"identity":["5","6"],"stamp":["7","8"]}',repeat('c',64));
+    INSERT INTO lyraseo_origin.blob_store_binding(blob_id,generation,workspace_id,store_id,namespace_id,assertion_version,provenance_digest)
+    SELECT id,generation,"workspaceId",'00000000-0000-4000-8000-000000000027',
+      '00000000-0000-4000-8000-000000000029','STORE_ORIGIN_V1',repeat('d',64)
+    FROM "ArtifactBlob" WHERE id='00000000-0000-4000-8000-000000000026';
+  `,
+  );
+  const before27 =
+    originHistory() +
+    sql(
+      kernelDatabase,
+      `SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_registration t;
+       SELECT jsonb_agg(to_jsonb(t) ORDER BY key_id) FROM lyraseo_origin.source_store_key t;
+       SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_namespace t;
+       SELECT jsonb_agg(to_jsonb(t) ORDER BY blob_id) FROM lyraseo_origin.blob_store_binding t;
+       SELECT lyraseo_audit.version_descriptor(b) FROM "ArtifactBlob" b WHERE id='00000000-0000-4000-8000-000000000026';`,
+      true,
+    );
+  migrate(kernelDatabase);
+  const after27 =
+    originHistory() +
+    sql(
+      kernelDatabase,
+      `SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_registration t;
+       SELECT jsonb_agg(to_jsonb(t) ORDER BY key_id) FROM lyraseo_origin.source_store_key t;
+       SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_namespace t;
+       SELECT jsonb_agg(to_jsonb(t) ORDER BY blob_id) FROM lyraseo_origin.blob_store_binding t;
+       SELECT lyraseo_audit.version_descriptor(b) FROM "ArtifactBlob" b WHERE id='00000000-0000-4000-8000-000000000026';`,
+      true,
+    );
+  if (before27 !== after27)
+    throw Error(
+      "Expiry migration changed accepted source, origin, authored, measurement or financial history",
+    );
+  const expiryState = sql(
+    kernelDatabase,
+    `SELECT count(*) FROM "ArtifactExpiryPlan";
+     SELECT count(*) FROM "ArtifactExpiryItem";
+     SELECT count(*) FROM "ArtifactExpiryEvent";
+     SELECT count(*) FROM lyraseo_expiry.environment;
+     SELECT count(*) FROM lyraseo_expiry.absence_verifier;
+     SELECT has_table_privilege('lyraseo_artifact_maintenance','"ArtifactExpiryPlan"','SELECT,INSERT,UPDATE,DELETE');
+     SELECT has_function_privilege('lyraseo_artifact_maintenance','lyraseo_expiry.claim(jsonb,uuid,uuid,text)','EXECUTE');
+     SELECT has_function_privilege('lyraseo_artifact_maintenance','lyraseo_expiry.record_pending(uuid,uuid,text)','EXECUTE');
+     SELECT to_regprocedure('lyraseo_expiry.record_pending(uuid,text)') IS NULL;`,
+    true,
+  ).trim();
+  if (expiryState !== "0\n0\n0\n0\n0\nf\nt\nt\nt")
+    throw Error(
+      "Expiry migration enrolled data, widened login grants or lost bounded function access: " +
+        expiryState,
+    );
+  console.log(
+    "PASS: populated accepted 26 -> 27 preserves source/origin/measurement/finance/dispatch bytes; no backfill, no enrollment, bounded maintenance function only.",
+  );
   for (const scenario of ["empty", "seven", "twenty"]) {
-    const database = `lyraseo_replay_${scenario}_${randomUUID().replaceAll("-", "")}`;
+    const database = `lyraseo_expiry_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     run("docker", ["exec", container, "createdb", "-U", "postgres", database]);
     databases.push(database);
     let history;

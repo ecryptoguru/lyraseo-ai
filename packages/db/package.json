@@ -38,6 +38,7 @@
     "./observation-artifacts": "./src/observation-artifacts.ts",
     "./artifact-store": "./src/artifact-store.ts",
     "./artifact-checkpoint": "./src/artifact-checkpoint.ts",
+    "./artifact-expiry": "./src/artifact-expiry.ts",
     "./bridge": "./src/bridge.ts"
   }
 }

@@ -8,6 +8,7 @@
     "check": "pnpm --filter @lyraseo/web lint && pnpm -r typecheck",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
+    "test:private-artifact-expiry": "node scripts/test-private-artifact-expiry.mjs",
     "test:migrations": "node scripts/test-migrations.mjs",
     "test:e2e": "pnpm --filter @lyraseo/web test:e2e",
     "db:local": "node scripts/local-db.mjs",

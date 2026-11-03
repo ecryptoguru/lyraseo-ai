@@ -207,7 +207,7 @@ export async function checkDatabase(url, identity) {
            OR has_table_privilege(current_user,oid,'DELETE,TRUNCATE,TRIGGER')))
        OR has_table_privilege(current_user,'public."UsageReceipt"','UPDATE,DELETE,TRUNCATE,TRIGGER')
        OR has_any_column_privilege(current_user,'public."UsageReceipt"','UPDATE')
-       OR EXISTS (SELECT FROM pg_roles WHERE rolname IN ('lyraseo_kernel_owner','lyraseo_dispatch','lyraseo_operator')
+       OR EXISTS (SELECT FROM pg_roles WHERE rolname IN ('lyraseo_kernel_owner','lyraseo_dispatch','lyraseo_operator','lyraseo_expiry_owner','lyraseo_artifact_maintenance')
          AND pg_has_role(current_user,oid,'MEMBER')) AS excessive`,
       [[...kernelTables, "OutboxEvent"]],
     );
@@ -215,6 +215,48 @@ export async function checkDatabase(url, identity) {
       throw new Error(
         "Application role can access protected kernel or receipt state",
       );
+    const {
+      rows: [expiry],
+    } = await client.query(`SELECT
+      to_regnamespace('lyraseo_expiry') IS NOT NULL AS installed,
+      coalesce(has_schema_privilege(current_user,to_regnamespace('lyraseo_expiry'),'USAGE,CREATE'),false) AS schema_access,
+      EXISTS(SELECT FROM pg_proc WHERE pronamespace=to_regnamespace('lyraseo_expiry')
+        AND has_function_privilege(current_user,oid,'EXECUTE')) AS function_access,
+      EXISTS(SELECT FROM pg_roles r CROSS JOIN pg_proc p
+        WHERE r.rolname IN ('anon','authenticated') AND p.pronamespace=to_regnamespace('lyraseo_expiry')
+        AND has_function_privilege(r.oid,p.oid,'EXECUTE')) AS browser_function_access,
+      EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE (n.nspname='lyraseo_expiry' OR (n.nspname='public' AND c.relname IN
+          ('ArtifactExpiryPlan','ArtifactExpiryItem','ArtifactExpiryEvent')))
+        AND (has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+          OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))) AS table_access,
+      EXISTS(SELECT FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE r.rolname IN ('anon','authenticated') AND (n.nspname='lyraseo_expiry' OR
+          (n.nspname='public' AND c.relname IN ('ArtifactExpiryPlan','ArtifactExpiryItem','ArtifactExpiryEvent')))
+        AND has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE')) AS browser_access`);
+    if (
+      expiry.schema_access ||
+      expiry.function_access ||
+      expiry.browser_function_access ||
+      expiry.table_access ||
+      expiry.browser_access
+    )
+      throw new Error("Application or browser role can access protected expiry state");
+    if (expiry.installed) {
+      const { rows: expiryTables } = await client.query(
+        `SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS owns
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE (n.nspname='lyraseo_expiry' AND c.relname IN ('environment','absence_verifier')) OR
+           (n.nspname='public' AND c.relname IN ('ArtifactExpiryPlan','ArtifactExpiryItem','ArtifactExpiryEvent'))`,
+      );
+      if (
+        expiryTables.length !== 5 ||
+        expiryTables.some(
+          (r) => !r.relrowsecurity || !r.relforcerowsecurity || r.owns,
+        )
+      )
+        throw new Error("Protected expiry tables or row security are incomplete");
+    }
     if (identity) {
       await client.query(
         "SELECT id::text,user_id::text,created_at,refreshed_at,not_after FROM lyraseo_private.session_metadata WHERE false",

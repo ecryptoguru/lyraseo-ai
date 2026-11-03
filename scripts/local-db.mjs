@@ -118,9 +118,24 @@ const localRoles = [
   ["lyraseo_dispatch", "local_dispatch_only"],
   ["lyraseo_operator", "local_operator_only"],
   ["lyraseo_kernel_owner", null],
+  ["lyraseo_artifact_maintenance", "local_expiry_only"],
+  ["lyraseo_expiry_owner", null],
   ["anon", "local_anon_only"],
   ["authenticated", "local_authenticated_only"],
 ];
+// Never repair a pre-existing privileged expiry identity in place.
+if (
+  localScalar(`SELECT EXISTS(
+    SELECT FROM pg_roles r WHERE r.rolname IN ('lyraseo_artifact_maintenance','lyraseo_expiry_owner')
+    AND ((r.rolname='lyraseo_artifact_maintenance' AND NOT r.rolcanlogin)
+      OR (r.rolname='lyraseo_expiry_owner' AND r.rolcanlogin)
+      OR r.rolinherit OR r.rolsuper OR r.rolbypassrls OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication)
+    UNION ALL SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid IN (m.member,m.roleid)
+      WHERE r.rolname IN ('lyraseo_artifact_maintenance','lyraseo_expiry_owner')
+    UNION ALL SELECT FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba
+      WHERE r.rolname IN ('lyraseo_artifact_maintenance','lyraseo_expiry_owner'))`) === "t"
+)
+  throw new Error("Unsafe existing expiry role; leaving it untouched.");
 run(
   "docker",
   [
