@@ -1,3 +1,4 @@
+import { stepOrigin } from "../helpers/artifact-origin";
 import { enrollTestArtifactAuthority } from "../helpers/artifact-authority";
 import {
   witnessedObservation,
@@ -1963,8 +1964,8 @@ it.each([
     const root = await mkdtemp(
       resolve(await realpath(tmpdir()), "lyraseo-reclaim-"),
     );
-    const authority = await enrollTestArtifactAuthority(admin);
     const store = await localAuditArtifactStore(root);
+    const authority = await enrollTestArtifactAuthority(admin, store);
     try {
       bindLocalArtifactStore(db, store, authority);
       const { audit } = await fixture(1, true),
@@ -1977,7 +1978,13 @@ it.each([
         transport(url, signal, () => checkStep(db, e.rid, a.proof)),
       );
       const raw = JSON.stringify(
-        witnessedObservation(db, audit, "step/" + e.rid, observed),
+        await witnessedObservation(
+          db,
+          audit,
+          "step/" + e.rid,
+          observed,
+          await stepOrigin(db, e.rid, a.proof),
+        ),
       );
       const [reservation] = await db.$queryRaw<
         Array<{
@@ -2130,8 +2137,8 @@ async function withRound1PrivateStore(
   const root = await mkdtemp(
     resolve(await realpath(tmpdir()), "lyraseo-r1-bridge-"),
   );
-  const authority = await enrollTestArtifactAuthority(admin);
   const store = await localAuditArtifactStore(root);
+  const authority = await enrollTestArtifactAuthority(admin, store);
   try {
     bindLocalArtifactStore(db, store, authority);
     await work(store, root);
@@ -2152,7 +2159,13 @@ it("round1 signed login cannot echo a reserved descriptor to publish fabricated 
     const receipt = await acquireRawPage(a.url, a.origin, (url, signal) =>
       transport(url, signal, () => checkStep(db, e.rid, a.proof)),
     );
-    const witnessed = witnessedObservation(db, audit, "step/" + e.rid, receipt);
+    const witnessed = await witnessedObservation(
+      db,
+      audit,
+      "step/" + e.rid,
+      receipt,
+      await stepOrigin(db, e.rid, a.proof),
+    );
     const reserve = (payload: unknown) =>
       db.$queryRaw<
         { r: ArtifactReservation }[]
@@ -2228,11 +2241,17 @@ it.each(["reclaim", "advance"] as const)(
           observed,
           new AbortController().signal,
           () => {
-            if (++checks === 2) throw Error("SIMULATED_STOP_AFTER_RESERVE");
+            if (++checks === 3) throw Error("SIMULATED_STOP_AFTER_RESERVE");
           },
           new Date(Date.now() + 45000),
         ),
       ).rejects.toThrow("SIMULATED_STOP_AFTER_RESERVE");
+      // Origin preparation adds a guard check before reserve. Assert the durable
+      // no-body reservation exists, rather than depending only on callback count.
+      expect(
+        await admin.$queryRaw`SELECT work_id FROM lyraseo_audit.unavailable_observation`,
+      ).toHaveLength(1);
+      expect(await admin.artifactBlob.count()).toBe(0);
       expect(await admin.auditPage.count()).toBe(0);
       await admin.auditRun.update({
         where: { id: audit.id },

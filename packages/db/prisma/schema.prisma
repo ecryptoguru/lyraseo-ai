@@ -658,6 +658,7 @@ model ArtifactBlob {
   audit AuditRun?    @relation(fields: [workspaceId, siteId, auditId], references: [workspaceId, siteId, id], onDelete: NoAction, onUpdate: NoAction)
   refs ArtifactRef[]
 
+  @@unique([id, generation, workspaceId])
   @@unique([auditId, requestedUrl, fence])
   @@unique([workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt])
   @@index([state, expiresAt, id])

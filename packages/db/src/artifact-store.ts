@@ -1,5 +1,6 @@
 // Local controlled backend. A generation is allocated by the DB before any I/O.
 // Exclusive creation plus DB publication avoids a second, untracked plaintext temp file.
+import { isDeepStrictEqual } from "node:util";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -21,11 +22,14 @@ export interface ArtifactVersion {
   sourceLength: number;
   storedHash: string;
   storedLength: number;
+  /** SQL-owned immutable binding; absent on legacy/unqualified generations. */
+  origin?: string;
 }
 type Physical = Pick<ArtifactVersion, "storageKey" | "generation">;
 export interface AuditArtifactStore {
   readonly qualification: "LOCAL_TEST_ONLY";
   close(): Promise<void>;
+  inspectOrigin(workspace: string): Promise<LocalArtifactOrigin>;
   putImmutable(version: ArtifactVersion, bytes: Uint8Array): Promise<void>;
   statVersion(version: ArtifactVersion): Promise<boolean>;
   openBounded(version: ArtifactVersion): Promise<Uint8Array>;
@@ -36,6 +40,64 @@ export interface AuditArtifactStore {
     after: Physical | null,
     limit: number,
   ): Promise<Physical[]>;
+}
+export type LocalArtifactOrigin = {
+  assertionVersion: "STORE_ORIGIN_V1";
+  qualification: "LOCAL_TEST_ONLY";
+  backend: "POSIX_FD_V1";
+  root: { identity: string[]; stamp: string[]; instance: string };
+  namespace: { identity: string[]; stamp: string[] };
+};
+type OriginCapability = {
+  inspect(workspace: string): Promise<LocalArtifactOrigin>;
+  provision(workspace: string): Promise<LocalArtifactOrigin>;
+};
+// Exact object identity is authority. There is no exposed/copyable witness token.
+const localOrigins = new WeakMap<AuditArtifactStore, OriginCapability>();
+function physicalOrigin(value: string, workspace: string): LocalArtifactOrigin {
+  let origin;
+  try {
+    origin = JSON.parse(value);
+  } catch {
+    throw invalid();
+  }
+  if (
+    origin.assertionVersion !== "STORE_ORIGIN_V1" ||
+    origin.qualification !== "LOCAL_TEST_ONLY" ||
+    origin.backend !== "POSIX_FD_V1" ||
+    origin.workspaceId !== workspace ||
+    !uuid.test(origin.storeId) ||
+    !uuid.test(origin.namespaceId)
+  )
+    throw invalid();
+  return {
+    assertionVersion: origin.assertionVersion,
+    qualification: origin.qualification,
+    backend: origin.backend,
+    root: origin.root,
+    namespace: origin.namespace,
+  };
+}
+/** Nonmutating private witness: injectable inspectOrigin JSON is never consulted. */
+export async function assertLocalArtifactOrigin(
+  store: AuditArtifactStore,
+  workspace: string,
+  expected: string,
+) {
+  const capability = localOrigins.get(store);
+  if (!capability) throw Error("ARTIFACT_UNAVAILABLE");
+  const wanted = physicalOrigin(expected, workspace),
+    actual = await capability.inspect(workspace);
+  if (!isDeepStrictEqual(actual, wanted)) throw Error("ARTIFACT_UNAVAILABLE");
+}
+/** Explicit isolated operator operation only. Never called by reads or selected writers. */
+export async function provisionLocalArtifactNamespace(
+  store: AuditArtifactStore,
+  workspace: string,
+) {
+  const capability = localOrigins.get(store);
+  if (!capability) throw Error("ARTIFACT_UNAVAILABLE");
+  return capability.provision(workspace);
 }
 const invalid = () => new Error("INVALID_ARTIFACT");
 function prefix(workspace: string) {
@@ -131,7 +193,11 @@ export async function localAuditArtifactStore(
         const barrier = child.stdio[4] as Readable;
         barrier.once("data", () => {
           void Promise.resolve()
-            .then(afterNamespacePinned)
+            .then(() =>
+              ["origin", "provision"].includes(String(header.op))
+                ? undefined
+                : afterNamespacePinned?.(),
+            )
             .then(() => child.stdin!.end(bytes), abort);
         });
         child.stdin!.write(JSON.stringify(header) + "\n");
@@ -191,7 +257,13 @@ export async function localAuditArtifactStore(
     const operation = (async () => {
       await stillAddressable();
       const result = await invoke(
-        { op, namespace: prefix(workspace), root: enrolled, ...fields },
+        {
+          op,
+          namespace: prefix(workspace),
+          root: enrolled,
+          parts: root.split("/").slice(1),
+          ...fields,
+        },
         rootHandle.fd,
         bytes,
       );
@@ -210,12 +282,20 @@ export async function localAuditArtifactStore(
     return call(
       op,
       v.workspaceId,
-      { name: suffix(v), size: v.storedLength, digest: v.storedHash },
+      {
+        name: suffix(v),
+        size: v.storedLength,
+        digest: v.storedHash,
+        ...(v.origin
+          ? { origin: physicalOrigin(v.origin, v.workspaceId) }
+          : {}),
+      },
       bytes,
     );
   }
-  return {
+  const store: AuditArtifactStore = {
     qualification: "LOCAL_TEST_ONLY",
+    inspectOrigin: (workspace) => inspect(workspace, "origin"),
     close() {
       return (closing ??= (async () => {
         await Promise.allSettled([...pending]);
@@ -224,6 +304,7 @@ export async function localAuditArtifactStore(
     },
     async putImmutable(v, bytes) {
       possible(v);
+      if (!v.origin) throw Error("ARTIFACT_UNAVAILABLE");
       matches(bytes, v);
       await version("put", v, Buffer.from(bytes));
     },
@@ -249,6 +330,76 @@ export async function localAuditArtifactStore(
       );
     },
   };
+  async function inspect(workspace: string, op: "origin" | "provision") {
+    return JSON.parse(
+      (await call(op, workspace, {})).toString(),
+    ) as LocalArtifactOrigin;
+  }
+  localOrigins.set(store, {
+    inspect: (workspace) => inspect(workspace, "origin"),
+    provision: (workspace) => inspect(workspace, "provision"),
+  });
+  return Object.freeze(store);
+}
+export type LocalArtifactFaultHooks = {
+  before?: (
+    operation: string,
+    version?: ArtifactVersion,
+  ) => Promise<void> | void;
+  after?: (
+    operation: string,
+    version?: ArtifactVersion,
+  ) => Promise<void> | void;
+  readMutation?: "flip" | "truncate" | "zeros";
+};
+/** Fixed trusted fault facade. Hooks cannot replace the real I/O or supply witness evidence. */
+export function localArtifactFaultFacade(
+  store: AuditArtifactStore,
+  hooks: LocalArtifactFaultHooks,
+): AuditArtifactStore {
+  const capability = localOrigins.get(store);
+  if (!capability) throw Error("ARTIFACT_UNAVAILABLE");
+  const before = hooks.before,
+    after = hooks.after,
+    mutation = hooks.readMutation;
+  async function io<T>(
+    kind: string,
+    v: ArtifactVersion | undefined,
+    work: () => Promise<T>,
+  ) {
+    // Hooks observe a frozen copy; they cannot redirect the delegate's generation.
+    const observed = v ? Object.freeze({ ...v }) : undefined;
+    await before?.(kind, observed);
+    const result = await work();
+    await after?.(kind, observed);
+    return result;
+  }
+  const facade: AuditArtifactStore = {
+    qualification: "LOCAL_TEST_ONLY",
+    close: () => store.close(),
+    inspectOrigin: (w) => capability.inspect(w),
+    putImmutable: (v, b) => io("put", v, () => store.putImmutable(v, b)),
+    statVersion: (v) => io("stat", v, () => store.statVersion(v)),
+    openBounded: async (v) => {
+      const bytes = await io("read", v, () => store.openBounded(v));
+      if (mutation === "truncate") return bytes.slice(1);
+      if (mutation === "zeros") return new Uint8Array(bytes.length);
+      if (mutation === "flip") {
+        const copy = new Uint8Array(bytes);
+        if (copy.length) copy[0]! ^= 1;
+        return copy;
+      }
+      return bytes;
+    },
+    recoverReservedVersion: (v) =>
+      io("recover", v, () => store.recoverReservedVersion(v)),
+    deleteExactVersion: (v) =>
+      io("delete", v, () => store.deleteExactVersion(v)),
+    inventoryPage: (w, a, l) =>
+      io("inventory", undefined, () => store.inventoryPage(w, a, l)),
+  };
+  localOrigins.set(facade, capability);
+  return Object.freeze(facade);
 }
 // Deterministic, one-shot acknowledgment loss, only after successful mutation.
 export function faultAfterMutation(
@@ -262,15 +413,9 @@ export function faultAfterMutation(
       throw Error("ARTIFACT_ACK_UNCERTAIN");
     }
   }
-  return {
-    ...store,
-    async putImmutable(v, b) {
-      await store.putImmutable(v, b);
-      reply("put");
+  return localArtifactFaultFacade(store, {
+    after: (kind) => {
+      if (kind === "put" || kind === "delete") reply(kind);
     },
-    async deleteExactVersion(v) {
-      await store.deleteExactVersion(v);
-      reply("delete");
-    },
-  };
+  });
 }

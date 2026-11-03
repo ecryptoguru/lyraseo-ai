@@ -491,8 +491,8 @@ it("serves the exact private original through the existing authenticated attachm
   const body = Buffer.from(
     "\uFEFF<html><body>PRIVATE_ATTACHMENT_ONLY</body></html>",
   );
-  const authority = await enrollTestArtifactAuthority(admin);
   const local = await localAuditArtifactStore(root);
+  const authority = await enrollTestArtifactAuthority(admin, local);
   try {
     bindLocalArtifactStore(selected, local, authority);
     seams.db = selected;

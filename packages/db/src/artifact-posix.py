@@ -72,19 +72,59 @@ def pin_namespace(label, ns, stamp_exists):
     current = directory(ns)
     name = "." + label + ".identity"
     expected = (":".join(current) + "\n").encode("ascii")
-    if not stamp_exists:
+    with opened(ROOT, name, os.O_RDONLY | LEAF) as fd:
+        st = os.fstat(fd)
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and st.st_nlink == 1 and stat.S_IMODE(st.st_mode) == 0o600)
+        require(os.read(fd, 128) == expected)
+        marker = identity(st)
+    require(os.path.samestat(os.fstat(ns), at(ROOT, label)))
+    return {"identity": current, "stamp": marker}
+
+
+def root_origin(provision=False):
+    name = ".store-origin-v1"
+    current = directory(ROOT)
+    if provision:
         try:
             with opened(ROOT, name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | LEAF) as fd:
-                write_all(fd, expected)
+                value = {"identity": current, "instance": str(uuid.uuid4())}
+                write_all(fd, (json.dumps(value, separators=(",", ":")) + "\n").encode("ascii"))
                 os.fsync(fd)
             os.fsync(ROOT)
         except FileExistsError:
             pass
     with opened(ROOT, name, os.O_RDONLY | LEAF) as fd:
         st = os.fstat(fd)
-        require(stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and st.st_nlink == 1 and stat.S_IMODE(st.st_mode) == 0o600)
-        require(os.read(fd, 128) == expected)
-    require(os.path.samestat(os.fstat(ns), at(ROOT, label)))
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and st.st_nlink == 1 and stat.S_IMODE(st.st_mode) == 0o600 and st.st_size <= 512)
+        value = json.loads(os.read(fd, 513))
+        require(isinstance(value, dict) and set(value) == {"identity", "instance"} and value["identity"] == current and re.fullmatch(UUID, value["instance"]))
+        return {"identity": current, "stamp": identity(st), "instance": value["instance"]}
+
+
+def provision_namespace(label):
+    root_origin(True)
+    name = "." + label + ".identity"
+    # Refuse to adopt any pre-existing directory without its original stamp.
+    try:
+        at(ROOT, name)
+    except FileNotFoundError:
+        os.mkdir(label, 0o700, dir_fd=ROOT)
+        with opened(ROOT, label, DIR) as ns:
+            expected = (":".join(directory(ns)) + "\n").encode("ascii")
+            with opened(ROOT, name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | LEAF) as fd:
+                write_all(fd, expected)
+                os.fsync(fd)
+            os.fsync(ROOT)
+
+
+def addressable(parts):
+    with opened(None, "/", DIR) as filesystem:
+        with contextlib.ExitStack() as stack:
+            fd = filesystem
+            for part in parts:
+                require(isinstance(part, str) and part not in ("", ".", "..") and "/" not in part and "\x00" not in part)
+                fd = stack.enter_context(opened(fd, part, DIR))
+            require(os.path.samestat(os.fstat(fd), os.fstat(ROOT)))
 
 
 def check_leaf(info):
@@ -192,7 +232,8 @@ def main():
     op = h["op"]
     if op == "bootstrap":
         return json.dumps(bootstrap(h["parts"])).encode()
-    require(op in ("put", "stat", "open", "recover", "delete", "inventory"))
+    require(op in ("put", "stat", "open", "recover", "delete", "inventory", "origin", "provision"))
+    addressable(h["parts"])
     require(directory(ROOT) == h["root"])
     label = h["namespace"]
     require(re.fullmatch("[0-9a-f]{64}", label))
@@ -201,12 +242,9 @@ def main():
         stamp_exists = True
     except FileNotFoundError:
         stamp_exists = False
-    if op in ("put", "delete") and not stamp_exists:
-        try:
-            os.mkdir(label, 0o700, dir_fd=ROOT)
-            os.fsync(ROOT)
-        except FileExistsError:
-            pass
+    if op == "provision":
+        provision_namespace(label)
+        stamp_exists = True
     try:
         ns = os.open(label, DIR, dir_fd=ROOT)
     except FileNotFoundError:
@@ -214,11 +252,18 @@ def main():
             return b"[]" if op == "inventory" else b"false"
         raise
     try:
-        pin_namespace(label, ns, stamp_exists)
+        namespace_origin = pin_namespace(label, ns, stamp_exists)
+        origin = None
+        if op in ("origin", "provision") or h.get("origin") is not None:
+            origin = {"assertionVersion": "STORE_ORIGIN_V1", "qualification": "LOCAL_TEST_ONLY", "backend": "POSIX_FD_V1", "root": root_origin(), "namespace": namespace_origin}
+            if h.get("origin") is not None:
+                require(origin == h["origin"])
         os.write(4, b"pinned\n")
         data = sys.stdin.buffer.read(CAP + 1)
         require(len(data) <= CAP and (op == "put" or not data))
-        if op == "inventory":
+        if op in ("origin", "provision"):
+            out = json.dumps(origin).encode()
+        elif op == "inventory":
             out = inventory(ns, h["after"], h["limit"])
         else:
             name, size, digest = h["name"], h["size"], h["digest"]
@@ -238,6 +283,9 @@ def main():
                 out = read_version(ns, name, size, digest, op == "recover")
         # This is an availability check. The pinned FD, not this check, confines all I/O.
         require(os.path.samestat(os.fstat(ns), at(ROOT, label)))
+        addressable(h["parts"])
+        if origin is not None:
+            require(origin["root"] == root_origin() and origin["namespace"] == pin_namespace(label, ns, True))
         return out
     finally:
         os.close(ns)

@@ -86,6 +86,10 @@ const auditArtifactConfig = prefixConfig(
   "twenty-four",
   migrations.filter((n) => n <= "202611030002_private_audit_artifacts"),
 );
+const observationArtifactConfig = prefixConfig(
+  "twenty-five",
+  migrations.filter((n) => n <= "202611030003_private_observation_artifacts"),
+);
 const databases = [];
 function sql(database, statement, capture = false) {
   return run(
@@ -371,7 +375,7 @@ try {
       true,
     );
   const before25 = auditArtifactHistory();
-  migrate(kernelDatabase);
+  migrate(kernelDatabase, observationArtifactConfig);
   if (before25 !== auditArtifactHistory())
     throw Error(
       "Observation migration changed historical audit artifacts, measurements, clocks or financial history",
@@ -392,6 +396,45 @@ try {
     );
   console.log(
     "PASS: populated 24 → 25 preserves audit artifact/ref tuples, legacy answers, measurements, P1 clocks and financial history; private observation rows start empty, with no direct product-login grants.",
+  );
+  const originHistory = () =>
+    auditArtifactHistory() +
+    sql(
+      kernelDatabase,
+      `
+    SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM "VisibilityRecording" t;
+    SELECT jsonb_agg(to_jsonb(t) ORDER BY "promptId") FROM "VisibilityObservationSlot" t;
+    SELECT jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text) FROM "AuditEvaluationScratch" t;
+  `,
+      true,
+    );
+  const before26 = originHistory();
+  migrate(kernelDatabase);
+  if (before26 !== originHistory())
+    throw Error(
+      "Origin migration changed historical rows, clocks, measurement or financial history",
+    );
+  const originState = sql(
+    kernelDatabase,
+    `
+    SELECT count(*) FROM lyraseo_origin.store_registration;
+    SELECT count(*) FROM lyraseo_origin.source_store_key;
+    SELECT count(*) FROM lyraseo_origin.store_namespace;
+    SELECT count(*) FROM lyraseo_origin.blob_store_binding;
+    SELECT bool_or(has_any_column_privilege(r,t,'SELECT,INSERT,UPDATE') OR has_table_privilege(r,t,'DELETE'))
+    FROM unnest(ARRAY['lyraseo_runtime','lyraseo_dispatch','lyraseo_identity','anon','authenticated']) r
+    CROSS JOIN unnest(ARRAY['lyraseo_origin.store_registration','lyraseo_origin.source_store_key','lyraseo_origin.store_namespace','lyraseo_origin.blob_store_binding']) t;
+    SELECT bool_or(lyraseo_audit.version_descriptor(b) ? 'origin') FROM "ArtifactBlob" b;
+  `,
+    true,
+  ).trim();
+  if (originState !== "0\n0\n0\n0\nf\nf")
+    throw Error(
+      "Origin migration adopted legacy generations or widened runtime grants: " +
+        originState,
+    );
+  console.log(
+    "PASS: populated 25 -> 26 preserves all prior histories and clocks, performs no origin enrollment/backfill, and denies product roles registration/binding access.",
   );
   for (const scenario of ["empty", "seven", "twenty"]) {
     const database = `lyraseo_replay_${scenario}_${randomUUID().replaceAll("-", "")}`;

@@ -44,8 +44,8 @@ process.once(
     const artifactRoot = await mkdtemp(
       join(await realpath(artifactParent), "objects-"),
     );
-    const authority = await enrollTestArtifactAuthority(admin);
     const objects = await localAuditArtifactStore(artifactRoot);
+    const authority = await enrollTestArtifactAuthority(admin, objects);
     bindLocalArtifactStore(db, faultAfterMutation(objects, "put"), authority);
     const original: RuntimeKey = {
       id: "supervised",
