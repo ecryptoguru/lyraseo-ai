@@ -301,6 +301,7 @@ it("separates immutable compact audit facts from the single authorized original 
       await resolveApiToken(db, token.secret, policy),
       scopeOf(current.id),
       url + "live",
+      async () => actor,
     ),
   ).rejects.toThrow("FORBIDDEN");
 });

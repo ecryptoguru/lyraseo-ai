@@ -12,7 +12,7 @@ import { beforeEach, afterEach, afterAll, expect, it, vi } from "vitest";
 import { createDatabase } from "../../packages/db/src";
 import {
   createAuditRun,
-  readAuditSource,
+  readAuditSource as readWithCurrentActor,
   readAuditRun,
   claimAuditRun,
   checkpointPrivateAudit,
@@ -50,6 +50,12 @@ const db = createDatabase(runtimeUrl),
   admin = createDatabase(adminUrl);
 let root: string, store: AuditArtifactStore;
 let authority: Awaited<ReturnType<typeof enrollTestArtifactAuthority>>;
+const readAuditSource = (
+  client: Parameters<typeof readWithCurrentActor>[0],
+  current: Parameters<typeof readWithCurrentActor>[1],
+  scope: Parameters<typeof readWithCurrentActor>[2],
+  url: string,
+) => readWithCurrentActor(client, current, scope, url, async () => actor);
 const urls = ["https://example.com/", "https://example.com/about"];
 const privateText = "RAW_ONLY_49a2c9d95b";
 const body = Buffer.from(
