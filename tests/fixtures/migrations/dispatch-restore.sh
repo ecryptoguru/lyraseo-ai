@@ -21,7 +21,9 @@ query() {
 initdb -D "$scratch/source" -A trust >/dev/null
 boot "$scratch/source"
 query postgres 'CREATE ROLE lyraseo_kernel_owner NOLOGIN; CREATE ROLE lyraseo_dispatch LOGIN; CREATE ROLE lyraseo_operator LOGIN;
-CREATE ROLE lyraseo_runtime LOGIN; CREATE ROLE lyraseo_identity LOGIN; CREATE ROLE anon LOGIN; CREATE ROLE authenticated LOGIN;'
+CREATE ROLE lyraseo_runtime LOGIN; CREATE ROLE lyraseo_identity LOGIN; CREATE ROLE anon LOGIN; CREATE ROLE authenticated LOGIN;
+CREATE ROLE lyraseo_artifact_maintenance LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
+CREATE ROLE lyraseo_expiry_owner NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;'
 pg_dump -U postgres -d "$source_db" --schema-only -f "$scratch/schema.sql"
 psql -h "$scratch" -p "$port" -d postgres -U postgres -q -v ON_ERROR_STOP=1 -f "$scratch/schema.sql" >/dev/null
 register='INSERT INTO lyraseo_kernel.test_environment(database_oid) SELECT oid FROM pg_database WHERE datname=current_database();'

@@ -184,6 +184,19 @@ def withdraw(ns, name):
                 pass
 
 
+def absence(ns, name):
+    try:
+        info = at(ns, name)
+    except FileNotFoundError:
+        return b"missing"
+    check_leaf(info)
+    if tomb(info):
+        return b"marker"
+    mode = stat.S_IMODE(info.st_mode)
+    require(mode in (0o400, 0o600))
+    return b"incomplete" if mode == 0o400 else b"present"
+
+
 def put(ns, name, size, digest, data):
     require(len(data) == size and hashlib.sha256(data).hexdigest() == digest)
     try:
@@ -232,7 +245,7 @@ def main():
     op = h["op"]
     if op == "bootstrap":
         return json.dumps(bootstrap(h["parts"])).encode()
-    require(op in ("put", "stat", "open", "recover", "delete", "inventory", "origin", "provision"))
+    require(op in ("put", "stat", "open", "recover", "delete", "absence", "inventory", "origin", "provision"))
     addressable(h["parts"])
     require(directory(ROOT) == h["root"])
     label = h["namespace"]
@@ -279,6 +292,8 @@ def main():
                     out = b"true"
                 except FileNotFoundError:
                     out = b"false"
+            elif op == "absence":
+                out = absence(ns, name)
             else:
                 out = read_version(ns, name, size, digest, op == "recover")
         # This is an availability check. The pinned FD, not this check, confines all I/O.

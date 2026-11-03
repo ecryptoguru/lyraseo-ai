@@ -212,19 +212,24 @@ it("persists scoped compact pages, P1 clocks and original bytes; scores the same
   expect(
     (await readAuditRun(db, actor, scope)).pages[0]?.sourceAvailability,
   ).toBe("unavailable");
-  await admin.artifactBlob.update({
-    where: { id: ref!.blobId },
-    data: { state: "READY" },
-  });
   const corrupt = await admin.artifactBlob.findFirstOrThrow({
-    where: { requestedUrl: urls[0] },
+    where: { requestedUrl: urls[1] },
   });
+  expect(corrupt.state).toBe("READY");
+  expect(
+    await admin.artifactRef.findFirst({
+      where: { blobId: corrupt.id, generation: corrupt.generation },
+    }),
+  ).not.toBeNull();
+  expect(
+    Buffer.from(await readAuditSource(db, actor, scope, urls[1]!)),
+  ).toEqual(body);
   const dir = join(root, createHash("sha256").update("a").digest("hex"));
   const file = (await readdir(dir)).find((f) =>
     f.includes(corrupt.storageKey),
   )!;
   await writeFile(join(dir, file), "corrupt");
-  await expect(readAuditSource(db, actor, scope, urls[0]!)).rejects.toThrow(
+  await expect(readAuditSource(db, actor, scope, urls[1]!)).rejects.toThrow(
     "ARTIFACT_UNAVAILABLE",
   );
 });

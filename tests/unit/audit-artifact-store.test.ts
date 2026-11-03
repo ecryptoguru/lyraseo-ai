@@ -9,6 +9,9 @@ import {
   readdir,
   stat,
   writeFile,
+  rename,
+  copyFile,
+  cp,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +19,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   localAuditArtifactStore as openLocalStore,
   faultAfterMutation,
+  inspectLocalArtifactAbsence,
+  localArtifactFaultFacade,
   provisionLocalArtifactNamespace,
   type ArtifactVersion,
 } from "../../packages/db/src/artifact-store";
@@ -84,6 +89,142 @@ it("recovers an uncertain put/delete on the same immutable scoped generation", a
   await expect(store.putImmutable(v, bytes)).rejects.toThrow();
   expect(await store.inventoryPage("a", null, 1)).toEqual([]);
 });
+it("qualifies only a missing exact leaf or withdrawal marker through the private FD capability", async () => {
+  const store = await localAuditArtifactStore(root);
+  const v = version();
+  await expect(inspectLocalArtifactAbsence(store, v)).resolves.toBe("missing");
+  await store.putImmutable(v, bytes);
+  await expect(inspectLocalArtifactAbsence(store, v)).rejects.toThrow();
+  await store.deleteExactVersion(v);
+  await expect(inspectLocalArtifactAbsence(store, v)).resolves.toBe("marker");
+  const facade = localArtifactFaultFacade(store, {});
+  await expect(inspectLocalArtifactAbsence(facade, v)).resolves.toBe("marker");
+  await expect(inspectLocalArtifactAbsence({ ...store }, v)).rejects.toThrow(
+    "ARTIFACT_UNAVAILABLE",
+  );
+  await expect(
+    inspectLocalArtifactAbsence(store, { ...v, origin: undefined }),
+  ).rejects.toThrow("ARTIFACT_UNAVAILABLE");
+});
+it("never treats a mode-0400 staged body or missing namespace as absence", async () => {
+  const store = await localAuditArtifactStore(root);
+  const v = version();
+  const dir = join(root, createHash("sha256").update("a").digest("hex"));
+  await writeFile(join(dir, v.storageKey + "." + v.generation), bytes, {
+    mode: 0o400,
+  });
+  expect(await store.statVersion(v)).toBe(false);
+  await expect(inspectLocalArtifactAbsence(store, v)).rejects.toThrow();
+  const wrong = { ...v, workspaceId: "never-enrolled" };
+  await expect(inspectLocalArtifactAbsence(store, wrong)).rejects.toThrow();
+});
+it.each([
+  "namespace-replaced",
+  "namespace-copied",
+  "namespace-missing",
+  "namespace-symlink",
+  "namespace-stamp-copied",
+  "namespace-stamp-symlink",
+  "root-stamp-copied",
+  "root-stamp-symlink",
+])(
+  "refuses an absence witness when %s changes after origin enrollment",
+  async (kind) => {
+    const store = await localAuditArtifactStore(root),
+      v = version();
+    await store.putImmutable(v, bytes);
+    await store.deleteExactVersion(v);
+    expect(await inspectLocalArtifactAbsence(store, v)).toBe("marker");
+    const label = createHash("sha256").update("a").digest("hex");
+    const namespace = join(root, label),
+      namespaceStamp = join(root, `.${label}.identity`);
+    if (
+      [
+        "namespace-replaced",
+        "namespace-copied",
+        "namespace-missing",
+        "namespace-symlink",
+      ].includes(kind)
+    ) {
+      await rename(namespace, namespace + ".saved");
+      if (kind === "namespace-replaced")
+        await mkdir(namespace, { mode: 0o700 });
+      if (kind === "namespace-symlink")
+        await symlink(namespace + ".saved", namespace);
+      if (kind === "namespace-copied") {
+        const name = v.storageKey + "." + v.generation;
+        await cp(namespace + ".saved", namespace, {
+          recursive: true,
+          filter: (source) => source !== join(namespace + ".saved", name),
+        });
+        await writeFile(join(namespace, name), "", { mode: 0o000 });
+      }
+    } else {
+      const stamp = kind.startsWith("root-stamp-")
+        ? join(root, ".store-origin-v1")
+        : namespaceStamp;
+      await rename(stamp, stamp + ".saved");
+      if (kind.endsWith("symlink")) await symlink(stamp + ".saved", stamp);
+      else await copyFile(stamp + ".saved", stamp);
+    }
+    await expect(inspectLocalArtifactAbsence(store, v)).rejects.toThrow();
+  },
+);
+it.each(["root-missing", "root-replaced", "root-copied", "root-symlink"])(
+  "refuses an absence witness when the enrolled root is %s",
+  async (kind) => {
+    const store = await localAuditArtifactStore(root),
+      v = version();
+    await store.putImmutable(v, bytes);
+    await store.deleteExactVersion(v);
+    await rename(root, root + ".saved");
+    try {
+      if (kind === "root-replaced") await mkdir(root, { mode: 0o700 });
+      if (kind === "root-symlink") await symlink(root + ".saved", root);
+      if (kind === "root-copied") {
+        const label = createHash("sha256").update("a").digest("hex");
+        const name = v.storageKey + "." + v.generation;
+        await cp(root + ".saved", root, {
+          recursive: true,
+          filter: (source) => source !== join(root + ".saved", label, name),
+        });
+        await writeFile(join(root, label, name), "", { mode: 0o000 });
+      }
+      await expect(inspectLocalArtifactAbsence(store, v)).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rename(root + ".saved", root);
+    }
+  },
+);
+it("rejects absence inspection after the held root gains unsafe permissions", async () => {
+  const store = await localAuditArtifactStore(root),
+    v = version();
+  await store.putImmutable(v, bytes);
+  await store.deleteExactVersion(v);
+  await chmod(root, 0o755);
+  try {
+    await expect(inspectLocalArtifactAbsence(store, v)).rejects.toThrow();
+  } finally {
+    await chmod(root, 0o700);
+  }
+});
+it.each(["corrupt", "unsafe-mode", "symlink"])(
+  "never treats a %s exact leaf as a verified withdrawal",
+  async (kind) => {
+    const store = await localAuditArtifactStore(root),
+      v = version();
+    const dir = join(root, createHash("sha256").update("a").digest("hex"));
+    const leaf = join(dir, v.storageKey + "." + v.generation);
+    if (kind === "symlink") await symlink("/etc/passwd", leaf);
+    else {
+      await writeFile(leaf, Buffer.from("corrupt"), { mode: 0o600 });
+      if (kind === "unsafe-mode") await chmod(leaf, 0o644);
+    }
+    await expect(inspectLocalArtifactAbsence(store, v)).rejects.toThrow();
+  },
+);
+
 it("rejects traversal, overflow, mismatched representation, corrupt files, symlinks and open roots", async () => {
   const v = version(),
     store = await localAuditArtifactStore(root);

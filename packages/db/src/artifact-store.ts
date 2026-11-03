@@ -51,6 +51,9 @@ export type LocalArtifactOrigin = {
 type OriginCapability = {
   inspect(workspace: string): Promise<LocalArtifactOrigin>;
   provision(workspace: string): Promise<LocalArtifactOrigin>;
+  absence(
+    version: ArtifactVersion,
+  ): Promise<"marker" | "missing" | "present" | "incomplete">;
 };
 // Exact object identity is authority. There is no exposed/copyable witness token.
 const localOrigins = new WeakMap<AuditArtifactStore, OriginCapability>();
@@ -89,6 +92,23 @@ export async function assertLocalArtifactOrigin(
   const wanted = physicalOrigin(expected, workspace),
     actual = await capability.inspect(workspace);
   if (!isDeepStrictEqual(actual, wanted)) throw Error("ARTIFACT_UNAVAILABLE");
+}
+/** Expiry-only evidence from the held FD. A public stat/inspector is never authority. */
+export async function inspectLocalArtifactAbsence(
+  store: AuditArtifactStore,
+  version: ArtifactVersion,
+): Promise<"marker" | "missing"> {
+  const capability = localOrigins.get(store);
+  if (!capability || !version.origin) throw Error("ARTIFACT_UNAVAILABLE");
+  const wanted = physicalOrigin(version.origin, version.workspaceId);
+  if (!isDeepStrictEqual(await capability.inspect(version.workspaceId), wanted))
+    throw Error("ARTIFACT_UNAVAILABLE");
+  const result = await capability.absence(version);
+  if (result !== "marker" && result !== "missing")
+    throw Error("ARTIFACT_UNAVAILABLE");
+  if (!isDeepStrictEqual(await capability.inspect(version.workspaceId), wanted))
+    throw Error("ARTIFACT_UNAVAILABLE");
+  return result;
 }
 /** Explicit isolated operator operation only. Never called by reads or selected writers. */
 export async function provisionLocalArtifactNamespace(
@@ -338,6 +358,13 @@ export async function localAuditArtifactStore(
   localOrigins.set(store, {
     inspect: (workspace) => inspect(workspace, "origin"),
     provision: (workspace) => inspect(workspace, "provision"),
+    async absence(v) {
+      if (!v.origin) throw Error("ARTIFACT_UNAVAILABLE");
+      const result = (await version("absence", v)).toString();
+      if (!["marker", "missing", "present", "incomplete"].includes(result))
+        throw invalid();
+      return result as "marker" | "missing" | "present" | "incomplete";
+    },
   });
   return Object.freeze(store);
 }
@@ -398,7 +425,10 @@ export function localArtifactFaultFacade(
     inventoryPage: (w, a, l) =>
       io("inventory", undefined, () => store.inventoryPage(w, a, l)),
   };
-  localOrigins.set(facade, capability);
+  localOrigins.set(facade, {
+    ...capability,
+    absence: (v) => io("absence", v, () => capability.absence(v)),
+  });
   return Object.freeze(facade);
 }
 // Deterministic, one-shot acknowledgment loss, only after successful mutation.

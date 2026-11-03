@@ -3,7 +3,9 @@ import { createDatabase } from "../../packages/db/src";
 const ownedName = process.env.LYRA_TEST_DB_NAME;
 if (
   ownedName &&
-  !/^(?:lyraseo_p2a[12]|lyraseo_origin)_[a-f0-9]{12}$/.test(ownedName)
+  !/^(?:lyraseo_p2a[12]|lyraseo_origin)_[a-f0-9]{12}$|^lyraseo_expiry_[a-f0-9]{8,12}$/.test(
+    ownedName,
+  )
 )
   throw Error("INVALID_LOCAL_TEST_DATABASE");
 const databaseName = ownedName ?? "lyraseo_test";
