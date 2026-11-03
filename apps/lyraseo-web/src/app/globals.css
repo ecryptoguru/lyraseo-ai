@@ -2660,6 +2660,11 @@ a.data-row:hover strong {
   list-style: none;
   padding: 0;
 }
+.audit-history .button {
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .audit-history li,
 .audit-findings li {
   margin: 0.75rem 0;

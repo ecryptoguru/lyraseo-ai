@@ -1,4 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
+// Playwright forces color in server/worker children; avoid contradictory color flags
+// in this test process only. Keep Node and application diagnostics enabled.
+if (process.env.NO_COLOR !== undefined) delete process.env.NO_COLOR;
+
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,

@@ -1,4 +1,8 @@
-import { expect, test } from "@playwright/test";
+import {
+  expect,
+  test,
+  expectHistoryWithinViewport,
+} from "./fixtures/history-viewport";
 import AxeBuilder from "@axe-core/playwright";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -115,20 +119,29 @@ test("editor saves an evidence-backed draft and preserves changes after a revisi
 });
 test("viewer can download a private report without draft or report creation controls", async ({
   page,
-}) => {
+  consoleHealth,
+}, testInfo) => {
   await page.route("**/api/content**", (route) =>
     route.fulfill({ json: [draft] }),
   );
   await page.route("**/api/reports**", (route) =>
     route.fulfill({
-      json: [
-        {
-          id: "report",
-          title: "Private evidence report",
-          evidenceFormat: "saved-evidence-v2",
-          createdAt: "2026-11-02T00:00:00Z",
-        },
-      ],
+      json:
+        new URL(route.request().url()).searchParams.get("format") === "preview"
+          ? {
+              id: "report",
+              snapshot: { sources: [{ sourceId: "audit:audit", data: {} }] },
+              sourceAvailability: [],
+            }
+          : [
+              {
+                id: "report",
+                title:
+                  "Private evidence report for the international product catalogue and accessibility review",
+                evidenceFormat: "saved-evidence-v2",
+                createdAt: "2026-11-02T00:00:00Z",
+              },
+            ],
     }),
   );
   await page.route("**/api/audits**", (route) => route.fulfill({ json: [] }));
@@ -143,6 +156,19 @@ test("viewer can download a private report without draft or report creation cont
   });
   await page.addScriptTag({ content: await bundle(false) });
   await expect(page.getByRole("link", { name: "Download PDF" })).toBeVisible();
+  await expectHistoryWithinViewport(
+    page,
+    testInfo,
+    "report-history",
+    consoleHealth,
+  );
+  await page
+    .getByRole("button", { name: /^Preview Private evidence report/ })
+    .press("Enter");
+  await expect(
+    page.getByRole("region", { name: "Saved report preview" }),
+  ).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await expect(
     page.getByRole("button", { name: "Save draft with evidence" }),
   ).toHaveCount(0);
