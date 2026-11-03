@@ -227,6 +227,7 @@ export async function GET(request: Request) {
         actor,
         resource,
         query.get("url") ?? "",
+        resolveActor,
       );
       return new Response(raw, {
         headers: {

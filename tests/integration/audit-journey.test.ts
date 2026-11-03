@@ -94,6 +94,7 @@ it("persists real controlled HTTP evidence, resumes checkpoints and verifies an 
           actor,
           { ...scope, auditId: after.id },
           "https://example.com/",
+          async () => actor,
         )
       ).length,
     ).toBeGreaterThan(0);
@@ -238,7 +239,13 @@ it("persists a valid UTF-8 anchor crossing the text cap and its editorial snapsh
     ]);
     expect(
       Buffer.from(
-        await readAuditSource(db, actor, resource, unicode.requestedUrl),
+        await readAuditSource(
+          db,
+          actor,
+          resource,
+          unicode.requestedUrl,
+          async () => actor,
+        ),
       ).toString("utf8"),
     ).toContain(`${"a".repeat(499)}😀`);
     const draft = await createContentDraft(db, actor, scope, {

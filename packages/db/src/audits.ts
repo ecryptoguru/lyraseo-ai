@@ -287,14 +287,28 @@ export async function readAuditSource(
   actor: ReadActor,
   scope: AuditScope,
   url: string,
+  revalidateActor: () => Promise<Actor>,
 ) {
   if (isTokenActor(actor)) throw new Error("FORBIDDEN");
-  const ticket = () =>
-    withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
+  if (typeof revalidateActor !== "function")
+    throw Error("CURRENT_ACTOR_REQUIRED");
+  const currentActor = async () => {
+    const current = await revalidateActor();
+    if (
+      !current ||
+      current.userId !== actor.userId ||
+      current.sessionId !== actor.sessionId ||
+      current.securityVersion !== actor.securityVersion
+    )
+      throw Error("FORBIDDEN");
+    return current;
+  };
+  const ticket = (current: Actor = actor) =>
+    withEvidenceRead(db, current, scope, "read", undefined, async (tx) => {
       const [row] = await tx.$queryRaw<
         { version: ArtifactVersion | null; format: string | null }[]
       >`
-      SELECT r."storageFormat" AS format,lyraseo_audit.source_ticket(${scope.siteId},${scope.auditId},${url},${actor.securityVersion}::integer) AS version
+      SELECT r."storageFormat" AS format,lyraseo_audit.source_ticket(${scope.siteId},${scope.auditId},${url},${current.securityVersion}::integer) AS version
       FROM "AuditRun" r JOIN "AuditPage" p ON p."auditId"=r.id AND p."workspaceId"=r."workspaceId"
       WHERE r."workspaceId"=${scope.workspaceId} AND r."siteId"=${scope.siteId} AND r.id=${scope.auditId} AND p."requestedUrl"=${url}`;
       if (!row) throw Error("NOT_FOUND");
@@ -309,47 +323,76 @@ export async function readAuditSource(
       throw Error("ARTIFACT_UNAVAILABLE");
     });
     const copy = verifyReturnedBytes(first.version, bytes);
-    const latest = await ticket();
+    // Identity I/O runs after buffering and outside every product transaction.
+    // The final scope check observes changes made while identity was pending.
+    const latest = await ticket(await currentActor());
     if (
+      latest.format !== first.format ||
       !latest.version ||
       fingerprint(latest.version) !== fingerprint(first.version)
     )
       throw Error("SOURCE_EXPIRED");
     return copy;
   }
-  return withEvidenceRead(db, actor, scope, "read", undefined, async (tx) => {
-    const now = new Date();
-    const rows = await tx.$queryRaw<
-      Array<{ raw: string | null; sha256: string | null }>
-    >`
-      SELECT p.provenance->>'rawHtml' AS raw,p.provenance->>'sha256' AS sha256 FROM "AuditPage" p
+  const readLegacy = (current: Actor) =>
+    withEvidenceRead(db, current, scope, "read", undefined, async (tx) => {
+      const now = new Date();
+      const rows = await tx.$queryRaw<
+        Array<{
+          raw: string | null;
+          sha256: string | null;
+          pageId: string;
+          rawExpiresAt: Date;
+          resultExpiresAt: Date;
+        }>
+      >`
+      SELECT p.provenance->>'rawHtml' AS raw,p.provenance->>'sha256' AS sha256,p.id AS "pageId",t."rawExpiresAt",r."resultExpiresAt" FROM "AuditPage" p
       JOIN "AuditRun" r ON r.id=p."auditId" AND r."workspaceId"=p."workspaceId"
       JOIN "AuditPageRetention" t ON t."pageId"=p.id AND t."workspaceId"=p."workspaceId" AND t."auditId"=p."auditId"
       WHERE r."workspaceId"=${scope.workspaceId} AND r."siteId"=${scope.siteId} AND r.id=${scope.auditId}
         AND p."requestedUrl"=${url} AND r."resultExpiresAt">${now} AND t."rawExpiresAt">${now}
-        AND jsonb_typeof(p.provenance->'rawHtml')='string'`;
-    if (!rows[0]?.raw) {
-      if (
-        !(await tx.auditPage.count({
-          where: {
-            workspaceId: scope.workspaceId,
-            auditId: scope.auditId,
-            requestedUrl: url,
-            audit: { siteId: scope.siteId },
-          },
-        }))
-      )
-        throw new Error("NOT_FOUND");
-      throw new Error("SOURCE_EXPIRED");
-    }
-    const bytes = new TextEncoder().encode(rows[0].raw);
-    if (
-      rows[0].sha256 &&
-      createHash("sha256").update(bytes).digest("hex") !== rows[0].sha256
-    )
-      throw new Error("SOURCE_EXPIRED");
-    return bytes;
-  });
+        AND r."storageFormat" IS NULL AND jsonb_typeof(p.provenance->'rawHtml')='string'
+        AND octet_length(p.provenance->>'rawHtml')<=5242880`;
+      if (!rows[0]?.raw) {
+        if (
+          !(await tx.auditPage.count({
+            where: {
+              workspaceId: scope.workspaceId,
+              auditId: scope.auditId,
+              requestedUrl: url,
+              audit: { siteId: scope.siteId },
+            },
+          }))
+        )
+          throw new Error("NOT_FOUND");
+        throw new Error("SOURCE_EXPIRED");
+      }
+      const bytes = new TextEncoder().encode(rows[0].raw);
+      if (bytes.byteLength > 5 * 1024 * 1024) throw Error("SOURCE_EXPIRED");
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      if (rows[0].sha256 && digest !== rows[0].sha256)
+        throw new Error("SOURCE_EXPIRED");
+      return {
+        bytes,
+        digest,
+        sha256: rows[0].sha256,
+        pageId: rows[0].pageId,
+        rawExpiresAt: +rows[0].rawExpiresAt,
+        resultExpiresAt: +rows[0].resultExpiresAt,
+      };
+    });
+  const legacy = await readLegacy(actor);
+  const latest = await readLegacy(await currentActor());
+  if (
+    legacy.pageId !== latest.pageId ||
+    legacy.sha256 !== latest.sha256 ||
+    legacy.digest !== latest.digest ||
+    legacy.rawExpiresAt !== latest.rawExpiresAt ||
+    legacy.resultExpiresAt !== latest.resultExpiresAt ||
+    !Buffer.from(legacy.bytes).equals(latest.bytes)
+  )
+    throw Error("SOURCE_EXPIRED");
+  return legacy.bytes;
 }
 // Browser-only fixed storage adapter. Its caller must already be in the scoped
 // web transaction; the SQL guard independently binds and locks that actor.
