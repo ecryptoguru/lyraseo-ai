@@ -1,4 +1,8 @@
-import { expect, test } from "@playwright/test";
+import {
+  expect,
+  test,
+  expectHistoryWithinViewport,
+} from "./fixtures/history-viewport";
 import AxeBuilder from "@axe-core/playwright";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -113,7 +117,8 @@ test("editor saves and reviews a panel without inventing observations", async ({
 });
 test("viewer traces synthetic evidence and failed slots without collection controls", async ({
   page,
-}) => {
+  consoleHealth,
+}, testInfo) => {
   const run = {
     id: "run",
     panelId: "panel",
@@ -154,9 +159,15 @@ test("viewer traces synthetic evidence and failed slots without collection contr
   await expect(
     page.getByRole("button", { name: "Save panel version", exact: true }),
   ).toHaveCount(0);
+  await expectHistoryWithinViewport(
+    page,
+    testInfo,
+    "legacy-history",
+    consoleHealth,
+  );
   await page
     .getByRole("button", { name: /Azure API.*Synthetic fixture/ })
-    .click();
+    .press("Enter");
   await expect(
     page.getByText("Synthetic fixture — this is not a live measurement."),
   ).toBeVisible();
@@ -179,6 +190,7 @@ test("viewer traces synthetic evidence and failed slots without collection contr
 });
 test("private parsed fixtures show explicit per-answer availability without implicit raw reads", async ({
   page,
+  consoleHealth,
 }, testInfo) => {
   const run = {
     id: "private-run",
@@ -226,9 +238,15 @@ test("private parsed fixtures show explicit per-answer availability without impl
     });
   });
   await mount(page, false);
+  await expectHistoryWithinViewport(
+    page,
+    testInfo,
+    "private-history",
+    consoleHealth,
+  );
   await page
     .getByRole("button", { name: /Azure API.*Synthetic fixture/ })
-    .click();
+    .press("Enter");
   await page
     .getByText("Parsed answer evidence and provenance", { exact: true })
     .click();
@@ -254,11 +272,25 @@ test("private parsed fixtures show explicit per-answer availability without impl
   ).toHaveAttribute("href", /action=read-answer/);
   expect(answerReads).toBe(0);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth + 1,
-    ),
-  ).toBe(true);
+  await expectHistoryWithinViewport(
+    page,
+    testInfo,
+    "private-parsed-history",
+    consoleHealth,
+  );
+  const table = page.getByRole("region", {
+    name: "Per-prompt observation evidence table",
+  });
+  await table.focus();
+  await expect(table).toBeFocused();
+  if (
+    await table.evaluate((element) => element.scrollWidth > element.clientWidth)
+  ) {
+    await table.press("ArrowRight");
+    await expect
+      .poll(() => table.evaluate((element) => element.scrollLeft))
+      .toBeGreaterThan(0);
+  }
   await page.screenshot({
     path: `../../output/playwright/private-observation-${testInfo.project.name}.png`,
     fullPage: true,

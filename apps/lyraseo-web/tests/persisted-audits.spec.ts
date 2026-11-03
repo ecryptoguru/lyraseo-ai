@@ -1,4 +1,8 @@
-import { expect, test } from "@playwright/test";
+import {
+  expect,
+  test,
+  expectHistoryWithinViewport,
+} from "./fixtures/history-viewport";
 import AxeBuilder from "@axe-core/playwright";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -182,7 +186,8 @@ test("saved audit component captures, inspects and reviews evidence accessibly",
 
 test("viewer can inspect saved audits without mutation controls", async ({
   page,
-}) => {
+  consoleHealth,
+}, testInfo) => {
   await page.route("**/api/audits**", (route) =>
     route.fulfill({
       json: new URL(route.request().url()).searchParams.has("auditId")
@@ -202,7 +207,13 @@ test("viewer can inspect saved audits without mutation controls", async ({
       "Your site access allows viewing and exporting saved audits.",
     ),
   ).toBeVisible();
-  await page.getByRole("button", { name: /completed/i }).click();
+  await expectHistoryWithinViewport(
+    page,
+    testInfo,
+    "audit-history",
+    consoleHealth,
+  );
+  await page.getByRole("button", { name: /completed/i }).press("Enter");
   await page
     .locator("summary")
     .filter({ hasText: "https://example.com/" })
