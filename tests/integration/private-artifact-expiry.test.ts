@@ -75,6 +75,7 @@ async function runCli(
   args: string[],
   config: unknown,
   manifest?: unknown,
+  expectInvalidOption = false,
 ) {
   const child = spawn(
     process.execPath,
@@ -90,18 +91,38 @@ async function runCli(
     },
   );
   const output: Buffer[] = [],
-    errors: Buffer[] = [];
+    errors: Buffer[] = [],
+    inputErrors: NodeJS.ErrnoException[] = [];
   child.stdout.on("data", (part: Buffer) => output.push(part));
   child.stderr.on("data", (part: Buffer) => errors.push(part));
+  child.stdio[3]!.on("error", (error: NodeJS.ErrnoException) =>
+    inputErrors.push(error),
+  );
+  child.stdio[4]!.on("error", (error: NodeJS.ErrnoException) =>
+    inputErrors.push(error),
+  );
   child.stdio[3]!.end(JSON.stringify(config));
   child.stdio[4]!.end(manifest === undefined ? "" : JSON.stringify(manifest));
-  const code = await new Promise<number | null>((resolve) =>
-    child.once("close", resolve),
-  );
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  const error = Buffer.concat(errors).toString();
+  if (
+    inputErrors.length &&
+    !(
+      expectInvalidOption &&
+      code !== null &&
+      code !== 0 &&
+      error.includes("INVALID_PRIVATE_EXPIRY_OPTION") &&
+      inputErrors.every((e) => ["ECONNRESET", "EPIPE"].includes(e.code ?? ""))
+    )
+  )
+    throw inputErrors[0];
   return {
     code,
     output: Buffer.concat(output).toString(),
-    error: Buffer.concat(errors).toString(),
+    error,
   };
 }
 let root: string,
@@ -1150,6 +1171,18 @@ describe.runIf(owned)("controlled local private artifact expiry", () => {
     ).toBe(true);
   });
 
+  it("handles an early invalid-option rejection while config delivery is in flight", async () => {
+    const rejected = await runCli(
+      "artifact-plan",
+      ["--as-of", "2100-01-01"],
+      { fixture: "x".repeat(1_000_000) },
+      undefined,
+      true,
+    );
+    expect(rejected.code).not.toBe(0);
+    expect(rejected.error).toContain("INVALID_PRIVATE_EXPIRY_OPTION");
+  });
+
   it("keeps dry-run read-only, then withdraws due bytes after source-secret revocation", async () => {
     const { target, blob } = await readyAudit();
     expiry = await enrollTestExpiryAuthority(
@@ -1217,8 +1250,11 @@ describe.runIf(owned)("controlled local private artifact expiry", () => {
       "artifact-plan",
       ["--as-of", "2100-01-01"],
       cliConfig,
+      undefined,
+      true,
     );
     expect(deniedAsOf.code).not.toBe(0);
+    expect(deniedAsOf.error).toContain("INVALID_PRIVATE_EXPIRY_OPTION");
     await source.revoke();
     const applied = await applyPrivateArtifactExpiry(
       maintenance,
