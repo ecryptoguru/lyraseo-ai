@@ -35,7 +35,7 @@ const { resolve, join } = await import("node:path");
 const { fileURLToPath } = await import("node:url");
 const assert = (await import("node:assert/strict")).default;
 const root = resolve(fileURLToPath(new URL("..", import.meta.url))),
-  profilePath = join(root, "tests/fixtures/backup/baseline-32-catalog.json");
+  profilePath = join(root, "tests/fixtures/backup/current-39-catalog.json");
 if (
   process.argv.length > 3 ||
   (process.argv[2] && process.argv[2] !== "--emit-catalog")
@@ -152,7 +152,7 @@ try {
       flag: "wx",
       mode: 0o644,
     });
-    done("emitted fresh known32 catalog metadata; no fixture data exported");
+    done("emitted fresh known39 catalog metadata; no fixture data exported");
   } else {
     const registered = JSON.parse(await readFile(profilePath, "utf8"));
     assert.deepEqual(profile, registered);

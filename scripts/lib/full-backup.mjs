@@ -139,16 +139,170 @@ export async function catalog(client) {
   const functions = (
     await query(
       client,
-      `SELECT n.nspname schema,p.proname name,pg_get_function_identity_arguments(p.oid) arguments,pg_get_userbyid(p.proowner) owner,p.prosecdef definer,p.proconfig settings,(SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN p.proacl IS NULL THEN acldefault('f',p.proowner) WHEN cardinality(p.proacl)>0 THEN p.proacl ELSE NULL END) x) acl,encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') definition FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' ORDER BY n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)`,
+      `SELECT n.nspname schema,p.proname name,pg_get_function_identity_arguments(p.oid) arguments,pg_get_userbyid(p.proowner) owner,p.prosecdef definer,p.proconfig settings,(SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN p.proacl IS NULL THEN acldefault('f',p.proowner) WHEN cardinality(p.proacl)>0 THEN p.proacl ELSE NULL END) x) acl,encode(sha256(convert_to(CASE WHEN p.prokind='a' THEN (SELECT (to_jsonb(a)-ARRAY['aggfnoid','aggtransfn','aggfinalfn','aggcombinefn','aggserialfn','aggdeserialfn','aggmtransfn','aggminvtransfn','aggmfinalfn','aggsortop','aggtranstype','aggmtranstype'] || jsonb_build_object('aggtransfn',a.aggtransfn::regprocedure::text,'aggfinalfn',a.aggfinalfn::regprocedure::text,'aggcombinefn',a.aggcombinefn::regprocedure::text,'aggserialfn',a.aggserialfn::regprocedure::text,'aggdeserialfn',a.aggdeserialfn::regprocedure::text,'aggmtransfn',a.aggmtransfn::regprocedure::text,'aggminvtransfn',a.aggminvtransfn::regprocedure::text,'aggmfinalfn',a.aggmfinalfn::regprocedure::text,'aggsortop',a.aggsortop::regoperator::text,'aggtranstype',a.aggtranstype::regtype::text,'aggmtranstype',a.aggmtranstype::regtype::text))::text FROM pg_aggregate a WHERE a.aggfnoid=p.oid) ELSE pg_get_functiondef(p.oid) END,'UTF8')),'hex') definition FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' ORDER BY n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)`,
     )
   ).rows;
-  return { tables, functions };
+  // Security catalog: bindings and privileges, not only definitions. Every
+  // identity below is textual so the pinned schema installed into another
+  // database compares equal; OIDs never enter the catalog.
+  const schemas = (
+    await query(
+      client,
+      `SELECT n.nspname name,pg_get_userbyid(n.nspowner) owner,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN n.nspacl IS NULL THEN acldefault('n',n.nspowner) WHEN cardinality(n.nspacl)>0 THEN n.nspacl ELSE NULL END) x) acl
+    FROM pg_namespace n WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema' ORDER BY n.nspname`,
+    )
+  ).rows;
+  // Internal (FK/RI) triggers carry a constraint OID in their name, which is
+  // not stable across databases. Capture the stable constraint name plus a
+  // suffix-stripped trigger name, function and enabled state instead, so
+  // disabling an FK enforcement trigger changes the catalog.
+  const triggers = (
+    await query(
+      client,
+      `SELECT n.nspname schema,c.relname table_,regexp_replace(t.tgname,'_[0-9]+$','') name,t.tgisinternal internal,t.tgenabled enabled,t.tgdeferrable deferrable,t.tginitdeferred initially_deferred,t.tgfoid::regprocedure::text function_name,k.conname constraint_name,pg_get_triggerdef(t.oid,true) definition
+    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_constraint k ON k.oid=t.tgconstraint
+    WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema'
+    ORDER BY n.nspname,c.relname,regexp_replace(t.tgname,'_[0-9]+$',''),coalesce(k.conname,''),t.tgfoid::regprocedure::text,t.tgtype,coalesce((SELECT n2.nspname||'.'||c2.relname FROM pg_class c2 JOIN pg_namespace n2 ON n2.oid=c2.relnamespace WHERE c2.oid=k.conrelid),''),coalesce((SELECT n2.nspname||'.'||c2.relname FROM pg_class c2 JOIN pg_namespace n2 ON n2.oid=c2.relnamespace WHERE c2.oid=k.confrelid),'')`,
+    )
+  ).rows;
+  // pg_get_triggerdef embeds the unstable RI OID suffix above; normalize it
+  // the same way as the captured name before hashing into the fixture.
+  for (const trigger of triggers)
+    if (trigger.definition)
+      trigger.definition = trigger.definition.replace(
+        /RI_ConstraintTrigger_([ac])_[0-9]+/g,
+        "RI_ConstraintTrigger_$1",
+      );
+  const indexes = (
+    await query(
+      client,
+      `SELECT n.nspname schema,t.relname table_,c.relname name,pg_get_userbyid(c.relowner) owner,pg_get_indexdef(c.oid) definition,c.reloptions options,
+    i.indisunique is_unique,i.indisprimary is_primary,i.indisexclusion is_exclusion,i.indimmediate is_immediate,i.indisclustered is_clustered,i.indisvalid is_valid,i.indisready is_ready,i.indislive is_live,i.indisreplident is_replica_identity,i.indnullsnotdistinct nulls_not_distinct
+    FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema' ORDER BY n.nspname,t.relname,c.relname`,
+    )
+  ).rows;
+  const views = (
+    await query(
+      client,
+      `SELECT n.nspname schema,c.relname name,c.relkind kind,pg_get_userbyid(c.relowner) owner,c.reloptions options,pg_get_viewdef(c.oid,true) definition,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN c.relacl IS NULL THEN acldefault('r',c.relowner) WHEN cardinality(c.relacl)>0 THEN c.relacl ELSE NULL END) x) acl,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('name',a.attname,'type',format_type(a.atttypid,a.atttypmod),'acl',(SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN cardinality(a.attacl)>0 THEN a.attacl ELSE NULL END) x)) ORDER BY a.attnum),'[]') FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) columns
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN('v','m') AND left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema' ORDER BY n.nspname,c.relname`,
+    )
+  ).rows;
+  const sequences = (
+    await query(
+      client,
+      `SELECT n.nspname schema,c.relname name,pg_get_userbyid(c.relowner) owner,format_type(s.seqtypid,NULL) type,s.seqstart::text start,s.seqincrement::text increment,s.seqmax::text maximum,s.seqmin::text minimum,s.seqcache::text cache,s.seqcycle cycle,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN c.relacl IS NULL THEN acldefault('S',c.relowner) WHEN cardinality(c.relacl)>0 THEN c.relacl ELSE NULL END) x) acl,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('schema',pn.nspname,'table',parent.relname,'column',a.attname,'dependency',d.deptype) ORDER BY pn.nspname,parent.relname,a.attname,d.deptype),'[]') FROM pg_depend d JOIN pg_class parent ON parent.oid=d.refobjid JOIN pg_namespace pn ON pn.oid=parent.relnamespace LEFT JOIN pg_attribute a ON a.attrelid=parent.oid AND a.attnum=d.refobjsubid WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i')) owned_by
+    FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema' ORDER BY n.nspname,c.relname`,
+    )
+  ).rows;
+  const types = (
+    await query(
+      client,
+      `SELECT n.nspname schema,t.typname name,t.typtype kind,pg_get_userbyid(t.typowner) owner,format_type(t.oid,NULL) type,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,'grantor',pg_get_userbyid(x.grantor),'privilege',x.privilege_type,'grantable',x.is_grantable) ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,x.privilege_type),'[]') FROM aclexplode(CASE WHEN t.typacl IS NULL THEN acldefault('t',t.typowner) WHEN cardinality(t.typacl)>0 THEN t.typacl ELSE NULL END) x) acl,
+    (SELECT coalesce(jsonb_agg(e.enumlabel ORDER BY e.enumsortorder),'[]') FROM pg_enum e WHERE e.enumtypid=t.oid) labels,
+    CASE WHEN t.typtype='d' THEN format_type(t.typbasetype,t.typtypmod) END base_type,
+    (SELECT coalesce(jsonb_agg(pg_get_constraintdef(c.oid,true) ORDER BY c.conname),'[]') FROM pg_constraint c WHERE c.contypid=t.oid) domain_constraints
+    FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+    WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema' AND t.typtype IN('e','d','r','m') ORDER BY n.nspname,t.typname`,
+    )
+  ).rows;
+  const extensions = (
+    await query(
+      client,
+      `SELECT e.extname name,n.nspname schema,pg_get_userbyid(e.extowner) owner,e.extversion version,e.extrelocatable relocatable
+    FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace ORDER BY e.extname`,
+    )
+  ).rows;
+  const foreignTables = (
+    await query(
+      client,
+      `SELECT n.nspname schema,c.relname name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='f' AND left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema' ORDER BY n.nspname,c.relname`,
+    )
+  ).rows;
+  const principals = new Set([
+    "postgres",
+    "lyraseo_runtime",
+    "lyraseo_identity",
+    "lyraseo_artifact_maintenance",
+  ]);
+  const gather = (entry) => {
+    if (typeof entry.owner === "string") principals.add(entry.owner);
+    for (const a of entry.acl ?? []) {
+      if (a.grantee !== "PUBLIC") principals.add(a.grantee);
+      if (a.grantor !== "PUBLIC") principals.add(a.grantor);
+    }
+  };
+  for (const entry of [
+    ...schemas,
+    ...tables,
+    ...functions,
+    ...views,
+    ...sequences,
+    ...types,
+    ...extensions,
+  ])
+    gather(entry);
+  for (const view of views)
+    for (const column of view.columns ?? []) gather(column);
+  for (const table of tables) {
+    for (const column of table.columns) gather(column);
+    for (const policy of table.policies)
+      for (const role of policy.roles ?? [])
+        if (role !== "PUBLIC") principals.add(role);
+  }
+  const closure = `WITH RECURSIVE reachable(oid) AS (
+    SELECT oid FROM pg_roles WHERE rolname = ANY($1::text[])
+    UNION SELECT CASE WHEN m.roleid=r.oid THEN m.member ELSE m.roleid END
+      FROM reachable r JOIN pg_auth_members m ON m.roleid=r.oid OR m.member=r.oid
+  )`;
+  const roots = [
+    [...principals].filter((name) => typeof name === "string").sort(),
+  ];
+  const roles = (
+    await query(
+      client,
+      `${closure} SELECT r.rolname name,r.rolsuper superuser,r.rolinherit inherit,r.rolcreaterole create_role,r.rolcreatedb create_database,r.rolcanlogin login,r.rolreplication replication,r.rolbypassrls bypass_rls,r.rolconnlimit connection_limit,r.rolvaliduntil::text valid_until,r.rolconfig config FROM pg_roles r JOIN reachable q ON q.oid=r.oid ORDER BY r.rolname`,
+      roots,
+    )
+  ).rows;
+  const memberships = (
+    await query(
+      client,
+      `${closure} SELECT granted.rolname role,member.rolname member,grantor.rolname grantor,m.admin_option,m.inherit_option,m.set_option
+    FROM pg_auth_members m JOIN reachable q ON q.oid=m.roleid JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member JOIN pg_roles grantor ON grantor.oid=m.grantor ORDER BY granted.rolname,member.rolname,grantor.rolname`,
+      roots,
+    )
+  ).rows;
+  return {
+    tables,
+    functions,
+    schemas,
+    triggers,
+    indexes,
+    views,
+    sequences,
+    types,
+    extensions,
+    foreignTables,
+    roles,
+    memberships,
+  };
 }
-export async function createLocalBackupLab({ onDatabaseStage } = {}) {
+export async function createLocalBackupLab({
+  onDatabaseStage,
+  profile = "assembled",
+} = {}) {
   if (onDatabaseStage !== undefined && typeof onDatabaseStage !== "function")
     throw issue("INVALID_LOCAL_BACKUP_OBSERVER");
   // Qualify and retain the exact migration bytes before any Docker/DB operation.
-  const plan = preparePrivacyMigrationPlan(root, { profile: "historical" });
+  const plan = preparePrivacyMigrationPlan(root, { profile });
   const inspect = JSON.parse(
     (
       await new Promise((resolve_, reject) => {
@@ -552,6 +706,10 @@ function differences(a, b, path = "", out = []) {
   return out;
 }
 function supported(actual, profile) {
+  if (actual.foreignTables?.length)
+    throw issue("MISSING_FULL_BACKUP_FOREIGN_TABLE_ADAPTER", {
+      tables: actual.foreignTables,
+    });
   const missing = actual.tables
     .filter(
       (table) => !fullBackupKnownTables.has(table.schema + "." + table.name),
@@ -673,7 +831,7 @@ export async function createFullBackup(
     await writePrivate(join(point, "artifacts.enc"), artifactCipher);
     const manifest = {
       version: 1,
-      profile: "LOCAL_FULL_LOGICAL_32_V1",
+      profile: "LOCAL_FULL_LOGICAL_39_V1",
       adapter: FULL_BACKUP_ADAPTER,
       id,
       createdAt,
@@ -756,7 +914,7 @@ export async function verifyFullBackup(point, keyset) {
     !/^[a-f0-9]{64}$/.test(mac ?? "") ||
     !timingSafeEqual(actual, Buffer.from(mac, "hex")) ||
     manifest.id !== point.id ||
-    manifest.profile !== "LOCAL_FULL_LOGICAL_32_V1" ||
+    manifest.profile !== "LOCAL_FULL_LOGICAL_39_V1" ||
     manifest.adapter !== FULL_BACKUP_ADAPTER
   )
     throw issue("FULL_BACKUP_MANIFEST_AUTHENTICATION_FAILED");
@@ -915,7 +1073,7 @@ export async function restoreFullBackup(
       ).rows[0].allowed;
       if (runtimeConnect) throw issue("RESTORE_RUNTIME_CONNECT_NOT_REVOKED");
       const restoreReceipt = {
-        profile: "LOCAL_FULL_LOGICAL_32_V1",
+        profile: "LOCAL_FULL_LOGICAL_39_V1",
         pointId: point.id,
         manifestHash: sha(canonical(verified.manifest)),
         sourceSnapshotAt: verified.manifest.snapshotAt,
@@ -977,7 +1135,7 @@ export async function restoreFullBackup(
         counts,
         blockers: projected.blockers,
         journal: trustedLatest,
-        profile: "LOCAL_FULL_LOGICAL_32_V1",
+        profile: "LOCAL_FULL_LOGICAL_39_V1",
         runtimeConnect: false,
         deletionAdmission: "UNQUALIFIED_DISABLED",
         replaySetup: "PRIVILEGED_SYNTHETIC_FIXTURE_ONLY",

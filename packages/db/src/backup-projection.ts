@@ -10,7 +10,7 @@ import {
 import { fingerprint } from "./audit-evidence";
 import { observedSlots, provenanceSummary } from "./visibility";
 import type { Brand } from "@lyraseo/visibility";
-export const FULL_BACKUP_ADAPTER = "BASELINE_27_32_V1";
+export const FULL_BACKUP_ADAPTER = "CURRENT_39_FULL_V1";
 export type BackupRow = { data: Record<string, unknown>; jsonNulls: string[] };
 export type BackupTables = Record<string, BackupRow[]>;
 export type SavedBackupArtifact = {
@@ -40,9 +40,13 @@ type Replay = {
 };
 type Scope = { workspaceId: string; siteId: string; deletedAt?: string };
 const publicNames =
-  "ProductUser ProviderIdentity Workspace Membership Site SiteGrant StaffGrant StepUpGrant BudgetPeriod Operation OutboxEvent UsageReceipt AuthThrottle ProductSession OperationQuote AuditRun AuditPage IssueAction SiteVerificationChallenge SiteContextRevision GoogleOAuthState GoogleConnection SearchSnapshot ContentDraft ContentRevision EvidenceReport VisibilityPanel VisibilityRun ApiToken ApiThrottle PageIdentity PageJournal AnalyticsOAuthState AnalyticsConnection AnalyticsImport SearchImport RuntimePolicy RuntimePolicyChange WorkDispatch InternalRequest AuditPageRetention ContentRevisionPin ArtifactBlob ArtifactRef AuditEvaluationScratch VisibilityRecording VisibilityObservationSlot ArtifactExpiryPlan ArtifactExpiryItem ArtifactExpiryEvent _prisma_migrations".split(
+  "ProductUser ProviderIdentity Workspace Membership Site SiteGrant StaffGrant StepUpGrant BudgetPeriod Operation OutboxEvent UsageReceipt AuthThrottle ProductSession OperationQuote AuditRun AuditPage IssueAction SiteVerificationChallenge SiteContextRevision GoogleOAuthState GoogleConnection SearchSnapshot ContentDraft ContentRevision EvidenceReport VisibilityPanel VisibilityRun ApiToken ApiThrottle PageIdentity PageJournal AnalyticsOAuthState AnalyticsConnection AnalyticsImport SearchImport RuntimePolicy RuntimePolicyChange WorkDispatch InternalRequest AuditPageRetention ContentRevisionPin ArtifactBlob ArtifactRef AuditEvaluationScratch VisibilityRecording VisibilityObservationSlot ArtifactExpiryPlan ArtifactExpiryItem ArtifactExpiryEvent _prisma_migrations AgencyBatchItem AgencyBatchQuote IssueAssignment IssueAssignmentEvent KeywordEnrichmentResult KeywordSelection WorkspaceAccessEvent WorkspaceBrandingRevision WorkspaceInvitation WorkspaceInvitationSite".split(
     " ",
   );
+// Current-schema (39-migration) adapter. Every relation present in the
+// assembled catalog is listed explicitly; unknown relations fail closed in
+// supported() (full-backup.mjs) and in projectBackupTables below. No table
+// is accepted by default.
 export const fullBackupKnownTables = new Set([
   ...publicNames.map((name) => "public." + name),
   "lyraseo_kernel.test_environment",
@@ -61,6 +65,76 @@ export const fullBackupKnownTables = new Set([
   "lyraseo_deletion.scope_case",
   "lyraseo_deletion.task",
   "lyraseo_deletion.event",
+  // lyraseo_billing: sandbox financial facts retained; bearer tokens,
+  // step-ups, leases and staff policy intents omitted (see below).
+  "lyraseo_billing.account",
+  "lyraseo_billing.action_request",
+  "lyraseo_billing.admission_binding",
+  "lyraseo_billing.base_slot",
+  "lyraseo_billing.binding",
+  "lyraseo_billing.canonical_rejection",
+  "lyraseo_billing.closed_job_request",
+  "lyraseo_billing.discovery",
+  "lyraseo_billing.economic_observation",
+  "lyraseo_billing.event",
+  "lyraseo_billing.event_route",
+  "lyraseo_billing.inbox",
+  "lyraseo_billing.intent",
+  "lyraseo_billing.job_allocation",
+  "lyraseo_billing.job_request",
+  "lyraseo_billing.job_test_session",
+  "lyraseo_billing.merchant",
+  "lyraseo_billing.money_fact",
+  "lyraseo_billing.policy_intent",
+  "lyraseo_billing.price_mapping",
+  "lyraseo_billing.recovery_case",
+  "lyraseo_billing.request_resolution",
+  "lyraseo_billing.retirement",
+  "lyraseo_billing.staff_capability",
+  "lyraseo_billing.staff_epoch",
+  "lyraseo_billing.staff_rate",
+  "lyraseo_billing.staff_receipt",
+  "lyraseo_billing.step_up",
+  "lyraseo_billing.subscription",
+  "lyraseo_billing.transition",
+  // lyraseo_handoff: outbound secrets revoked, dispatches suppressed.
+  "lyraseo_handoff.destination",
+  "lyraseo_handoff.dispatch",
+  "lyraseo_handoff.dispatch_attempt",
+  "lyraseo_handoff.dispatch_policy",
+  "lyraseo_handoff.dispatch_policy_history",
+  "lyraseo_handoff.egress_hour",
+  "lyraseo_handoff.fixture_environment",
+  "lyraseo_handoff.intent",
+  "lyraseo_handoff.receipt",
+  // lyraseo_ledger: financial attempt/settlement facts retained;
+  // fixture environment omitted.
+  "lyraseo_ledger.adjustment",
+  "lyraseo_ledger.attempt",
+  "lyraseo_ledger.attempt_event",
+  "lyraseo_ledger.budget_pause",
+  "lyraseo_ledger.environment",
+  "lyraseo_ledger.managed_operation",
+  "lyraseo_ledger.qualification",
+  "lyraseo_ledger.reconciliation",
+  "lyraseo_ledger.settlement",
+  // Test-only legacy transition stores: catalogued, never restored with data.
+  "lyraseo_legacy_inline.environment",
+  "lyraseo_legacy_inline.event",
+  "lyraseo_legacy_inline.permit",
+  "lyraseo_legacy_inline.plan",
+  "lyraseo_legacy_visibility.authorization",
+  "lyraseo_legacy_visibility.enrollment",
+  "lyraseo_legacy_visibility.event",
+  "lyraseo_legacy_visibility.fixture_clock",
+  "lyraseo_legacy_visibility.item",
+  "lyraseo_legacy_visibility.plan",
+  "lyraseo_legacy_visibility.retry",
+  "lyraseo_legacy_visibility.scope",
+  "lyraseo_observation_binding.fixture_attempt",
+  // Saved-evidence withdrawal receipts.
+  "lyraseo_report.decision",
+  "lyraseo_report.environment",
 ]);
 export const fullBackupOmittedTables = new Set([
   "public.ProductSession",
@@ -84,6 +158,40 @@ export const fullBackupOmittedTables = new Set([
   "lyraseo_origin.source_store_key",
   "lyraseo_origin.store_namespace",
   "lyraseo_origin.blob_store_binding",
+  // Bearer/step-up/session replay material and one-use staff intents.
+  // Parent rows for retained financial facts are never in this set.
+  "lyraseo_billing.action_request",
+  "lyraseo_billing.job_request",
+  "lyraseo_billing.step_up",
+  "lyraseo_billing.job_test_session",
+  "lyraseo_billing.closed_job_request",
+  "lyraseo_billing.request_resolution",
+  "lyraseo_billing.policy_intent",
+  "lyraseo_billing.inbox",
+  "lyraseo_billing.discovery",
+  "lyraseo_billing.staff_rate",
+  // Fixture-only binding and dispatch replay keys.
+  "lyraseo_handoff.fixture_environment",
+  "lyraseo_handoff.dispatch_attempt",
+  "lyraseo_ledger.environment",
+  "lyraseo_observation_binding.fixture_attempt",
+  // Test-only legacy transition stores (LOCAL_TEST_ONLY): no dataset rows.
+  "lyraseo_legacy_inline.environment",
+  "lyraseo_legacy_inline.plan",
+  "lyraseo_legacy_inline.event",
+  "lyraseo_legacy_inline.permit",
+  "lyraseo_legacy_visibility.scope",
+  "lyraseo_legacy_visibility.enrollment",
+  "lyraseo_legacy_visibility.plan",
+  "lyraseo_legacy_visibility.item",
+  "lyraseo_legacy_visibility.fixture_clock",
+  "lyraseo_legacy_visibility.retry",
+  "lyraseo_legacy_visibility.authorization",
+  "lyraseo_legacy_visibility.event",
+  "lyraseo_report.environment",
+  // Time-bound invitation bearers (hashes of usable invite tokens).
+  "public.WorkspaceInvitation",
+  "public.WorkspaceInvitationSite",
 ]);
 const digest = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
@@ -192,6 +300,33 @@ export function projectBackupTables(
   const removedHistoryPlans = new Set(
     source("lyraseo_history.plan")
       .filter((row) => erased(row.workspace_id, row.site_id))
+      .map((row) => row.id),
+  );
+  // Handoff intents and agency quotes are removed with their scope; their
+  // children (receipt, dispatch, batch items) carry only the parent id, so
+  // they must be resolved against the same removal set or FK validation
+  // rejects the replay.
+  const removedHandoffIntents = new Set(
+    source("lyraseo_handoff.intent")
+      .filter((row) => erased(row.workspace_id, row.site_id))
+      .map((row) => row.id),
+  );
+  const expiredAgencyQuotes = new Set(
+    source("public.AgencyBatchQuote")
+      .filter(
+        (row) =>
+          Number.isFinite(atTime(row.expiresAt)) && atTime(row.expiresAt) <= at,
+      )
+      .map((row) => row.id),
+  );
+  const expiredKeywordSelections = new Set(
+    source("public.KeywordSelection")
+      .filter(
+        (row) =>
+          erased(row.workspaceId, row.siteId) ||
+          (Number.isFinite(atTime(row.resultExpiresAt)) &&
+            atTime(row.resultExpiresAt) <= at),
+      )
       .map((row) => row.id),
   );
   const pins = source("public.ContentRevisionPin");
@@ -310,9 +445,13 @@ export function projectBackupTables(
         row.provenance = compactReceipt(row.provenance);
       } else if (
         table === "public.AuditPageRetention" ||
-        table === "public.IssueAction"
+        table === "public.IssueAction" ||
+        table === "public.IssueAssignment" ||
+        table === "public.IssueAssignmentEvent"
       )
-        omit = expiredOrDeletedAudit.has(row.auditId);
+        omit =
+          expiredOrDeletedAudit.has(row.auditId) ||
+          erased(row.workspaceId, row.siteId);
       else if (table === "public.ContentDraft") {
         omit = removedDrafts.has(row.id);
         row.snapshot = projectSnapshot(row.snapshot);
@@ -415,17 +554,34 @@ export function projectBackupTables(
       } else if (
         table === "public.SearchSnapshot" ||
         table === "public.SearchImport" ||
-        table === "public.AnalyticsImport"
+        table === "public.AnalyticsImport" ||
+        table === "public.KeywordEnrichmentResult" ||
+        table === "public.KeywordSelection"
       ) {
         omit =
           erased(row.workspaceId, row.siteId) ||
+          (table === "public.KeywordSelection" &&
+            expiredKeywordSelections.has(row.id)) ||
+          (table === "public.KeywordEnrichmentResult" &&
+            expiredKeywordSelections.has(row.selectionId)) ||
           (Number.isFinite(atTime(row.resultExpiresAt)) &&
             atTime(row.resultExpiresAt) <= at);
+        if (table === "public.KeywordSelection") jsonNull("request");
         if (row.status === "running") {
           row.status = "failed";
           row.failure = "RESTORE_REQUIRES_EXPLICIT_REFRESH";
         }
         if (table === "public.AnalyticsImport") row.diagnostics = {};
+      } else if (table === "public.AgencyBatchQuote") {
+        omit = expiredAgencyQuotes.has(row.id);
+        // Executable preview input and one-use confirmation bearer.
+        jsonNull("requestInput");
+        row.confirmationKey = null;
+        row.confirmedAt = null;
+      } else if (table === "public.AgencyBatchItem") {
+        omit =
+          expiredAgencyQuotes.has(row.batchQuoteId) ||
+          erased(row.workspaceId, row.siteId);
       } else if (table === "lyraseo_history.environment") row.enabled = false;
       else if (table === "lyraseo_history.plan") {
         omit = erased(row.workspace_id, row.site_id);
@@ -444,8 +600,90 @@ export function projectBackupTables(
       } else if (table === "public.ArtifactExpiryEvent")
         omit = removedExpiryPlans.has(row.planId);
       else if (table === "public._prisma_migrations") row.logs = null;
-      else if ("workspaceId" in row && "siteId" in row)
+      // Outbound handoff: secrets are revoked (CHECK requires null ciphers
+      // for REVOKED), in-flight intents are cancelled, dispatches suppressed.
+      else if (table === "lyraseo_handoff.destination") {
+        omit = erased(row.workspace_id, row.site_id);
+        row.status = "REVOKED";
+        row.secret_cipher = null;
+        row.previous_cipher = null;
+        row.previous_key_id = null;
+        row.previous_until = null;
+        row.key_id = null;
+      } else if (table === "lyraseo_handoff.intent") {
+        omit = erased(row.workspace_id, row.site_id);
+        if (
+          row.state === "PREPARED" ||
+          row.state === "SENDING" ||
+          row.state === "RETRY"
+        )
+          row.state = "CANCELLED";
+        row.lease_until = null;
+        row.next_due_at = options.at;
+      } else if (table === "lyraseo_handoff.receipt") {
+        omit = removedHandoffIntents.has(row.intent_id);
+      } else if (table === "lyraseo_handoff.dispatch") {
+        omit = removedHandoffIntents.has(row.intent_id);
+        row.state = "SUPPRESSED";
+        row.claim_token = null;
+        row.lease_until = null;
+        row.next_due = null;
+      } else if (table === "lyraseo_handoff.dispatch_policy") {
+        if (row.enabled === true) {
+          row.enabled = false;
+          row.revision = Number(row.revision) + 1;
+          row.changed_at = options.at;
+          (tables["lyraseo_handoff.dispatch_policy_history"] ??= []).push({
+            data: {
+              revision: row.revision,
+              enabled: false,
+              operator_id: "LOCAL_BACKUP_RESTORE_V1",
+              changed_at: options.at,
+            },
+            jsonNulls: [],
+          });
+        }
+      } else if (table === "lyraseo_handoff.egress_hour") {
+        omit = erased(row.workspace_id, row.site_id);
+      }
+      // Sandbox billing: financial facts are retained; entitlements,
+      // merchants and staff authority are disabled.
+      else if (table === "lyraseo_billing.merchant") row.enabled = false;
+      else if (table === "lyraseo_billing.subscription") {
+        row.sandbox_entitled = false;
+        row.production_entitled = false;
+      } else if (table === "lyraseo_billing.staff_capability") {
+        if (row.enabled === true) {
+          row.enabled = false;
+          row.revision = Number(row.revision) + 1;
+        }
+      } else if (table === "lyraseo_billing.staff_epoch") {
+        if (options.phase === "RESTORE")
+          row.revision = Number(row.revision) + 1;
+      } else if (table === "lyraseo_billing.recovery_case") {
+        if (row.state === "VERIFYING" || row.state === "HOLD")
+          row.state = "DENIED";
+      }
+      // Managed ledger: paused, leases cleared; attempt/settlement facts kept.
+      else if (table === "lyraseo_ledger.managed_operation") row.paused = true;
+      else if (table === "lyraseo_ledger.reconciliation") {
+        row.lease_until = null;
+        row.next_attempt_at = null;
+      } else if (table === "lyraseo_ledger.qualification") {
+        row.live_enabled = false;
+        if (row.revoked_at === null || row.revoked_at === undefined)
+          row.revoked_at = options.at;
+      }
+      // Saved-evidence withdrawal receipts: scope- and expiry-withdrawn.
+      else if (table === "lyraseo_report.decision") {
+        omit =
+          erased(row.workspace_id, row.site_id) ||
+          (Number.isFinite(atTime(row.receipt_expires_at)) &&
+            atTime(row.receipt_expires_at) <= at);
+      } else if ("workspaceId" in row && "siteId" in row)
         omit = erased(row.workspaceId, row.siteId);
+      else if ("workspace_id" in row && "site_id" in row)
+        omit = erased(row.workspace_id, row.site_id);
       // Logical row withdrawal must not lose SQL-NULL vs JSON-null domains.
       if (omit) {
         redactions.push({
