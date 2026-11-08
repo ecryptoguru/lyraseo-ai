@@ -90,17 +90,27 @@ async function result(work: () => Promise<unknown>) {
     const code = error instanceof Error ? error.message : "";
     return {
       isError: true,
+      ...(code === "LEGACY_EVIDENCE_WITHHELD"
+        ? {
+            structuredContent: {
+              data: null,
+              error: { code: "LEGACY_EVIDENCE_WITHHELD", retryable: false },
+            },
+          }
+        : {}),
       content: [
         {
           type: "text" as const,
           text:
             code === "RESPONSE_TOO_LARGE"
               ? "Result exceeds the response limit. Reduce limit and read a smaller page."
-              : code === "SOURCE_EXPIRED"
-                ? "This saved evidence has expired."
-                : code === "AUDIT_INCOMPLETE"
-                  ? "A comparison requires two completed saved audits from this site."
-                  : "Resource unavailable. Check the selected site, token scope and current issuer access.",
+              : code === "LEGACY_EVIDENCE_WITHHELD"
+                ? "Historical evidence is withheld pending source-lineage verification."
+                : code === "SOURCE_EXPIRED"
+                  ? "This saved evidence has expired."
+                  : code === "AUDIT_INCOMPLETE"
+                    ? "A comparison requires two completed saved audits from this site."
+                    : "Resource unavailable. Check the selected site, token scope and current issuer access.",
         },
       ],
     };
@@ -184,6 +194,7 @@ export function createReadOnlyMcpServer(db: PrismaClient, actor: TokenActor) {
           completedAt: a.completedAt,
           profile: a.profile,
           methodologyVersion: a.methodologyVersion,
+          evidenceStatus: a.evidenceStatus,
           evaluation: e
             ? {
                 score: e.score,
@@ -212,6 +223,8 @@ export function createReadOnlyMcpServer(db: PrismaClient, actor: TokenActor) {
     ({ siteId, auditId, offset, limit }) =>
       result(async () => {
         const a = await readAuditRun(db, actor, { ...scope(siteId), auditId });
+        if (a.evidenceStatus === "legacy-lineage-withheld")
+          throw new Error("LEGACY_EVIDENCE_WITHHELD");
         const evaluation = a.evaluation as unknown as AuditEvaluation | null;
         return {
           auditId,
@@ -272,6 +285,7 @@ export function createReadOnlyMcpServer(db: PrismaClient, actor: TokenActor) {
         const search = await readGoogleSearch(db, actor, scope(siteId));
         return {
           coverage: search.coverage,
+          auditEvidenceStatus: search.auditEvidenceStatus,
           ...page(search.opportunities, offset, limit),
         };
       }),

@@ -27,6 +27,8 @@ export default async function Workspaces({
     query = await searchParams;
   const selected =
     workspaces.find((w) => w.id === query.workspace) ?? workspaces[0];
+  if (selected?.role === "VIEWER")
+    redirect(`/app/client?workspaceId=${encodeURIComponent(selected.id)}`);
   const sites = selected ? await listSites(database(), actor, selected.id) : [];
   const budgets = await budgetSnapshot(database(), actor);
   return (
@@ -83,6 +85,18 @@ export default async function Workspaces({
         {selected && (
           <>
             <h3>Sites in {selected.name}</h3>
+            <Link
+              href={`/app/agency?workspaceId=${encodeURIComponent(selected.id)}`}
+            >
+              Agency portfolio
+            </Link>
+            {["OWNER", "ADMIN"].includes(selected.role) && (
+              <Link
+                href={`/app/team?workspaceId=${encodeURIComponent(selected.id)}`}
+              >
+                Team and site access
+              </Link>
+            )}
             {!capabilityEnabled("context") && (
               <p className="notice">
                 Site creation and context changes are paused. Saved sites and

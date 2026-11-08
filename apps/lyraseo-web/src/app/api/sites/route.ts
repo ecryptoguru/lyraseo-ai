@@ -47,8 +47,20 @@ const command = z.discriminatedUnion("action", [
     })
     .strict(),
 ]);
+function localProofEnabled(origin: string) {
+  return (
+    process.env.LYRA_LOCAL_RAW_AUDITS === "true" &&
+    process.env.VERCEL !== "1" &&
+    ["localhost", "127.0.0.1"].includes(new URL(origin).hostname)
+  );
+}
 function failure(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (["CAPABILITY_PAUSED", "SITE_PROOF_UNAVAILABLE"].includes(code))
+    return Response.json(
+      { error: "Site proof acquisition is currently unavailable." },
+      { status: 503, headers },
+    );
   if (["FORBIDDEN", "NOT_FOUND"].includes(code))
     return Response.json(
       { error: "Site access is unavailable." },
@@ -120,13 +132,7 @@ export async function POST(request: Request) {
           { headers },
         );
       case "verify":
-        if (
-          process.env.LYRA_LOCAL_RAW_AUDITS !== "true" ||
-          process.env.VERCEL === "1" ||
-          !["localhost", "127.0.0.1"].includes(
-            new URL(settings.origin).hostname,
-          )
-        )
+        if (!localProofEnabled(settings.origin))
           return Response.json(
             {
               error:
@@ -140,6 +146,17 @@ export async function POST(request: Request) {
           scope.parse(input),
           input.challengeId,
           observeSiteProof,
+          async () => {
+            if (capabilityPause("audits")) throw new Error("CAPABILITY_PAUSED");
+            const current = authSettings();
+            if (
+              !current ||
+              !localProofEnabled(current.origin) ||
+              current.origin !== settings.origin
+            )
+              throw new Error("SITE_PROOF_UNAVAILABLE");
+            return resolveActor();
+          },
         );
         return Response.json({ ok: true }, { headers });
       case "context":

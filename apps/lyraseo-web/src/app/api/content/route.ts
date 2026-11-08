@@ -3,6 +3,7 @@ import { z } from "zod";
 import { database, resolveActor } from "@/server/auth/server";
 import {
   createContentDraft,
+  previewEditorialAssistance,
   saveContentDraft,
   readContentDrafts,
   setRevisionPin,
@@ -32,7 +33,19 @@ const fields = {
 const command = z.discriminatedUnion("action", [
   scopeSchema
     .extend({
+      action: z.literal("assist"),
+      kind: z.enum(["brief", "draft"]),
+      ...selectionSchema,
+    })
+    .strict(),
+  scopeSchema
+    .extend({
       action: z.literal("create"),
+      expectedContextRevisionId: z.string().min(1).max(128).optional(),
+      expectedEvidenceFingerprint: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
       kind: z.enum(["brief", "draft"]),
       ...fields,
       ...selectionSchema,
@@ -90,6 +103,20 @@ export async function POST(request: Request) {
     const paused = capabilityPause("content");
     if (paused) return paused;
 
+    if (input.action === "assist")
+      return Response.json(
+        await previewEditorialAssistance(
+          database(),
+          actor,
+          scopeSchema.parse(input),
+          {
+            kind: input.kind,
+            auditIds: input.auditIds,
+            searchSnapshotIds: input.searchSnapshotIds,
+          },
+        ),
+        { headers: privateHeaders },
+      );
     if (input.action === "generate") {
       // No provider submission path exists until credentials, verified tariffs, and complete-job quotes are configured.
       await readContentDrafts(database(), actor, scopeSchema.parse(input));
@@ -121,6 +148,8 @@ export async function POST(request: Request) {
             scopeSchema.parse(input),
             {
               kind: input.kind,
+              expectedContextRevisionId: input.expectedContextRevisionId,
+              expectedEvidenceFingerprint: input.expectedEvidenceFingerprint,
               title: input.title,
               body: input.body,
               assumptions: input.assumptions,

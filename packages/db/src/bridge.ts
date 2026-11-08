@@ -124,6 +124,96 @@ export function runBridgeControl(
   });
 }
 /** Explicit restricted connection only. Private proof never enters HTTP/logging. */
+export type HandoffBinding = {
+  url: string;
+  connectionUrl: string;
+  generation: number;
+  body: string;
+  bodyHash: string;
+  kind: "WORDPRESS" | "WEBHOOK";
+  eventId: string | null;
+  cipher: string;
+  keyId: string | null;
+  previousCipher: string | null;
+  previousKeyId: string | null;
+  workspaceId: string;
+  siteId: string;
+};
+type HandoffAttempt =
+  | { disposition: "ADMITTED"; proof: string; kind: "WORDPRESS" | "WEBHOOK" }
+  | { disposition: "COMPLETED" | "IN_PROGRESS" | "STALE" };
+
+// Called only by the separately enrolled fixture runtime. The database resolves
+// the opaque queue reference; neither the carrier nor the request chooses a URL.
+export function resolveHandoff(
+  db: PrismaClient,
+  workId: string,
+  generation: number,
+  deadline: Date,
+) {
+  return inTime(db, deadline, async (tx) => {
+    const [row] = await tx.$queryRaw<
+      { found: boolean }[]
+    >`SELECT lyraseo_handoff.resolve_delivery(${workId}::uuid,${generation}::integer) AS found`;
+    return row!.found;
+  });
+}
+export function admitHandoff(
+  db: PrismaClient,
+  r: KernelRequest,
+  deadline: Date,
+  check: () => void,
+) {
+  return inTime(db, deadline, async (tx) => {
+    check();
+    const [row] = await tx.$queryRaw<
+      { result: HandoffAttempt }[]
+    >`SELECT lyraseo_handoff.admit_step(${r.requestId}::uuid,${r.audience},'/api/internal/runtime/step',${r.rawBody},${r.issuedAt}::timestamptz,${r.expiresAt}::timestamptz,${deadline}::timestamptz) AS result`;
+    check();
+    return row!.result;
+  });
+}
+export function checkHandoff(
+  db: PrismaClient,
+  rid: string,
+  proof: string,
+  deadline: Date,
+) {
+  return inTime(
+    db,
+    deadline,
+    async (tx) => {
+      const [row] = await tx.$queryRaw<
+        { result: HandoffBinding }[]
+      >`SELECT lyraseo_handoff.check_step(${rid}::uuid,${proof}) AS result`;
+      return row!.result;
+    },
+    { maxWait: 400, timeout: 600, statement: 450 },
+  );
+}
+export function finishHandoff(
+  db: PrismaClient,
+  rid: string,
+  proof: string,
+  receipt: {
+    outcome: string;
+    status: number | null;
+    code: string;
+    remote: number | null;
+    editor: string | null;
+  },
+  deadline: Date,
+  check: () => void,
+) {
+  return inTime(db, deadline, async (tx) => {
+    check();
+    const [row] = await tx.$queryRaw<
+      { result: { disposition: "COMPLETED" } }[]
+    >`SELECT lyraseo_handoff.finish_step(${rid}::uuid,${proof},${receipt.outcome},${receipt.status}::integer,${receipt.code},${receipt.remote}::bigint,${receipt.editor}) AS result`;
+    check();
+    return row!.result;
+  });
+}
 export async function admitStep(
   db: PrismaClient,
   r: KernelRequest,

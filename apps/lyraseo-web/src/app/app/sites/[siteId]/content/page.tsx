@@ -45,6 +45,11 @@ export default async function ContentPage({
         <h1>Content and private reports</h1>
         <p>{site.origin}</p>
       </header>
+      <Link
+        href={`/app/sites/${encodeURIComponent(siteId)}/handoffs?workspaceId=${encodeURIComponent(workspaceId)}`}
+      >
+        WordPress and webhook handoffs
+      </Link>
       <ContentWorkspace
         collectionEnabled={capabilityEnabled("content")}
         workspaceId={workspaceId}

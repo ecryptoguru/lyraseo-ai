@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import {
   EXTRACTION_VERSION,
   VISIBILITY_PROFILES,
+  observationCapabilities,
   validatePanel,
   extractBrands,
   summarizeAnswers,
@@ -15,7 +16,13 @@ import {
   type Answer,
 } from "@lyraseo/visibility";
 import type { PrismaClient, Prisma } from "../generated/client";
-import { withActor, authorizeSiteIn, type Actor } from "./context";
+import {
+  withActor,
+  authorizeSiteIn,
+  verifyActorIn,
+  type Actor,
+} from "./context";
+import { budgetSnapshotIn } from "./accounting";
 import type { SiteScope } from "./sites";
 import {
   recordPrivateObservation,
@@ -28,6 +35,7 @@ export const visibilityAvailability = {
   reason:
     "Provider evidence contracts are not qualified: Azure deployment tariffs and grounding bounds; DataForSEO Standard raw-answer rights, English/India settings and trial access must be verified. No paid executor is enabled.",
   profiles: VISIBILITY_PROFILES,
+  profileCapabilities: observationCapabilities(),
 };
 export async function createVisibilityPanel(
   db: PrismaClient,
@@ -100,6 +108,96 @@ export async function requestVisibilityRun(
     return visibilityAvailability;
   });
 }
+/** Scope and allowance only: no quote, reservation, dispatch, or provider call. */
+export async function previewVisibilityRun(
+  db: PrismaClient,
+  actor: Actor,
+  scope: SiteScope,
+  panelId: string,
+  profile: VisibilityProfile,
+  now = new Date(),
+) {
+  const s = { workspaceId: scope.workspaceId, siteId: scope.siteId };
+  if (!Number.isFinite(now.getTime()) || !VISIBILITY_PROFILES.includes(profile))
+    throw new Error("INVALID_PROFILE");
+  return withActor(db, actor, s.workspaceId, async (tx) => {
+    await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "run");
+    await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id=${s.workspaceId} FOR SHARE`;
+    await tx.$queryRaw`SELECT id FROM "Site" WHERE "workspaceId"=${s.workspaceId} AND id=${s.siteId} FOR SHARE`;
+    await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "run");
+    const panel = await tx.visibilityPanel.findFirst({
+      where: { ...s, id: panelId, reviewedAt: { not: null } },
+    });
+    if (!panel) throw new Error("REVIEWED_PANEL_REQUIRED");
+    const prompts = panel.prompts as unknown as Prompt[];
+    validatePanel(prompts, panel.brands as unknown as Brand[]);
+    const budgets = await budgetSnapshotIn(tx, actor, now);
+    await verifyActorIn(tx, actor, s.workspaceId);
+    const site = await authorizeSiteIn(
+      tx,
+      actor,
+      s.workspaceId,
+      s.siteId,
+      "run",
+    );
+    const buckets =
+      profile === "azure-sol-api"
+        ? { provider: "AZURE", observations: "API_OBSERVATION" }
+        : {
+            provider: "DATAFORSEO",
+            observations:
+              profile === "consumer-chatgpt"
+                ? "CHATGPT_OBSERVATION"
+                : "GEMINI_OBSERVATION",
+          };
+    const item = (bucket: string) => {
+      const row = budgets.find((value) => value.bucket === bucket);
+      if (!row) throw new Error("ALLOWANCE_UNAVAILABLE");
+      const available = row.limit.minus(row.spent).minus(row.reserved);
+      return {
+        bucket,
+        limit: row.limit.toString(),
+        spent: row.spent.toString(),
+        reserved: row.reserved.toString(),
+        remaining: available.isNegative() ? "0" : available.toString(),
+        overLimit: available.isNegative(),
+      };
+    };
+    const verifiedAt = site.verifiedAt?.getTime();
+    return {
+      available: false as const,
+      panel: {
+        id: panel.id,
+        version: panel.version,
+        promptCount: prompts.length,
+      },
+      requested: { profile, language: "en" as const, market: "IN" as const },
+      verification:
+        verifiedAt !== undefined &&
+        now.getTime() - verifiedAt <= 86400000 &&
+        verifiedAt <= now.getTime() + 30000
+          ? ("current" as const)
+          : ("required" as const),
+      incompatiblePromptIds:
+        profile === "azure-sol-api"
+          ? []
+          : prompts.filter((p) => p.text.length > 2000).map((p) => p.id),
+      quote: null,
+      maximumCost: null,
+      cacheStatus: "not-checked" as const,
+      allowance: {
+        asOf: now.toISOString(),
+        period: budgets[0]!.period,
+        combined: item("COMBINED"),
+        provider: item(buckets.provider),
+        observations: item(buckets.observations),
+      },
+      reasons: observationCapabilities().find(
+        (value) => value.profile === profile,
+      )!.reasons,
+    };
+  });
+}
 /** Trusted worker contract only; never mounted as a customer answer-upload endpoint.
  * A future paid worker must complete quoted/reserved/receipted/settled ledger admission before invoking this boundary. */
 export type ProviderEvidence = {
@@ -124,7 +222,7 @@ export type ProviderEvidence = {
     failureReason?: string;
   }[];
 };
-function provenanceSummary(value: unknown) {
+export function provenanceSummary(value: unknown) {
   const p = obj(value);
   const text = (v: unknown, max = 128) =>
     typeof v === "string" && v.length <= max ? v : undefined;
@@ -150,7 +248,7 @@ function provenanceSummary(value: unknown) {
     producerClass: text(p.producerClass),
   };
 }
-function observedSlots(value: unknown, brands: Brand[]) {
+export function observedSlots(value: unknown, brands: Brand[]) {
   if (!Array.isArray(value)) return [];
   const flag = (v: unknown) => (typeof v === "boolean" ? v : null);
   return value.map((v) => {
@@ -205,6 +303,9 @@ export async function recordVisibilityEvidence(
     return recordPrivateObservation(db, actor, s, panelId, evidence, recording);
   s = { workspaceId: s.workspaceId, siteId: s.siteId };
   return withActor(db, actor, s.workspaceId, async (tx) => {
+    // Match the legacy SQL fence order before admission and every retry.
+    await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id=${s.workspaceId} FOR SHARE`;
+    await tx.$queryRaw`SELECT id FROM "Site" WHERE "workspaceId"=${s.workspaceId} AND id=${s.siteId} FOR UPDATE`;
     await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "run");
     const panel = await tx.visibilityPanel.findFirst({
       where: { ...s, id: panelId, reviewedAt: { not: null } },
@@ -290,6 +391,7 @@ export async function recordVisibilityEvidence(
       )
       .digest("hex");
     return tx.visibilityRun.create({
+      select: { id: true, storageFormat: true },
       data: {
         ...s,
         panelId,
@@ -320,9 +422,39 @@ export async function readVisibility(
   s: SiteScope,
   runId?: string,
   now = new Date(),
+  revalidateActor?: () => Promise<Actor>,
 ) {
   s = { workspaceId: s.workspaceId, siteId: s.siteId };
-  return withEvidenceRead(db, actor, s, "read", undefined, async (tx) => {
+  actor = { ...actor };
+  if (runId && revalidateActor) {
+    const current = await revalidateActor();
+    if (
+      !current ||
+      current.userId !== actor.userId ||
+      current.sessionId !== actor.sessionId ||
+      current.securityVersion !== actor.securityVersion
+    )
+      throw new Error("FORBIDDEN");
+    actor = { ...current };
+  }
+  const read = async (tx: import("./context").Tx) => {
+    type Detail = {
+      state: string;
+      rawAnswers?: unknown;
+      representation?: string;
+      originalProviderWire?: boolean;
+      otherFieldResidual?: string;
+    };
+    const detailIn = async () => {
+      const [row] = await tx.$queryRaw<
+        { detail: Detail }[]
+      >`SELECT lyraseo_legacy_visibility.read_detail(${s.siteId},${runId!},${actor.securityVersion}::integer,${actor.sessionId}) AS detail`;
+      if (!row?.detail) throw new Error("NOT_FOUND");
+      if (row.detail.state === "result-expired")
+        throw new Error("SOURCE_EXPIRED");
+      return row.detail;
+    };
+    if (runId) await detailIn();
     const panels = await tx.visibilityPanel.findMany({
       where: s,
       orderBy: { version: "desc" },
@@ -340,9 +472,6 @@ export async function readVisibility(
         id: true,
         panelId: true,
         profile: true,
-        cohort: true,
-        provenance: true,
-        slots: true,
         createdAt: true,
         rawExpiresAt: true,
         storageFormat: true,
@@ -360,30 +489,32 @@ export async function readVisibility(
         where: { ...s, id: run.panelId },
       });
       const brands = (panel?.brands ?? []) as unknown as Brand[];
-      const raw =
-        runId && run.storageFormat === null && run.rawExpiresAt > now
-          ? await tx.visibilityRun.findFirst({
-              where: {
-                ...s,
-                id: run.id,
-                rawExpiresAt: { gt: now },
-                resultExpiresAt: { gt: now },
-              },
-              select: { rawAnswers: true },
-            })
-          : null;
-      const slots = observedSlots(run.slots, brands);
+      const [projection] = await tx.$queryRaw<
+        {
+          value: {
+            slots: unknown;
+            provenance: unknown;
+            measurementSafe: boolean;
+            cohort: string | null;
+          };
+        }[]
+      >`SELECT lyraseo_legacy_visibility.read_projection(${s.siteId},${run.id},${actor.securityVersion}::integer,${actor.sessionId}) AS value`;
+      if (!projection?.value) throw new Error("NOT_FOUND");
+      const slots = observedSlots(projection.value.slots, brands);
+      const provenance = provenanceSummary(projection.value.provenance);
       results.push({
         ...run,
+        cohort: projection.value.cohort,
         slots,
-        provenance: provenanceSummary(run.provenance),
-        summary: brands.length
-          ? summarizeAnswers(
-              slots,
-              brands.map((b) => b.id),
-            )
-          : null,
-        ...(runId ? { rawAnswers: raw?.rawAnswers ?? null } : {}),
+        provenance,
+        summary:
+          brands.length && projection.value.measurementSafe
+            ? summarizeAnswers(
+                slots,
+                brands.map((b) => b.id),
+              )
+            : null,
+        ...(runId ? { rawAnswers: null as unknown, rawState: "" } : {}),
         ...(runId && run.storageFormat === "OBSERVATION_PRIVATE_V1"
           ? {
               rawAvailability: await observationAvailabilityIn(
@@ -398,6 +529,24 @@ export async function readVisibility(
         rawExpired: run.rawExpiresAt <= now,
       });
     }
+    if (runId && results[0]) {
+      const detail = await detailIn();
+      Object.assign(results[0], {
+        rawAnswers: detail.rawAnswers ?? null,
+        rawState: detail.state,
+        rawExpired:
+          detail.state === "raw-expired" || detail.state === "raw-erased",
+        representation: detail.representation,
+        originalProviderWire: detail.originalProviderWire,
+        otherFieldResidual: detail.otherFieldResidual,
+      });
+    }
     return { panels, runs: results, availability: visibilityAvailability };
-  });
+  };
+  if (runId)
+    return withActor(db, actor, s.workspaceId, async (tx) => {
+      await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, "read");
+      return read(tx);
+    });
+  return withEvidenceRead(db, actor, s, "read", undefined, read);
 }

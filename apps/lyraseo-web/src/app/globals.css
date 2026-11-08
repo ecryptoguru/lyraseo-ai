@@ -2675,6 +2675,22 @@ a.data-row:hover strong {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+.audit-discovery {
+  display: grid;
+  gap: 0.5rem;
+  min-inline-size: 0;
+  margin: 0.75rem 0;
+}
+.audit-discovery-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-inline-size: 0;
+}
+.audit-discovery-option input {
+  flex: 0 0 auto;
+  margin-top: 0.25rem;
+}
 
 .audit-table {
   max-width: 100%;
@@ -2719,4 +2735,42 @@ pre.audit-url {
 .audit-declarations legend {
   max-width: 100%;
   padding-inline: 0.25rem;
+}
+
+/* Scoped controls for the private team, branding and batch workflows. */
+.agency-controls fieldset {
+  min-width: 0;
+  margin-block: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.agency-controls label {
+  display: block;
+  margin-block: 12px;
+}
+.agency-controls input:not([type="checkbox"]),
+.agency-controls select,
+.agency-controls textarea {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 6px;
+  padding: 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.agency-controls label:has(input[type="checkbox"]) {
+  min-height: 44px;
+  padding-block: 10px;
+}
+.agency-controls input[type="checkbox"] {
+  margin-right: 8px;
+}
+.agency-controls summary {
+  min-height: 44px;
+  padding-block: 12px;
+  cursor: pointer;
 }

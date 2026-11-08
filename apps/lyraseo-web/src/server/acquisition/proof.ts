@@ -1,9 +1,12 @@
 import { publicHttpsTransport } from "./transport";
 
 /** Exact-origin proof files are small and never follow redirects. */
-export async function observeSiteProof(url: string) {
+export async function observeSiteProof(
+  url: string,
+  beforeSocket: () => Promise<void>,
+) {
   const signal = AbortSignal.timeout(10000);
-  const response = await publicHttpsTransport(url, signal);
+  const response = await publicHttpsTransport(url, signal, beforeSocket);
   const reader = response.body?.getReader();
   let body = "",
     size = 0;

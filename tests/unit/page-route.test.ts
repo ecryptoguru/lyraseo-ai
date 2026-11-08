@@ -74,3 +74,13 @@ it("returns a conflict without losing client text and rejects oversized writes",
       .status,
   ).toBe(409);
 });
+
+it("returns a private retryable conflict when composed evidence changes before final validation", async () => {
+  mocks.readPage.mockRejectedValue(new Error("SOURCE_CHANGED"));
+  const response = await GET(
+    new Request(origin + "/api/pages?workspaceId=a&siteId=site&pageId=page"),
+  );
+  expect(response.status).toBe(409);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(await response.text()).toContain("reload the latest revision");
+});

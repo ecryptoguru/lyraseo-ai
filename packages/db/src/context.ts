@@ -34,7 +34,11 @@ export async function requireReadScope(
   }
 }
 export type Tx = Prisma.TransactionClient;
-async function verifyActorIn(tx: Tx, actor: ReadActor, workspaceId: string) {
+export async function verifyActorIn(
+  tx: Tx,
+  actor: ReadActor,
+  workspaceId: string,
+) {
   const user = await tx.productUser.findUnique({
     where: { id: actor.userId },
   });
@@ -81,12 +85,28 @@ export async function withEvidenceRead<T>(
       await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, access);
     }
     await verify();
+    // A database error aborts the transaction. Restore its read boundary before
+    // checking current authorization, otherwise 25P02 hides the real failure.
+    await tx.$executeRaw`SAVEPOINT lyraseo_evidence_read`;
+    let value: T;
     try {
-      return await read(tx);
-    } finally {
+      value = await read(tx);
+    } catch (error) {
+      try {
+        await tx.$executeRaw`ROLLBACK TO SAVEPOINT lyraseo_evidence_read`;
+        await tx.$executeRaw`RELEASE SAVEPOINT lyraseo_evidence_read`;
+      } catch {
+        // An unusable connection cannot return evidence; retain the original error.
+        throw error;
+      }
       await verifyActorIn(tx, actor, s.workspaceId);
       await verify();
+      throw error;
     }
+    await tx.$executeRaw`RELEASE SAVEPOINT lyraseo_evidence_read`;
+    await verifyActorIn(tx, actor, s.workspaceId);
+    await verify();
+    return value;
   });
 }
 export async function withActor<T>(

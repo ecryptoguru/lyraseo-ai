@@ -13,6 +13,7 @@ import {
   reviewVisibilityPanel,
   readVisibility,
   requestVisibilityRun,
+  previewVisibilityRun,
 } from "@lyraseo/db/visibility";
 import { readObservationAnswer } from "@lyraseo/db/observation-artifacts";
 const profile = z.enum([
@@ -66,6 +67,14 @@ const command = z.discriminatedUnion("action", [
   z
     .object({
       ...base,
+      action: z.literal("preview-run"),
+      panelId: z.string().min(1).max(128),
+      profile,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
       action: z.literal("request-run"),
       panelId: z.string().min(1).max(128),
       profile,
@@ -73,6 +82,7 @@ const command = z.discriminatedUnion("action", [
     .strict(),
 ]);
 export async function GET(request: Request) {
+  let detailRead = false;
   try {
     const actor = await resolveActor();
     const q = Object.fromEntries(new URL(request.url).searchParams);
@@ -109,16 +119,27 @@ export async function GET(request: Request) {
       });
     }
     if (input.promptId) throw Error("INVALID_REQUEST");
+    detailRead = Boolean(input.runId);
     return Response.json(
       await readVisibility(
         database(),
         actor,
         googleScope.parse(input),
         input.runId,
+        undefined,
+        resolveActor,
       ),
       { headers: googleHeaders },
     );
   } catch (e) {
+    if (detailRead && e instanceof Error && e.message === "SOURCE_EXPIRED")
+      return Response.json(
+        {
+          state: "result-expired",
+          error: "This saved visibility result has expired.",
+        },
+        { status: 410, headers: googleHeaders },
+      );
     return googleFailure(e);
   }
 }
@@ -156,6 +177,36 @@ export async function POST(request: Request) {
         ),
         { headers: googleHeaders },
       );
+    if (input.action === "preview-run") {
+      const db = database(),
+        scope = googleScope.parse(input);
+      // Do not hold product locks while rechecking the identity provider. The
+      // second read rechecks current site grants after that external boundary.
+      await previewVisibilityRun(
+        db,
+        actor,
+        scope,
+        input.panelId,
+        input.profile,
+      );
+      const current = await resolveActor();
+      if (
+        current.userId !== actor.userId ||
+        current.sessionId !== actor.sessionId ||
+        current.securityVersion !== actor.securityVersion
+      )
+        throw new Error("FORBIDDEN");
+      return Response.json(
+        await previewVisibilityRun(
+          db,
+          current,
+          scope,
+          input.panelId,
+          input.profile,
+        ),
+        { headers: googleHeaders },
+      );
+    }
     const availability = await requestVisibilityRun(
       database(),
       actor,

@@ -2,6 +2,33 @@
 import { useEffect, useState } from "react";
 type Prompt = { id: string; text: string; label: "neutral" | "branded" };
 type Brand = { id: string; name: string; aliases: string[]; domains: string[] };
+type Profile = "azure-sol-api" | "consumer-chatgpt" | "consumer-gemini";
+type Allowance = {
+  bucket: string;
+  limit: string;
+  spent: string;
+  reserved: string;
+  remaining: string;
+  overLimit: boolean;
+};
+type Preview = {
+  available: false;
+  panel: { id: string; version: number; promptCount: number };
+  requested: { profile: Profile; language: "en"; market: "IN" };
+  verification: "current" | "required";
+  incompatiblePromptIds: string[];
+  quote: null;
+  maximumCost: null;
+  cacheStatus: "not-checked";
+  allowance: {
+    asOf: string;
+    period: string;
+    combined: Allowance;
+    provider: Allowance;
+    observations: Allowance;
+  };
+  reasons: string[];
+};
 type Panel = {
   id: string;
   version: number;
@@ -43,12 +70,29 @@ type Run = {
     originalProviderWire: false;
   }>;
   rawAnswers?: unknown;
+  rawState?:
+    | "retained"
+    | "raw-expired"
+    | "raw-erased"
+    | "not-retained-unverified"
+    | "classification-blocked"
+    | "private";
+  otherFieldResidual?: string;
   rawExpired: boolean;
 };
 type Saved = {
   panels: Panel[];
   runs: Run[];
-  availability: { available: boolean; reason: string; profiles: string[] };
+  availability: {
+    available: boolean;
+    reason: string;
+    profiles: string[];
+    profileCapabilities?: {
+      profile: string;
+      available: boolean;
+      reasons: string[];
+    }[];
+  };
 };
 const labels: Record<string, string> = {
   "azure-sol-api": "Azure API",
@@ -74,6 +118,8 @@ export function VisibilityWorkspace({
 }) {
   const [saved, setSaved] = useState<Saved | null>(null),
     [detail, setDetail] = useState<Run | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [prompts, setPrompts] = useState<Prompt[]>([
     { id: "prompt-1", text: "", label: "neutral" },
   ]);
@@ -86,7 +132,7 @@ export function VisibilityWorkspace({
   async function request(
     command?: Record<string, unknown>,
     runId?: string,
-  ): Promise<Saved | Panel> {
+  ): Promise<Saved | Panel | Preview> {
     const response = await fetch(
       `/api/visibility${command ? "" : `?${query}${runId ? `&runId=${encodeURIComponent(runId)}` : ""}`}`,
       command
@@ -169,6 +215,11 @@ export function VisibilityWorkspace({
                   {saved.availability.available
                     ? "Available"
                     : "Collection unavailable"}
+                  {saved.availability.profileCapabilities
+                    ?.find((item) => item.profile === profile)
+                    ?.reasons.map((reason) => (
+                      <p key={reason}>{reason}</p>
+                    ))}
                 </li>
               ))}
             </ul>
@@ -459,7 +510,125 @@ export function VisibilityWorkspace({
                     Mark version {panel.version} reviewed
                   </button>
                 )}
+                {panel.reviewedAt && (
+                  <div>
+                    <label htmlFor={`surface-${panel.id}`}>
+                      Surface for panel version {panel.version}
+                    </label>
+                    <select
+                      id={`surface-${panel.id}`}
+                      className="audit-input"
+                      disabled={busy}
+                      value={profiles[panel.id] ?? "azure-sol-api"}
+                      onChange={(event) => {
+                        setProfiles({
+                          ...profiles,
+                          [panel.id]: event.target.value as Profile,
+                        });
+                        setPreview(null);
+                      }}
+                    >
+                      {Object.entries(labels).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      disabled={busy}
+                      onClick={() => {
+                        setPreview(null);
+                        void perform(async () => {
+                          const result = (await request({
+                            action: "preview-run",
+                            panelId: panel.id,
+                            profile: profiles[panel.id] ?? "azure-sol-api",
+                          })) as Preview;
+                          setPreview(result);
+                          setMessage(
+                            "Scope and allowance preview loaded. No collection was started.",
+                          );
+                        });
+                      }}
+                    >
+                      Preview scope and allowance
+                    </button>
+                  </div>
+                )}
               </div>
+            )}
+            {preview?.panel.id === panel.id && (
+              <section
+                className="pilot-card"
+                aria-label="Observation run preview"
+              >
+                <h4>Observation run preview</h4>
+                <p>
+                  {labels[preview.requested.profile]} ·{" "}
+                  {preview.panel.promptCount}{" "}
+                  {preview.panel.promptCount === 1 ? "question" : "questions"} ·
+                  English · intended market India
+                </p>
+                <p>
+                  No quote or collection has been started. Maximum cost is
+                  unavailable until the provider is qualified.
+                </p>
+                <p>
+                  Allowance snapshot for {preview.allowance.period} UTC, at{" "}
+                  {new Date(preview.allowance.asOf).toISOString()}; allowance
+                  can change before a future request.
+                </p>
+                <dl>
+                  <dt>Combined allowance</dt>
+                  <dd>
+                    {preview.allowance.combined.remaining} USD remaining of{" "}
+                    {preview.allowance.combined.limit} USD
+                  </dd>
+                  <dt>Provider allowance</dt>
+                  <dd>
+                    {preview.allowance.provider.remaining} USD remaining of{" "}
+                    {preview.allowance.provider.limit} USD
+                  </dd>
+                  <dt>Surface allowance</dt>
+                  <dd>
+                    {preview.allowance.observations.remaining} observations
+                    remaining of {preview.allowance.observations.limit}
+                  </dd>
+                </dl>
+                {[
+                  preview.allowance.combined,
+                  preview.allowance.provider,
+                  preview.allowance.observations,
+                ].some((item) => item.overLimit) && (
+                  <p>
+                    Recorded usage exceeds an allowance. Reconciliation is
+                    required before further admission.
+                  </p>
+                )}
+                <p>
+                  {preview.verification === "current"
+                    ? "Site verification is current for admission."
+                    : "Verify the site again before an observation can be admitted."}
+                </p>
+                {preview.incompatiblePromptIds.length > 0 && (
+                  <p>
+                    These question IDs exceed the current consumer connector
+                    length limit and need a shorter reviewed panel:{" "}
+                    <span className="audit-url">
+                      {preview.incompatiblePromptIds.join(", ")}
+                    </span>
+                    .
+                  </p>
+                )}
+                <p>Saved result reuse has not been checked.</p>
+                <ul>
+                  {preview.reasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              </section>
             )}
           </article>
         ))}
@@ -579,11 +748,7 @@ export function VisibilityWorkspace({
               </table>
             </div>
             <details>
-              <summary>
-                {detail.storageFormat === "OBSERVATION_PRIVATE_V1"
-                  ? "Parsed answer evidence and provenance"
-                  : "Original answer evidence and provenance"}
-              </summary>
+              <summary>Parsed answer evidence and provenance</summary>
               <pre className="audit-url">
                 {JSON.stringify(detail.provenance, null, 2)}
               </pre>
@@ -619,15 +784,39 @@ export function VisibilityWorkspace({
                     ))}
                   </ul>
                 </>
-              ) : detail.rawExpired ? (
-                <p>
-                  Raw answer retention has expired. Compact evidence remains
-                  subject to its own retention.
-                </p>
               ) : (
-                <pre className="audit-url">
-                  {JSON.stringify(detail.rawAnswers, null, 2)}
-                </pre>
+                <>
+                  <p>
+                    Legacy answers are stored as parsed JSON, not original
+                    provider responses.
+                  </p>
+                  {detail.rawState === "retained" ? (
+                    <pre className="audit-url">
+                      {JSON.stringify(detail.rawAnswers, null, 2)}
+                    </pre>
+                  ) : detail.rawState === "raw-erased" ? (
+                    <p>
+                      The raw answer field was cleared under the recorded
+                      retention transition.
+                    </p>
+                  ) : detail.rawState === "raw-expired" ? (
+                    <p>
+                      Raw answer retention has expired; clearing has not been
+                      confirmed.
+                    </p>
+                  ) : detail.rawState === "not-retained-unverified" ? (
+                    <p>
+                      No raw answer is retained; a clearing receipt is
+                      unavailable.
+                    </p>
+                  ) : (
+                    <p>The raw answer is unavailable pending classification.</p>
+                  )}
+                  <p>
+                    Other stored fields may contain copies and remain
+                    unclassified. Measurements have a separate retention period.
+                  </p>
+                </>
               )}
             </details>
           </article>

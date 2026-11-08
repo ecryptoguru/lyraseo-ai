@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   cancelAuditRun: vi.fn(),
   reviewAuditIssue: vi.fn(),
   runRawAuditStep: vi.fn(),
+  discoverSiteCandidates: vi.fn(),
 }));
 vi.mock("@/server/auth/server", () => ({
   resolveActor: mocks.resolveActor,
@@ -20,6 +21,9 @@ vi.mock("@/server/auth/settings", () => ({
 vi.mock("../../packages/db/src/audits", () => mocks);
 vi.mock("@/server/acquisition/runner", () => ({
   runRawAuditStep: mocks.runRawAuditStep,
+}));
+vi.mock("@/server/acquisition/discovery", () => ({
+  discoverSiteCandidates: mocks.discoverSiteCandidates,
 }));
 vi.mock("@/server/acquisition/transport", () => ({
   publicHttpsTransport: vi.fn(),
@@ -113,6 +117,36 @@ it("keeps hosted execution unavailable without runtime qualification", async () 
   expect(response.status).toBe(503);
   expect(mocks.runRawAuditStep).not.toHaveBeenCalled();
 });
+it("starts only explicit scoped discovery, never audit work, and keeps hosted discovery closed", async () => {
+  mocks.discoverSiteCandidates.mockResolvedValue({
+    state: "available",
+    sourceUrl: "https://example.com/",
+    candidates: ["https://example.com/", "https://example.com/about"],
+    truncated: false,
+  });
+  const request = () =>
+    new Request(url, {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:3000" },
+      body: JSON.stringify({
+        action: "discover",
+        workspaceId: "a",
+        siteId: "site",
+      }),
+    });
+  const result = await POST(request());
+  expect(result.status).toBe(200);
+  expect(result.headers.get("cache-control")).toBe("private, no-store");
+  expect(await result.json()).toMatchObject({
+    candidates: ["https://example.com/", "https://example.com/about"],
+  });
+  expect(mocks.discoverSiteCandidates).toHaveBeenCalledTimes(1);
+  expect(mocks.createAuditRun).not.toHaveBeenCalled();
+  expect(mocks.runRawAuditStep).not.toHaveBeenCalled();
+  vi.stubEnv("VERCEL", "1");
+  expect((await POST(request())).status).toBe(503);
+  expect(mocks.discoverSiteCandidates).toHaveBeenCalledTimes(1);
+});
 it("rejects oversized streaming request bodies without trusting content-length", async () => {
   const response = await POST(
     new Request(url, {
@@ -131,4 +165,19 @@ it("reauthorizes reads instead of accepting forged identity headers", async () =
   );
   expect(response.status).toBe(401);
   expect(mocks.readAuditRun).not.toHaveBeenCalled();
+});
+
+it("returns an explicit withheld error instead of an empty CSV", async () => {
+  mocks.readAuditRun.mockResolvedValue({
+    evaluation: null,
+    evidenceStatus: "legacy-lineage-withheld",
+    pages: [],
+  });
+  const response = await GET(new Request(`${url}&format=csv`));
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({
+    code: "LEGACY_EVIDENCE_WITHHELD",
+    error: expect.stringContaining("withheld"),
+  });
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
 });

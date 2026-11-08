@@ -15,6 +15,31 @@ export type SearchSnapshot = {
   status: string;
   property?: string;
 };
+/** Same-property, equal-duration, non-overlapping page windows only. */
+export function comparableSearchWindow<
+  T extends Pick<
+    SearchSnapshot,
+    "id" | "shape" | "startDate" | "endDate" | "property" | "status"
+  >,
+>(
+  current:
+    Pick<SearchSnapshot, "startDate" | "endDate" | "property"> | undefined,
+  candidates: readonly T[],
+): T | undefined {
+  if (!current) return undefined;
+  const duration = Date.parse(current.endDate) - Date.parse(current.startDate);
+  return [...candidates]
+    .sort((a, b) => b.endDate.localeCompare(a.endDate))
+    .find(
+      (snapshot) =>
+        snapshot.shape === "page" &&
+        snapshot.endDate < current.startDate &&
+        Date.parse(snapshot.endDate) - Date.parse(snapshot.startDate) ===
+          duration &&
+        snapshot.property === current.property &&
+        snapshot.status === "complete",
+    );
+}
 export type SearchOpportunity = {
   kind: string;
   query: string;
@@ -170,6 +195,21 @@ export function buildSearchOpportunities(
           explanation:
             "The best observed page for this query ranks in positions 5–20 with at least 100 impressions. Inspect the page for a focused improvement.",
         });
+      for (const row of group) {
+        if (row.impressions >= 100 && row.ctr !== null && row.ctr < 0.02)
+          out.push({
+            kind: "low-observed-query-ctr",
+            query,
+            page: row.keys[1]!,
+            evidence: evidence(detailed, {
+              ...row,
+              property: detailed.property ?? null,
+              threshold: { minimumImpressions: 100, ctrBelow: 0.02 },
+            }),
+            explanation:
+              "This observed query and page pair has at least 100 impressions and CTR below 2%. Review its title, intent and search-result context. These page-grouped counts do not represent the query's property-wide totals.",
+          });
+      }
       if (group.filter((row) => row.impressions > 0).length > 1)
         out.push({
           kind: "query-overlap",
@@ -210,16 +250,7 @@ export function buildSearchOpportunities(
           explanation:
             "This page has at least 100 impressions, average position within ten and CTR below 2%. Review title, intent and search-result context.",
         });
-    const duration = (snapshot: SearchSnapshot) =>
-      Date.parse(snapshot.endDate) - Date.parse(snapshot.startDate);
-    const prior = sorted.find(
-      (snapshot) =>
-        snapshot.shape === "page" &&
-        snapshot.endDate < current.startDate &&
-        duration(snapshot) === duration(current) &&
-        snapshot.property === current.property &&
-        snapshot.status === "complete",
-    );
+    const prior = comparableSearchWindow(current, sorted);
     if (prior && current.status === "complete") {
       const previous = new Map(
         rows(prior)
@@ -247,5 +278,30 @@ export function buildSearchOpportunities(
       }
     }
   }
-  return out.slice(0, 100);
+  return balanceSearchOpportunities(out);
+}
+
+/** Bound the inbox while preserving representation for each opportunity kind. */
+export function balanceSearchOpportunities(
+  opportunities: readonly SearchOpportunity[],
+): SearchOpportunity[] {
+  const byKind = new Map<string, SearchOpportunity[]>();
+  for (const item of opportunities) {
+    const group = byKind.get(item.kind) ?? [];
+    group.push(item);
+    byKind.set(item.kind, group);
+  }
+  const result: SearchOpportunity[] = [];
+  for (let offset = 0; result.length < 100; offset++) {
+    let found = false;
+    for (const group of byKind.values()) {
+      const item = group[offset];
+      if (!item) continue;
+      found = true;
+      result.push(item);
+      if (result.length === 100) break;
+    }
+    if (!found) break;
+  }
+  return result;
 }

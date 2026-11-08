@@ -1,0 +1,13 @@
+# Authenticator recovery in the private pilot
+
+This describes the Supabase Auth path implemented locally. It does not qualify a hosted identity provider, a support-assisted reset, or customer acceptance.
+
+Users who have already enrolled and verified more than one TOTP factor can choose their backup from the authenticator selector after the normal Google or email-code sign-in. The server checks that the selected factor belongs to the current provider user and is verified, calls the provider challenge, and resolves the product actor again before opening the workspace. Site grants and product identity are not modified by the backup choice.
+
+To prepare a backup, complete a fresh sign-in and an existing authenticator challenge, open **Account security**, and select **Add backup authenticator**. Use a different device or authenticator app. Scan the setup code or enter its key privately, and confirm the new factor with its current code. The setup key must not be copied into support tickets, logs, screenshots or shared workspaces. A backup is useful only after it has been confirmed and appears in the sign-in selector.
+
+The application does not offer recovery codes or a self-service reset when all factors are lost. It does not automatically remove a factor, weaken MFA, create a new identity, grant a site, or initiate a support request. An operator-assisted recovery or factor reset requires a separately approved, independently verified identity process and is not implemented by this slice. In particular, the protected security page currently requires a resolved product actor; a staff member with no verified factor cannot use that page to bootstrap their first factor. That enrollment-only path remains open work.
+
+The backup setup rechecks the current actor and session after listing factors, but the external provider enrollment itself is not transactionally fenced against a revocation occurring after that final check. Production qualification must establish the provider/session and revocation behavior before claiming that race is closed. Tests for this slice use synthetic Supabase responses and do not prove live provider behavior.
+
+Supabase's [Auth MFA reference](https://supabase.com/docs/reference/javascript/auth-mfa) describes multiple TOTP factors and states that recovery codes are not supported. The [MFA guide](https://supabase.com/docs/guides/auth/auth-mfa) describes factor enrollment and challenge. Any future privileged factor removal must use a separately reviewed authorization and reauthentication process; provider admin capabilities alone are not proof of a user's identity.

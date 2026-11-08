@@ -7,8 +7,9 @@ import { resolveActor } from "@/server/auth/server";
 import { AuthenticatorEnrollment } from "@/components/authenticator-enrollment";
 export default async function Security() {
   if (!authSettings()) redirect("/sign-in");
+  let hasAuthenticator = false;
   try {
-    await resolveActor();
+    hasAuthenticator = (await resolveActor()).mfaVerified;
   } catch (error) {
     const destination = signInDestination(error);
     if (destination) redirect(destination);
@@ -28,11 +29,16 @@ export default async function Security() {
       <section className="pilot-card">
         <h2>Authenticator setup</h2>
         <p>
-          Use a fresh sign-in from the last ten minutes. You can enroll a backup
-          authenticator in a separate setup. Keep your authenticator and
-          recovery details private.
+          Use a fresh sign-in from the last ten minutes. Add a backup on a
+          separate device or authenticator app before you need it. Keep setup
+          keys private.
         </p>
-        <AuthenticatorEnrollment />
+        <AuthenticatorEnrollment hasAuthenticator={hasAuthenticator} />
+        <p>
+          At sign-in, choose your backup authenticator if your usual device is
+          unavailable. If you lose every enrolled authenticator, self-service
+          factor recovery is not currently available.
+        </p>
       </section>
     </main>
   );

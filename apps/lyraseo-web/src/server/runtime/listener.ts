@@ -6,7 +6,11 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import { auditErrorCode, runBridgeControl } from "@lyraseo/db/bridge";
+import {
+  auditErrorCode,
+  runBridgeControl,
+  resolveHandoff,
+} from "@lyraseo/db/bridge";
 import type { createDatabase } from "@lyraseo/db";
 import {
   authenticateRuntime,
@@ -18,11 +22,14 @@ import {
 } from "@lyraseo/contracts/runtime-signing";
 import { type ControlledFixture, isControlledFixture } from "./fixture";
 import { signedStep } from "./step";
+import { type HandoffFixture, isHandoffFixture } from "./handoff-fixture";
+import { signedHandoffStep } from "./handoff-step";
 
 type Options = {
   db: ReturnType<typeof createDatabase>;
   keys: () => readonly RuntimeKey[];
   fixture: ControlledFixture;
+  handoffFixture?: HandoffFixture;
   /** Optional stricter, server-injected ceiling for the isolated harness. */
   handlerBudgetMs?: number;
 };
@@ -132,18 +139,33 @@ async function handle(
     };
     authenticated = true;
     assertSigner();
-    parseRuntimeBody(path, envelope.rawBody);
+    const body = parseRuntimeBody(path, envelope.rawBody);
     signal.throwIfAborted();
     const outcome =
       path === runtimePaths[3]
-        ? await signedStep(
+        ? opts.handoffFixture &&
+          (await resolveHandoff(
             opts.db,
-            envelope,
-            opts.fixture,
-            signal,
+            body.workId as string,
+            body.generation as number,
             deadline,
-            assertSigner,
-          )
+          ))
+          ? await signedHandoffStep(
+              opts.db,
+              envelope,
+              opts.handoffFixture,
+              signal,
+              deadline,
+              assertSigner,
+            )
+          : await signedStep(
+              opts.db,
+              envelope,
+              opts.fixture,
+              signal,
+              deadline,
+              assertSigner,
+            )
         : await runBridgeControl(
             opts.db,
             path,
@@ -184,6 +206,7 @@ export async function startControlledRuntime(opts: Options) {
   const runtime = {
     db: opts.db,
     fixture: opts.fixture,
+    handoffFixture: opts.handoffFixture,
     keys: () => opts.keys(),
   };
   if (
@@ -191,7 +214,9 @@ export async function startControlledRuntime(opts: Options) {
     budget < 1 ||
     budget > 45000 ||
     !runtime.keys().length ||
-    !isControlledFixture(runtime.fixture)
+    !isControlledFixture(runtime.fixture) ||
+    (runtime.handoffFixture !== undefined &&
+      !isHandoffFixture(runtime.handoffFixture))
   )
     throw new Error("CONTROLLED_CONFIGURATION_REQUIRED");
   let host = "";

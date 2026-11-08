@@ -24,8 +24,8 @@ const row = (
 it("does not promote a secondary page when the best observed page already ranks highly", () => {
   const result = buildSearchOpportunities([
     snapshot([
-      row("https://example.com/best", 2),
-      row("https://example.com/secondary", 8),
+      row("https://example.com/best", 2, 200, 10),
+      row("https://example.com/secondary", 8, 200, 10),
     ]),
   ]);
   expect(result.map((item) => item.kind)).toEqual(["query-overlap"]);

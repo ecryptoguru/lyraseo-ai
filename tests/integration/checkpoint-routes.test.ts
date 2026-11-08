@@ -15,6 +15,8 @@ const seams = vi.hoisted(() => ({
   db: null as unknown,
   actor: null as unknown,
   proof: "",
+  beforeProof: null as null | (() => Promise<void>),
+  proofSockets: 0,
   transport: null as
     null | import("../../packages/visibility/src/acquisition").PublicTransport,
   configured: null as unknown,
@@ -33,11 +35,12 @@ vi.mock("@/server/acquisition/transport", () => ({
   },
 }));
 vi.mock("@/server/acquisition/proof", () => ({
-  observeSiteProof: async (url: string) => ({
-    url,
-    status: 200,
-    body: seams.proof,
-  }),
+  observeSiteProof: async (url: string, beforeSocket: () => Promise<void>) => {
+    await seams.beforeProof?.();
+    await beforeSocket();
+    seams.proofSockets++;
+    return { url, status: 200, body: seams.proof };
+  },
 }));
 vi.mock("@/server/google/provider", async (original) => ({
   ...(await original<
@@ -92,6 +95,8 @@ beforeEach(async () => {
   seams.db = db;
   seams.actor = actor;
   seams.configured = { provider, box };
+  seams.beforeProof = null;
+  seams.proofSockets = 0;
   provider.properties.mockClear();
   provider.query.mockClear();
   vi.stubEnv("LYRA_LOCAL_RAW_AUDITS", "true");
@@ -126,6 +131,32 @@ it("executes real site challenge, proof verification and context handlers agains
       action: "challenge",
     } as typeof scope),
   ).resolves.toHaveProperty("token");
+});
+it("honors an audit capability pause after DNS and before the proof socket", async () => {
+  const oldCapabilities = process.env.LYRA_ENABLED_CAPABILITIES;
+  const challenge = await json(await sites.POST(post({ action: "challenge" })));
+  seams.proof = challenge.token;
+  seams.beforeProof = async () => {
+    process.env.LYRA_ENABLED_CAPABILITIES = "";
+  };
+  try {
+    const response = await sites.POST(
+      post({ action: "verify", challengeId: challenge.id }),
+    );
+    expect(response.status).toBe(503);
+    expect(seams.proofSockets).toBe(0);
+    expect(
+      (
+        await admin.siteVerificationChallenge.findUniqueOrThrow({
+          where: { id: challenge.id },
+        })
+      ).consumedAt,
+    ).toBeNull();
+  } finally {
+    if (oldCapabilities === undefined)
+      delete process.env.LYRA_ENABLED_CAPABILITIES;
+    else process.env.LYRA_ENABLED_CAPABILITIES = oldCapabilities;
+  }
 });
 it("executes real create/save/report and report-download handlers without leaking query fields into Prisma", async () => {
   await admin.searchSnapshot.create({

@@ -2334,3 +2334,101 @@ it("round1 retirement during signed terminal publication rolls back the last pag
     }
   });
 });
+
+const inlineR1 = it.skipIf(process.env.LYRA_INLINE_R1_REQUIRED !== "true");
+async function enrollInlineR1() {
+  await admin.$executeRaw`INSERT INTO lyraseo_legacy_inline.environment(database_oid,postmaster_started_at,maintenance_login,workspace_id,site_id,policy_version)
+    SELECT oid,pg_postmaster_start_time(),'lyraseo_artifact_maintenance','a','a-site','P2B2_INLINE_HTML_V1' FROM pg_database WHERE datname=current_database()`;
+}
+inlineR1(
+  "legacy inline fence R1 serializes preparation before enrollment and denies the valid proof afterward",
+  async () => {
+    const { audit } = await fixture();
+    let ref = await claim();
+    await ack(ref);
+    expect((await ok(step(ref))).disposition).toBe("YIELDED");
+    ref = await claim();
+    await ack(ref);
+    const e = step(ref),
+      attempt = await admitStep(db, env(e), "https://example.com");
+    if (attempt.disposition !== "ADMITTED") throw Error("missing proof");
+    let entered!: () => void, release!: () => void;
+    const arrived = new Promise<void>((r) => (entered = r)),
+      barrier = new Promise<void>((r) => (release = r));
+    const first = db.$transaction(async (tx) => {
+      const [row] = await tx.$queryRaw<
+        { facts: { priorEvidence: unknown[] } }[]
+      >`SELECT lyraseo_audit.prepare_step(${e.rid}::uuid,${attempt.proof}) AS facts`;
+      expect(row!.facts.priorEvidence).toHaveLength(1);
+      entered();
+      await barrier;
+      return row;
+    });
+    await arrived;
+    let enrolled = false;
+    const enrollment = enrollInlineR1().then(() => {
+      enrolled = true;
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(enrolled).toBe(false);
+    release();
+    await first;
+    await enrollment;
+    await expect(
+      db.$queryRaw`SELECT lyraseo_audit.prepare_step(${e.rid}::uuid,${attempt.proof})`,
+    ).rejects.toThrow(/LEGACY_INLINE_WRITER_FENCED/);
+    expect(await admin.auditPage.count({ where: { auditId: audit.id } })).toBe(
+      1,
+    );
+  },
+);
+inlineR1(
+  "legacy inline fence R1 enrollment wins before network dispatch and no old acquisition opens",
+  async () => {
+    await fixture();
+    const ref = await claim();
+    await ack(ref);
+    let enrolled = false;
+    afterResolve = async () => {
+      if (!enrolled) {
+        await enrollInlineR1();
+        enrolled = true;
+      }
+    };
+    const response = await wire(step(ref));
+    expect(response.status).toBe(503);
+    expect(enrolled).toBe(true);
+    expect(urls).toEqual([]);
+    expect(await admin.auditPage.count()).toBe(0);
+  },
+);
+inlineR1(
+  "legacy inline fence R1 retains real private preparation finalization and nonempty page reads",
+  async () => {
+    await withRound1PrivateStore(async () => {
+      const { audit } = await fixture(1, true);
+      await enrollInlineR1();
+      const ref = await claim();
+      await ack(ref);
+      expect((await ok(step(ref))).disposition).toBe("COMPLETED");
+      const row = await admin.auditRun.findUniqueOrThrow({
+        where: { id: audit.id },
+      });
+      expect(row.storageFormat).toBe("AUDIT_PRIVATE_V1");
+      expect(row.evaluation).not.toBeNull();
+      expect(
+        await admin.auditPage.count({ where: { auditId: audit.id } }),
+      ).toBe(1);
+      const { readAuditRun } = await import("../../packages/db/src/audits");
+      expect(
+        (
+          await readAuditRun(web, actor, {
+            workspaceId: "a",
+            siteId: "a-site",
+            auditId: audit.id,
+          })
+        ).evidenceStatus,
+      ).toBe("available");
+    });
+  },
+);

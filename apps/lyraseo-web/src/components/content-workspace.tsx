@@ -8,6 +8,21 @@ type DraftBody = {
   assumptions: string[];
   citations: Array<{ sourceId: string; note: string }>;
 };
+type Assistance = {
+  method: "EVIDENCE_TEMPLATE_V1";
+  evidenceFingerprint: string;
+  context: { id: string; revision: number };
+  content: DraftBody;
+  links: Array<{
+    id: string;
+    sourceId: string;
+    sourceUrl: string;
+    url: string;
+    anchorText: string;
+    recommendation: string;
+  }>;
+  limitations: string[];
+};
 type Draft = {
   id: string;
   revision: number;
@@ -19,7 +34,9 @@ type Draft = {
   }>;
   nextHistoryBefore?: number | null;
   sourceAvailability?: Array<{ sourceId: string; status: string }>;
-  snapshot: {
+  evidenceStatus?: "available" | "legacy-lineage-withheld";
+  snapshot?: {
+    context?: { id?: string; revision?: number } | null;
     internalLinks: Array<{
       sourceUrl?: string;
       url: string;
@@ -33,10 +50,14 @@ type Report = {
   title: string;
   createdAt: string;
   evidenceFormat?: string | null;
+  formatStatus?: { pdf: string; csv: string };
 };
 type ReportPreview = Report & {
   sourceAvailability: Array<{ sourceId: string; status: string }>;
   snapshot: {
+    reportTemplate?: "founder" | "editor" | "agency";
+    reportBranding?: { revision: number; displayName: string };
+    context?: { id?: string; revision?: number } | null;
     comparisonUnavailable?: boolean;
     historicalComparisonCounts?: Record<string, number>;
     comparison?: { counts: Record<string, number> };
@@ -62,6 +83,7 @@ export function ContentWorkspace({
   siteId: string;
   editable: boolean;
 }) {
+  const [assistance, setAssistance] = useState<Assistance | null>(null);
   const [preview, setPreview] = useState<ReportPreview | null>(null);
   const clientReady = useClientReady();
   const [drafts, setDrafts] = useState<Draft[]>([]),
@@ -75,6 +97,19 @@ export function ContentWorkspace({
   const [reportChosen, setReportChosen] = useState<string[]>([]),
     [reportTitle, setReportTitle] = useState(""),
     [kind, setKind] = useState<"brief" | "draft">("draft");
+  const [brandingSelection, setBrandingSelection] = useState({
+    scope: "",
+    revision: "",
+  });
+  const [brandingChoices, setBrandingChoices] = useState<{
+    scope: string;
+    choices: Array<{ revision: number; displayName: string }>;
+    state: "ready" | "unavailable";
+  }>({ scope: "", choices: [], state: "ready" });
+  const [brandingRefresh, setBrandingRefresh] = useState(0);
+  const [reportTemplate, setReportTemplate] = useState<
+    "founder" | "editor" | "agency"
+  >("founder");
   const [reportMessage, setReportMessage] = useState("");
   const [comparisonEnabled, setComparisonEnabled] = useState(false),
     [beforeAuditId, setBeforeAuditId] = useState(""),
@@ -85,6 +120,55 @@ export function ContentWorkspace({
   const [message, setMessage] = useState("Loading saved work…"),
     [busy, setBusy] = useState(false);
   const query = `workspaceId=${encodeURIComponent(workspaceId)}&siteId=${encodeURIComponent(siteId)}`;
+  const brandingRevision =
+    brandingSelection.scope === query ? brandingSelection.revision : "";
+  const currentBrandingChoices =
+    brandingChoices.scope === query ? brandingChoices.choices : [];
+  const brandingState =
+    brandingChoices.scope === query ? brandingChoices.state : "loading";
+  const brandingValid =
+    !brandingRevision ||
+    currentBrandingChoices.some(
+      (choice) => String(choice.revision) === brandingRevision,
+    );
+  useEffect(() => {
+    if (!editable) return;
+    let active = true;
+    fetch(`/api/reports?${query}&brandingOptions=1`, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (
+          !Array.isArray(data.choices) ||
+          data.choices.length > 20 ||
+          data.choices.some(
+            (choice: { revision?: unknown; displayName?: unknown }) =>
+              !Number.isSafeInteger(choice?.revision) ||
+              Number(choice.revision) < 1 ||
+              typeof choice.displayName !== "string" ||
+              choice.displayName.length > 100,
+          )
+        )
+          throw new Error();
+        if (active)
+          setBrandingChoices({
+            scope: query,
+            choices: data.choices,
+            state: "ready",
+          });
+      })
+      .catch(() => {
+        if (active)
+          setBrandingChoices({
+            scope: query,
+            choices: [],
+            state: "unavailable",
+          });
+      });
+    return () => {
+      active = false;
+    };
+  }, [editable, query, brandingRefresh]);
   async function request(url: string, command?: Record<string, unknown>) {
     const response = await fetch(
       url,
@@ -176,6 +260,7 @@ export function ContentWorkspace({
   function load(draft: Draft) {
     const content = draft.history[0]?.content;
     if (!content) return;
+    setAssistance(null);
     setSelected(draft);
     setHistory(draft.history);
     setHistoryBefore(draft.nextHistoryBefore ?? null);
@@ -202,12 +287,23 @@ export function ContentWorkspace({
         ...citation,
         note: notes[citation.sourceId] ?? citation.note,
       })) ?? [])
-    : sources
-        .filter((source) => chosen.includes(source.id))
-        .map((source) => ({
-          sourceId: `${source.kind}:${source.id}`,
-          note: notes[`${source.kind}:${source.id}`] ?? "",
-        }));
+    : assistance
+      ? assistance.content.citations.map((citation) => ({
+          ...citation,
+          note: notes[citation.sourceId] ?? citation.note,
+        }))
+      : sources
+          .filter((source) => chosen.includes(source.id))
+          .map((source) => ({
+            sourceId: `${source.kind}:${source.id}`,
+            note: notes[`${source.kind}:${source.id}`] ?? "",
+          }));
+  const hasUnsavedEditorialInput = Boolean(
+    title ||
+    body ||
+    assumptions ||
+    Object.values(notes).some((note) => note.length > 0),
+  );
   return (
     <>
       {!collectionEnabled && (
@@ -219,8 +315,10 @@ export function ContentWorkspace({
       <section className="pilot-card" aria-labelledby="draft-editor">
         <h2 id="draft-editor">Evidence and editable draft</h2>
         <p>
-          Save your own brief or page draft alongside the evidence you reviewed.
-          Automated generation requires a qualified provider and cost quote.
+          Prepare a free evidence-backed writing template or save your own brief
+          alongside reviewed evidence. Templates use saved facts and
+          assumptions; paid AI generation and live research require a qualified
+          provider and cost quote.
         </p>
         {editable && collectionEnabled && (
           <>
@@ -228,7 +326,7 @@ export function ContentWorkspace({
               <p role="status">Preparing draft and report controls…</p>
             )}
             {!selected && (
-              <fieldset disabled={!clientReady || busy}>
+              <fieldset disabled={!clientReady || busy || !!assistance}>
                 <legend>
                   Select up to five audits and five search imports
                 </legend>
@@ -288,6 +386,13 @@ export function ContentWorkspace({
                       action: "create",
                       kind,
                       ...selectionFor(chosen),
+                      ...(assistance
+                        ? {
+                            expectedContextRevisionId: assistance.context.id,
+                            expectedEvidenceFingerprint:
+                              assistance.evidenceFingerprint,
+                          }
+                        : {}),
                       ...fields,
                     });
                     load(saved);
@@ -305,7 +410,7 @@ export function ContentWorkspace({
                   <select
                     className="audit-input"
                     value={kind}
-                    disabled={!clientReady || busy}
+                    disabled={!clientReady || busy || !!assistance}
                     onChange={(event) =>
                       setKind(event.target.value as "brief" | "draft")
                     }
@@ -314,6 +419,150 @@ export function ContentWorkspace({
                     <option value="brief">Editorial brief</option>
                   </select>
                 </label>
+              )}
+              {!selected && (
+                <div className="pilot-card">
+                  <h3>Writing assistance</h3>
+                  <p id="template-empty-editor-help">
+                    Deterministic template only. No provider request, live
+                    research or charge. Review site business context first.
+                    Start with an empty title, draft, assumptions, and citation
+                    notes to prepare a template. Your entered supporting text is
+                    kept.
+                  </p>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    aria-describedby="template-empty-editor-help"
+                    disabled={
+                      !clientReady ||
+                      busy ||
+                      !chosen.length ||
+                      hasUnsavedEditorialInput ||
+                      !!assistance
+                    }
+                    onClick={() =>
+                      void perform(async () => {
+                        const prepared: Assistance = await request(
+                          "/api/content",
+                          { action: "assist", kind, ...selectionFor(chosen) },
+                        );
+                        setAssistance(prepared);
+                        setTitle(prepared.content.title);
+                        setBody(prepared.content.body);
+                        setAssumptions(prepared.content.assumptions.join("\n"));
+                        setNotes(
+                          Object.fromEntries(
+                            prepared.content.citations.map((c) => [
+                              c.sourceId,
+                              c.note,
+                            ]),
+                          ),
+                        );
+                        setMessage(
+                          "Template prepared for review. Edit or discard it; nothing is saved until you choose Save draft with evidence.",
+                        );
+                      })
+                    }
+                  >
+                    Prepare evidence template
+                  </button>
+                  {assistance && (
+                    <>
+                      <p>
+                        Reviewed context revision {assistance.context.revision}
+                      </p>
+                      <p>
+                        Method: {assistance.method}. Context:{" "}
+                        {assistance.context.id}
+                      </p>
+                      <ul>
+                        {assistance.limitations.map((limit) => (
+                          <li key={limit}>{limit}</li>
+                        ))}
+                      </ul>
+                      <h4>Internal-link review suggestions</h4>
+                      {!assistance.links.length && (
+                        <p>
+                          No eligible observed anchors between acquired pages
+                          were available. No links were invented.
+                        </p>
+                      )}
+                      <ul className="audit-history">
+                        {assistance.links.map((link) => (
+                          <li key={link.id}>
+                            <p>{link.anchorText}</p>
+                            <p className="audit-url">
+                              Source: {link.sourceUrl}
+                            </p>
+                            <p className="audit-url">Destination: {link.url}</p>
+                            <p>
+                              {link.recommendation} Evidence: {link.sourceId}
+                            </p>
+                            <button
+                              type="button"
+                              className="button button-secondary"
+                              disabled={busy}
+                              onClick={() => {
+                                setBody(
+                                  (current) =>
+                                    current +
+                                    `\n\nInternal-link review [${link.sourceId}]: on ${link.sourceUrl}, review the existing link to ${link.url} with observed anchor ${JSON.stringify(link.anchorText)}. Verify rendered visibility and relevance before editing.`,
+                                );
+                                setAssistance({
+                                  ...assistance,
+                                  links: assistance.links.filter(
+                                    (item) => item.id !== link.id,
+                                  ),
+                                });
+                                setMessage(
+                                  "Link review added to your editable draft. It has not been saved.",
+                                );
+                              }}
+                            >
+                              Use link suggestion
+                            </button>{" "}
+                            <button
+                              type="button"
+                              className="button button-secondary"
+                              disabled={busy}
+                              onClick={() => {
+                                setAssistance({
+                                  ...assistance,
+                                  links: assistance.links.filter(
+                                    (item) => item.id !== link.id,
+                                  ),
+                                });
+                                setMessage(
+                                  "Link suggestion rejected. No saved content changed.",
+                                );
+                              }}
+                            >
+                              Reject link suggestion
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        disabled={busy}
+                        onClick={() => {
+                          setAssistance(null);
+                          setTitle("");
+                          setBody("");
+                          setAssumptions("");
+                          setNotes({});
+                          setMessage(
+                            "Prepared template discarded. No draft was saved.",
+                          );
+                        }}
+                      >
+                        Discard prepared template
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
               <label htmlFor="draft-title">Draft title</label>
               <input
@@ -438,6 +687,20 @@ export function ContentWorkspace({
         {selected && (
           <>
             <p>Revision {selected.revision}</p>
+            {selected.evidenceStatus === "legacy-lineage-withheld" && (
+              <p>
+                Historical source evidence is withheld because its source
+                lineage could not be verified. Your authored draft, citations
+                and revision history remain available.
+              </p>
+            )}
+            {selected.snapshot && (
+              <p>
+                Captured site context revision{" "}
+                {selected.snapshot.context?.revision ?? "unavailable"} ·{" "}
+                {selected.snapshot.context?.id ?? "unknown"}
+              </p>
+            )}
             {(!editable || !collectionEnabled) && (
               <pre className="audit-url">
                 {selected.history[0]?.content.body}
@@ -524,7 +787,14 @@ export function ContentWorkspace({
             </details>
             <details>
               <summary>Observed internal-link evidence</summary>
-              {selected.snapshot.internalLinks.length ? (
+              {selected.evidenceStatus === "legacy-lineage-withheld" ? (
+                <p>
+                  Historical internal-link evidence is withheld pending
+                  source-lineage verification.
+                </p>
+              ) : !selected.snapshot ? (
+                <p>Saved internal-link evidence is unavailable.</p>
+              ) : selected.snapshot.internalLinks.length ? (
                 <ul>
                   {selected.snapshot.internalLinks.map((link, index) => (
                     <li key={index}>
@@ -564,6 +834,74 @@ export function ContentWorkspace({
               disabled={!clientReady || busy}
               onChange={(event) => setReportTitle(event.target.value)}
             />
+            <label htmlFor="report-template">Report template</label>
+            <select
+              id="report-template"
+              className="audit-input"
+              value={reportTemplate}
+              disabled={!clientReady || busy}
+              onChange={(event) =>
+                setReportTemplate(
+                  event.target.value as "founder" | "editor" | "agency",
+                )
+              }
+            >
+              <option value="founder">Founder decision brief</option>
+              <option value="editor">Editor action worksheet</option>
+              <option value="agency">Agency client delivery</option>
+            </select>
+            <label htmlFor="report-branding">Report branding</label>
+            <select
+              id="report-branding"
+              className="audit-input"
+              aria-describedby="report-branding-help"
+              value={brandingRevision}
+              disabled={!clientReady || busy || brandingState === "loading"}
+              onChange={(event) =>
+                setBrandingSelection({
+                  scope: query,
+                  revision: event.target.value,
+                })
+              }
+            >
+              <option value="">Lyraseo</option>
+              {currentBrandingChoices.map((choice) => (
+                <option key={choice.revision} value={String(choice.revision)}>
+                  {choice.displayName || "Workspace brand"} · version{" "}
+                  {choice.revision}
+                </option>
+              ))}
+              {!brandingValid && (
+                <option value={brandingRevision} disabled>
+                  Previously selected branding unavailable
+                </option>
+              )}
+            </select>
+            <p id="report-branding-help" aria-live="polite">
+              {brandingState === "loading"
+                ? "Loading approved workspace branding. Lyraseo reports remain available."
+                : brandingState === "unavailable"
+                  ? "Workspace branding could not load. Lyraseo reports remain available."
+                  : !currentBrandingChoices.length
+                    ? "No approved workspace branding is available. Use Lyraseo branding."
+                    : "Choose an approved workspace brand or Lyraseo. The saved report freezes that name and logo; later changes never alter it."}
+              {!brandingValid &&
+                " Choose available branding before creating this report."}
+            </p>
+            {brandingState === "unavailable" && (
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={busy || !clientReady}
+                onClick={() => setBrandingRefresh((current) => current + 1)}
+              >
+                Retry branding choices
+              </button>
+            )}
+            <p>
+              Templates retain the same source scope, dates, coverage and
+              limitations. Reports are private and require current site access.
+            </p>
             <fieldset disabled={!clientReady || busy}>
               <legend>
                 Report evidence: select up to five audits and five search
@@ -667,7 +1005,8 @@ export function ContentWorkspace({
                 !clientReady ||
                 busy ||
                 !reportChosen.length ||
-                !reportTitle.trim()
+                !reportTitle.trim() ||
+                !brandingValid
               }
               onClick={() =>
                 void perform(async () => {
@@ -686,6 +1025,10 @@ export function ContentWorkspace({
                   }
                   await request("/api/reports", {
                     title: reportTitle,
+                    reportTemplate,
+                    ...(brandingRevision
+                      ? { brandingRevision: Number(brandingRevision) }
+                      : {}),
                     ...(comparisonEnabled
                       ? { comparison: { beforeAuditId, afterAuditId } }
                       : {}),
@@ -782,27 +1125,24 @@ export function ContentWorkspace({
                   )}
                 </section>
               )}
-              {report.evidenceFormat === "saved-evidence-v2" ? (
-                <>
-                  {" "}
-                  <div className="pilot-tabs">
+              <div className="pilot-tabs">
+                {(["pdf", "csv"] as const).map((format) =>
+                  report.formatStatus?.[format] === "available" ? (
                     <a
+                      key={format}
                       className="button button-secondary"
-                      href={`/api/reports?${query}&reportId=${report.id}&format=pdf`}
+                      href={`/api/reports?${query}&reportId=${report.id}&format=${format}`}
                     >
-                      Download PDF
+                      Download {format.toUpperCase()}
                     </a>
-                    <a
-                      className="button button-secondary"
-                      href={`/api/reports?${query}&reportId=${report.id}&format=csv`}
-                    >
-                      Download CSV
-                    </a>
-                  </div>
-                </>
-              ) : (
-                <p>Original downloads unavailable pending legacy review.</p>
-              )}
+                  ) : (
+                    <p key={format}>
+                      {format.toUpperCase()}:{" "}
+                      {report.formatStatus?.[format] ?? "pending-review"}.
+                    </p>
+                  ),
+                )}
+              </div>
             </li>
           ))}
         </ul>

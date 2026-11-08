@@ -94,6 +94,10 @@ const originConfig = prefixConfig(
   "twenty-six",
   migrations.filter((n) => n <= "202611030004_artifact_origin_binding"),
 );
+const expiryConfig = prefixConfig(
+  "twenty-seven",
+  migrations.filter((n) => n <= "202611030005_private_artifact_expiry"),
+);
 if (
   createHash("sha256")
     .update(
@@ -176,7 +180,43 @@ function login(database, role, password, statement) {
     { input: statement, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
   ).stdout.trim();
 }
-function snapshot(database, withAudit) {
+// Project only columns introduced by a specific transition on the exact table
+// that owns them. Every other key (including same-named unknown keys) is kept.
+function projection(table, baseline, current) {
+  const additions = [
+    [23, "AuditRun", "resultExpiresAt"],
+    [23, "VisibilityRun", "resultExpiresAt"],
+    [23, "SearchSnapshot", "resultExpiresAt"],
+    [23, "SearchImport", "resultExpiresAt"],
+    [23, "AnalyticsImport", "resultExpiresAt"],
+    [23, "ContentDraft", "evidenceFormat"],
+    [23, "EvidenceReport", "evidenceFormat"],
+    [24, "AuditRun", "storageFormat"],
+    [25, "VisibilityRun", "storageFormat"],
+    ...["ownerKind", "recordingId", "runId", "panelId", "promptId"].map(
+      (column) => [25, "ArtifactBlob", column],
+    ),
+    ...["recordingId", "runId", "panelId", "promptId"].map((column) => [
+      25,
+      "ArtifactRef",
+      column,
+    ]),
+    [29, "Operation", "ledgerMode"],
+    [29, "Operation", "ledgerVersion"],
+    [31, "Workspace", "accessRevision"],
+    [31, "PageJournal", "assigneeUserId"],
+    [32, "ContentRevision", "historyExpiresAt"],
+    [35, "EvidenceReport", "identifierKey"],
+  ];
+  return additions
+    .filter(
+      ([stage, target]) =>
+        stage > baseline && stage <= current && target === table,
+    )
+    .map(([, , column]) => `-'${column}'`)
+    .join("");
+}
+function snapshot(database, withAudit, baseline, current) {
   const tables = [
     "ProductUser",
     "Workspace",
@@ -191,13 +231,16 @@ function snapshot(database, withAudit) {
   ];
   return (
     tables
-      .map((table) =>
-        sql(
+      .map((table) => {
+        // Exclude only columns introduced on this table by this transition.
+        // Later comparisons include those columns as historical values.
+        const added = projection(table, baseline, current);
+        return sql(
           database,
-          `SELECT coalesce(jsonb_agg(to_jsonb(t)-'resultExpiresAt'-'storageFormat' ORDER BY (to_jsonb(t)-'resultExpiresAt'-'storageFormat')::text),'[]') FROM "${table}" t;`,
+          `SELECT coalesce(jsonb_agg(to_jsonb(t)${added} ORDER BY (to_jsonb(t)${added})::text),'[]') FROM "${table}" t;`,
           true,
-        ),
-      )
+        );
+      })
       .join("\n") +
     sql(
       database,
@@ -205,6 +248,50 @@ function snapshot(database, withAudit) {
       true,
     )
   );
+}
+// Snapshot full column metadata for every historical table, including empty
+// tables. Only separately asserted 27-to-head additions are removed.
+// EvidenceReport.pdf/csv were NOT NULL until 202611030013 relaxed them for legacy
+// reports; the replay fingerprint normalizes that reviewed relaxation to true
+// on both sides so the gate still detects any other metadata change.
+function historySchema(database, afterHead = false) {
+  return sql(
+    database,
+    `SELECT jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,
+      'number',a.attnum,'type',format_type(a.atttypid,a.atttypmod),'notNull', CASE WHEN c.relname='EvidenceReport' AND a.attname IN ('pdf','csv') THEN true ELSE a.attnotnull END,
+      'generated',a.attgenerated,'identity',a.attidentity,'default',pg_get_expr(d.adbin,d.adrelid))
+      ORDER BY n.nspname,c.relname,a.attnum)
+     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+     JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+     LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
+     WHERE ((n.nspname='public' AND c.relname = ANY(ARRAY[
+       'ProductUser','Workspace','Membership','Site','BudgetPeriod','Operation','OperationQuote','UsageReceipt','OutboxEvent',
+       'AuditRun','AuditPage','WorkDispatch','InternalRequest','RuntimePolicy','SearchSnapshot','SearchImport','AnalyticsImport',
+       'VisibilityPanel','VisibilityRun','ContentDraft','ContentRevision','EvidenceReport','AuditPageRetention','ArtifactBlob','ArtifactRef',
+       'VisibilityRecording','VisibilityObservationSlot','AuditEvaluationScratch','PageIdentity','PageJournal'
+     ])) OR (n.nspname='lyraseo_origin' AND c.relname = ANY(ARRAY['store_registration','source_store_key','store_namespace','blob_store_binding'])))
+     ${afterHead ? `AND NOT (n.nspname='public' AND ((c.relname='Workspace' AND a.attname='accessRevision') OR (c.relname='Operation' AND a.attname IN ('ledgerMode','ledgerVersion')) OR (c.relname='PageJournal' AND a.attname='assigneeUserId') OR (c.relname='ContentRevision' AND a.attname='historyExpiresAt') OR (c.relname='EvidenceReport' AND a.attname='identifierKey')))` : ""};`,
+    true,
+  );
+}
+function assertAdditiveDefaults(database) {
+  const result = sql(
+    database,
+    `SELECT NOT EXISTS (SELECT FROM "Workspace" WHERE "accessRevision" IS DISTINCT FROM 0);
+     SELECT NOT EXISTS (SELECT FROM "Operation" WHERE "ledgerMode" IS DISTINCT FROM 'LEGACY' OR "ledgerVersion" IS DISTINCT FROM 0);
+     SELECT NOT EXISTS (SELECT FROM "PageJournal" WHERE "assigneeUserId" IS NOT NULL);
+     SELECT count(*) = 4 FROM information_schema.columns WHERE table_schema='public' AND (
+       (table_name='Workspace' AND column_name='accessRevision' AND is_nullable='NO' AND column_default='0') OR
+       (table_name='Operation' AND column_name='ledgerMode' AND is_nullable='NO' AND column_default='''LEGACY''::text') OR
+       (table_name='Operation' AND column_name='ledgerVersion' AND is_nullable='NO' AND column_default='0') OR
+       (table_name='PageJournal' AND column_name='assigneeUserId' AND is_nullable='YES' AND column_default IS NULL)
+     );`,
+    true,
+  ).trim();
+  if (result !== "t\nt\nt\nt")
+    throw new Error(
+      "Unexpected workspace/ledger/journal historical defaults: " + result,
+    );
 }
 const fixture = (name) =>
   readFileSync(join(root, "tests/fixtures/migrations", name), "utf8");
@@ -236,8 +323,8 @@ try {
     "local_dispatch_only",
     `SELECT lyraseo_kernel.command(gen_random_uuid(),'lyraseo-kernel-a','/api/internal/runtime/dispatch','{"limit":1}',statement_timestamp(),statement_timestamp()+interval '60 seconds');`,
   );
-  const kernelHistory = () =>
-    snapshot(kernelDatabase, true) +
+  const kernelHistory = (baseline, current) =>
+    snapshot(kernelDatabase, true, baseline, current) +
     ["WorkDispatch", "InternalRequest", "RuntimePolicy"]
       .map((table) =>
         sql(
@@ -247,10 +334,10 @@ try {
         ),
       )
       .join("\n");
-  const historyBeforeBridge = kernelHistory();
+  const historyBeforeBridge = kernelHistory(21, 21);
   migrate(kernelDatabase, bridgeConfig);
   migrate(kernelDatabase, bridgeConfig);
-  if (historyBeforeBridge !== kernelHistory())
+  if (historyBeforeBridge !== kernelHistory(21, 22))
     throw new Error(
       "Bridge migration changed prior audit, paid or kernel history.",
     );
@@ -273,8 +360,8 @@ try {
   );
 
   sql(kernelDatabase, fixture("pre-retention.sql"));
-  const retentionHistory = () =>
-    kernelHistory() +
+  const retentionHistory = (baseline, current) =>
+    kernelHistory(baseline, current) +
     [
       "SearchSnapshot",
       "SearchImport",
@@ -285,17 +372,18 @@ try {
       "ContentRevision",
       "EvidenceReport",
     ]
-      .map((table) =>
-        sql(
+      .map((table) => {
+        const added = projection(table, baseline, current);
+        return sql(
           kernelDatabase,
-          `SELECT md5(jsonb_agg(to_jsonb(t)-'evidenceFormat'-'resultExpiresAt'-'storageFormat' ORDER BY id)::text) FROM "${table}" t`,
+          `SELECT md5(jsonb_agg(to_jsonb(t)${added} ORDER BY id)::text) FROM "${table}" t`,
           true,
-        ),
-      )
+        );
+      })
       .join("");
-  const oldDigests = retentionHistory();
+  const oldDigests = retentionHistory(22, 22);
   migrate(kernelDatabase, retentionConfig);
-  if (oldDigests !== retentionHistory())
+  if (oldDigests !== retentionHistory(22, 23))
     throw new Error(
       "P1 changed original typed historical evidence, report bytes or financial/dispatch history",
     );
@@ -345,11 +433,11 @@ try {
       true,
     );
   const originalCrypto = cryptoIdentity();
-  const before24 = retentionHistory() + clockRows();
+  const before24 = retentionHistory(23, 23) + clockRows();
   migrate(kernelDatabase, auditArtifactConfig);
   if (cryptoIdentity() !== originalCrypto)
     throw Error("Existing pgcrypto installation changed");
-  if (before24 !== retentionHistory() + clockRows())
+  if (before24 !== retentionHistory(23, 24) + clockRows())
     throw Error(
       "Artifact migration changed historical measurements or capture clocks",
     );
@@ -381,20 +469,20 @@ try {
     SELECT "workspaceId","siteId","auditId","pageId"::text,'[]',"pageId",id,generation,"capturedAt","expiresAt" FROM "ArtifactBlob";
   `,
   );
-  const auditArtifactHistory = () =>
-    retentionHistory() +
+  const auditArtifactHistory = (baseline, current) =>
+    retentionHistory(baseline, current) +
     clockRows() +
     sql(
       kernelDatabase,
       `
-    SELECT jsonb_agg(to_jsonb(b)-ARRAY['ownerKind','recordingId','runId','panelId','promptId'] ORDER BY id) FROM "ArtifactBlob" b;
-    SELECT jsonb_agg(to_jsonb(f)-ARRAY['recordingId','runId','panelId','promptId'] ORDER BY id) FROM "ArtifactRef" f;
+    SELECT jsonb_agg(to_jsonb(b)${projection("ArtifactBlob", baseline, current)} ORDER BY id) FROM "ArtifactBlob" b;
+    SELECT jsonb_agg(to_jsonb(f)${projection("ArtifactRef", baseline, current)} ORDER BY id) FROM "ArtifactRef" f;
   `,
       true,
     );
-  const before25 = auditArtifactHistory();
+  const before25 = auditArtifactHistory(24, 24);
   migrate(kernelDatabase, observationArtifactConfig);
-  if (before25 !== auditArtifactHistory())
+  if (before25 !== auditArtifactHistory(24, 25))
     throw Error(
       "Observation migration changed historical audit artifacts, measurements, clocks or financial history",
     );
@@ -415,20 +503,22 @@ try {
   console.log(
     "PASS: populated 24 → 25 preserves audit artifact/ref tuples, legacy answers, measurements, P1 clocks and financial history; private observation rows start empty, with no direct product-login grants.",
   );
-  const originHistory = () =>
-    auditArtifactHistory() +
+  const originHistory = (baseline, current) =>
+    auditArtifactHistory(baseline, current) +
     sql(
       kernelDatabase,
       `
     SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM "VisibilityRecording" t;
     SELECT jsonb_agg(to_jsonb(t) ORDER BY "promptId") FROM "VisibilityObservationSlot" t;
     SELECT jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text) FROM "AuditEvaluationScratch" t;
+    SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM "PageIdentity" t;
+    SELECT jsonb_agg(to_jsonb(t)${projection("PageJournal", baseline, current)} ORDER BY id) FROM "PageJournal" t;
   `,
       true,
     );
-  const before26 = originHistory();
+  const before26 = originHistory(25, 25);
   migrate(kernelDatabase, originConfig);
-  if (before26 !== originHistory())
+  if (before26 !== originHistory(25, 26))
     throw Error(
       "Origin migration changed historical rows, clocks, measurement or financial history",
     );
@@ -472,10 +562,13 @@ try {
     SELECT id,generation,"workspaceId",'00000000-0000-4000-8000-000000000027',
       '00000000-0000-4000-8000-000000000029','STORE_ORIGIN_V1',repeat('d',64)
     FROM "ArtifactBlob" WHERE id='00000000-0000-4000-8000-000000000026';
+    INSERT INTO "PageIdentity" (id,"workspaceId","siteId","originalUrl","normalizedUrl","createdBy")
+    VALUES ('historic-page','migration-workspace','migration-site','https://example.com/page','https://example.com/page','migration-owner');
+    INSERT INTO "PageJournal" (id,"workspaceId","siteId","pageId",revision,action,note,"userId","idempotencyKey","inputHash")
+    VALUES ('historic-journal','migration-workspace','migration-site','historic-page',2,'change','retained historical note','migration-owner','historic-change','fixture');
   `,
   );
-  const before27 =
-    originHistory() +
+  const originMetadata = () =>
     sql(
       kernelDatabase,
       `SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_registration t;
@@ -485,25 +578,20 @@ try {
        SELECT lyraseo_audit.version_descriptor(b) FROM "ArtifactBlob" b WHERE id='00000000-0000-4000-8000-000000000026';`,
       true,
     );
-  migrate(kernelDatabase);
-  const after27 =
-    originHistory() +
-    sql(
-      kernelDatabase,
-      `SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_registration t;
-       SELECT jsonb_agg(to_jsonb(t) ORDER BY key_id) FROM lyraseo_origin.source_store_key t;
-       SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM lyraseo_origin.store_namespace t;
-       SELECT jsonb_agg(to_jsonb(t) ORDER BY blob_id) FROM lyraseo_origin.blob_store_binding t;
-       SELECT lyraseo_audit.version_descriptor(b) FROM "ArtifactBlob" b WHERE id='00000000-0000-4000-8000-000000000026';`,
-      true,
-    );
+  const before27 = originHistory(26, 26) + originMetadata();
+  const schemaBefore27 = historySchema(kernelDatabase);
+  migrate(kernelDatabase, expiryConfig);
+  const after27 = originHistory(26, 27) + originMetadata();
   if (before27 !== after27)
     throw Error(
       "Expiry migration changed accepted source, origin, authored, measurement or financial history",
     );
-  const expiryState = sql(
-    kernelDatabase,
-    `SELECT count(*) FROM "ArtifactExpiryPlan";
+  if (schemaBefore27 !== historySchema(kernelDatabase))
+    throw Error("Expiry migration changed historical column metadata.");
+  const expiryState = () =>
+    sql(
+      kernelDatabase,
+      `SELECT count(*) FROM "ArtifactExpiryPlan";
      SELECT count(*) FROM "ArtifactExpiryItem";
      SELECT count(*) FROM "ArtifactExpiryEvent";
      SELECT count(*) FROM lyraseo_expiry.environment;
@@ -512,15 +600,35 @@ try {
      SELECT has_function_privilege('lyraseo_artifact_maintenance','lyraseo_expiry.claim(jsonb,uuid,uuid,text)','EXECUTE');
      SELECT has_function_privilege('lyraseo_artifact_maintenance','lyraseo_expiry.record_pending(uuid,uuid,text)','EXECUTE');
      SELECT to_regprocedure('lyraseo_expiry.record_pending(uuid,text)') IS NULL;`,
-    true,
-  ).trim();
-  if (expiryState !== "0\n0\n0\n0\n0\nf\nt\nt\nt")
+      true,
+    ).trim();
+  const expiryAt27 = expiryState();
+  if (expiryAt27 !== "0\n0\n0\n0\n0\nf\nt\nt\nt")
     throw Error(
       "Expiry migration enrolled data, widened login grants or lost bounded function access: " +
-        expiryState,
+        expiryAt27,
     );
   console.log(
     "PASS: populated accepted 26 -> 27 preserves source/origin/measurement/finance/dispatch bytes; no backfill, no enrollment, bounded maintenance function only.",
+  );
+  // Compare the populated 27 baseline with the assembled head separately:
+  // later additive columns must receive their exact legacy defaults, while
+  // every older field and any unexpected new field remain part of the snapshot.
+  const beforeHead = originHistory(27, 27) + originMetadata();
+  const schemaBeforeHead = historySchema(kernelDatabase);
+  migrate(kernelDatabase);
+  assertAdditiveDefaults(kernelDatabase);
+  const expiryAtHead = expiryState();
+  if (expiryAtHead !== "0\n0\n0\n0\n0\nf\nt\nt\nt")
+    throw Error(
+      "Later migrations changed expiry security or enrollment: " + expiryAtHead,
+    );
+  if (beforeHead !== originHistory(27, 99) + originMetadata())
+    throw new Error("Later migrations changed accepted historical data.");
+  if (schemaBeforeHead !== historySchema(kernelDatabase, true))
+    throw new Error("Later migrations changed historical column metadata.");
+  console.log(
+    "PASS: populated 27 -> head preserves historical values and applies exact workspace/ledger/journal defaults.",
   );
   for (const scenario of ["empty", "seven", "twenty"]) {
     const database = `lyraseo_expiry_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
@@ -531,7 +639,12 @@ try {
       migrate(database, scenario === "seven" ? oldConfig : currentConfig);
       sql(database, fixture("dispatch-paid.sql"));
       if (scenario === "twenty") sql(database, fixture("dispatch-audits.sql"));
-      history = snapshot(database, scenario === "twenty");
+      history = snapshot(
+        database,
+        scenario === "twenty",
+        scenario === "seven" ? 7 : 20,
+        scenario === "seven" ? 7 : 20,
+      );
       // Emulate a stopped old publisher, after it has read a pending row in a
       // separate restricted connection. Drop all buffered refs at the barrier.
       const old = login(
@@ -544,6 +657,7 @@ try {
         throw new Error("Legacy authority rehearsal failed.");
     }
     migrate(database);
+    assertAdditiveDefaults(database);
     const applied = Number(
       sql(
         database,
@@ -554,7 +668,15 @@ try {
     if (applied !== migrations.length)
       throw new Error("Migration count does not match source.");
     if (history !== undefined) {
-      if (history !== snapshot(database, scenario === "twenty"))
+      if (
+        history !==
+        snapshot(
+          database,
+          scenario === "twenty",
+          scenario === "seven" ? 7 : 20,
+          99,
+        )
+      )
         throw new Error(
           "Historical identity, audit, receipt, ledger or outbox state changed.",
         );
@@ -627,7 +749,16 @@ try {
         throw new Error(
           "Ledger-only handoff did not progress while persisting all balances.",
         );
-      if (history !== snapshot(database, scenario === "twenty"))
+      assertAdditiveDefaults(database);
+      if (
+        history !==
+        snapshot(
+          database,
+          scenario === "twenty",
+          scenario === "seven" ? 7 : 20,
+          99,
+        )
+      )
         throw new Error("Ledger-only recovery changed financial facts.");
     }
     if (scenario === "twenty") {

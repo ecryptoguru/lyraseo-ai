@@ -12,6 +12,7 @@ enum Role {
   VIEWER
 }
 model ProductUser {
+  keywordSelections KeywordSelection[]
   id String @id @default(cuid())
   suspended Boolean @default(false)
   securityVersion Int @default(0)
@@ -34,6 +35,7 @@ model ProviderIdentity {
 model Workspace {
   id String @id @default(cuid())
   name String
+  accessRevision Int @default(0)
   deletedAt DateTime?
   createdAt DateTime @default(now())
   memberships Membership[]
@@ -49,6 +51,7 @@ model Membership {
   @@id([workspaceId,userId])
 }
 model Site {
+  keywordSelections KeywordSelection[]
   analyticsStates AnalyticsOAuthState[]
   analyticsConnection AnalyticsConnection?
   analyticsImports AnalyticsImport[]
@@ -80,6 +83,75 @@ model SiteGrant {
   site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
   member Membership @relation(fields:[workspaceId,userId],references:[workspaceId,userId],onDelete:Cascade)
   @@id([workspaceId,siteId,userId])
+  @@index([workspaceId,userId,siteId])
+}
+
+model WorkspaceAccessEvent {
+ id String @id @default(cuid())
+ workspaceId String
+ actorId String
+ action String
+ targetUserId String?
+ siteId String?
+ previousRole String?
+ nextRole String?
+ accessRevision Int
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,accessRevision])
+ @@index([workspaceId,createdAt,id])
+}
+model WorkspaceInvitation {
+ id String @id @default(cuid())
+ workspaceId String
+ tokenHash String @unique
+ invitedEmailDigest String
+ role Role
+ createdBy String
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ acceptedAt DateTime?
+ acceptedBy String?
+ revokedAt DateTime?
+ sites WorkspaceInvitationSite[]
+ @@unique([workspaceId,id])
+ @@index([workspaceId,createdAt,id])
+ @@index([expiresAt,id])
+}
+model WorkspaceInvitationSite {
+ workspaceId String
+ invitationId String
+ siteId String
+ invitation WorkspaceInvitation @relation(fields:[workspaceId,invitationId],references:[workspaceId,id],onDelete:Cascade)
+ @@id([workspaceId,invitationId,siteId])
+}
+model IssueAssignment {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ auditId String
+ ruleId String
+ scopeKey String
+ assigneeUserId String?
+ revision Int
+ updatedAt DateTime @default(now())
+ @@unique([workspaceId,siteId,auditId,ruleId,scopeKey])
+ @@unique([workspaceId,siteId,id])
+ @@index([workspaceId,siteId,updatedAt,id])
+ @@index([workspaceId,siteId,assigneeUserId,updatedAt,id])
+}
+model IssueAssignmentEvent {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ assignmentId String
+ revision Int
+ actorId String
+ assigneeUserId String?
+ createdAt DateTime @default(now())
+ idempotencyKey String
+ inputHash String
+ @@unique([assignmentId,revision])
+ @@unique([workspaceId,siteId,actorId,idempotencyKey])
 }
 
 model StaffGrant {
@@ -123,6 +195,9 @@ model Operation {
   tariffVersion String
   reservedCost Decimal @db.Decimal(20,9)
   actualCost Decimal? @db.Decimal(20,9)
+  keywordResult KeywordEnrichmentResult?
+  ledgerMode String @default("LEGACY")
+  ledgerVersion Int @default(0)
   status String @default("QUEUED")
   createdAt DateTime @default(now())
   expiresAt DateTime
@@ -202,6 +277,7 @@ model OperationQuote {
   site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
   consumedOperation Operation? @relation(fields:[consumedOperationId],references:[id],onDelete:Restrict)
   @@index([userId,expiresAt])
+ @@unique([workspaceId,siteId,userId,id])
 }
 
 model AuditRun {
@@ -347,6 +423,8 @@ model ContentDraft {
  @@index([workspaceId,siteId,createdAt])
 }
 model ContentRevision {
+ historyExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,draftId,historyExpiresAt],map:"ContentRevision_history_expiry")
  id String @id @default(cuid())
  workspaceId String
  draftId String
@@ -360,15 +438,18 @@ model ContentRevision {
 }
 model EvidenceReport {
  id String @id @default(cuid())
+ // Derived stored identity digest; PostgreSQL GENERATED ALWAYS controls writes.
+ identifierKey String @default(dbgenerated())
  workspaceId String
  siteId String
  title String
  evidenceFormat String?
  snapshot Json
- pdf Bytes
- csv String
+ pdf Bytes?
+ csv String?
  createdAt DateTime @default(now())
  @@index([workspaceId,siteId,createdAt])
+ @@index([workspaceId,siteId,identifierKey], map: "EvidenceReport_opaque_key_idx")
 }
 
 model VisibilityPanel {
@@ -449,6 +530,7 @@ model PageJournal {
  action String
  note String
  userId String
+ assigneeUserId String?
  idempotencyKey String
  inputHash String
  contentDraftId String?
@@ -804,4 +886,90 @@ model VisibilityObservationSlot {
  @@id([workspaceId,siteId,runId,promptId])
  @@unique([workspaceId,siteId,panelId,runId,recordingId,promptId,observedAt,rawExpiresAt])
  @@index([rawExpiresAt,runId,promptId])
+}
+
+model WorkspaceBrandingRevision {
+ id String @id
+ workspaceId String
+ revision Int
+ displayName String
+ logoBytes Bytes?
+ logoSha256 String?
+ mime String?
+ width Int?
+ height Int?
+ createdBy String
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,revision])
+ @@index([workspaceId,createdAt,id])
+}
+
+model AgencyBatchQuote {
+ id String @id
+ workspaceId String
+ userId String
+ securityVersion Int
+ requestInput Json
+ inputHash String
+ confirmationHash String
+ preview Json
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ confirmedAt DateTime?
+ confirmationKey String?
+ @@unique([workspaceId,userId,id])
+ @@unique([workspaceId,userId,confirmationKey])
+ @@index([userId,createdAt,id])
+ @@index([expiresAt,id])
+}
+model AgencyBatchItem {
+ batchQuoteId String
+ workspaceId String
+ userId String
+ siteId String
+ ordinal Int
+ quoteId String?
+ operationId String? @unique
+ status String
+ errorCode String?
+ @@id([batchQuoteId,ordinal])
+ @@unique([batchQuoteId,siteId])
+}
+
+model KeywordSelection {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ workspaceId String
+ siteId String
+ createdBy String
+ idempotencyKey String
+ requestHash String
+ request Json
+ sourceSnapshotId String
+ status String @default("UNQUALIFIED")
+ createdAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ resultExpiresAt DateTime @db.Timestamptz(6)
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ user ProductUser @relation(fields:[createdBy],references:[id],onDelete:Restrict)
+ result KeywordEnrichmentResult?
+ @@unique([workspaceId,siteId,id])
+ @@unique([workspaceId,siteId,createdBy,idempotencyKey])
+ @@index([workspaceId,siteId,createdAt,id],map:"keyword_selection_scope")
+}
+model KeywordEnrichmentResult {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ workspaceId String
+ siteId String
+ selectionId String @unique @db.Uuid
+ operationId String @unique
+ source String
+ currency String?
+ method String
+ market Json
+ collectedAt DateTime @db.Timestamptz(6)
+ recordedAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ resultExpiresAt DateTime @db.Timestamptz(6)
+ rows Json
+ @@unique([workspaceId,siteId,selectionId])
+ selection KeywordSelection @relation(fields:[workspaceId,siteId,selectionId],references:[workspaceId,siteId,id],onDelete:Restrict)
+ operation Operation @relation(fields:[operationId],references:[id],onDelete:Restrict)
 }

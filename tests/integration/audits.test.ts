@@ -366,7 +366,15 @@ it("accepts bounded five MiB raw source and rejects cross-origin finals and futu
   });
   await expect(
     admin.auditPage.deleteMany({ where: { auditId: run.id } }),
-  ).resolves.toMatchObject({ count: 1 });
+  ).rejects.toThrow("IMMUTABLE_AUDIT");
+  const stored = await admin.auditPage.findFirstOrThrow({
+    where: { auditId: run.id },
+    select: { provenance: true },
+  });
+  const raw = (stored.provenance as { rawHtml: string }).rawHtml;
+  expect(Buffer.byteLength(raw, "utf8")).toBe(5 * 1024 * 1024);
+  expect(raw[0]).toBe("\u0001");
+  expect(raw.at(-1)).toBe("\u0001");
 });
 
 it("rejects fabricated rendered evidence at the raw checkpoint", async () => {

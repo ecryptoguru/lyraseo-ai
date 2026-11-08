@@ -1,0 +1,64 @@
+.console {
+  min-width: 0;
+}
+.console button {
+  min-height: 44px;
+  border: 1px solid var(--border, #cbd0db);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.85rem;
+  background: var(--surface, #fff);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.console button:hover:not(:disabled),
+.console button[aria-current="page"] {
+  background: var(--surface-2, #e7ecf4);
+}
+.console button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.console button:focus-visible,
+.console input:focus-visible,
+.console textarea:focus-visible,
+.console select:focus-visible {
+  outline: 3px solid var(--accent, #4b56e9);
+  outline-offset: 3px;
+}
+.console label {
+  display: block;
+  font-weight: 600;
+  margin-block: 0.8rem 0.35rem;
+}
+.console input,
+.console textarea,
+.console select {
+  display: block;
+  width: 100%;
+  max-width: 40rem;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 0.5rem;
+  border: 1px solid var(--border, #cbd0db);
+  border-radius: 0.4rem;
+  font: inherit;
+  color: inherit;
+  background: var(--surface, #fff);
+}
+.console fieldset {
+  min-width: 0;
+  padding: 1rem;
+  margin-block: 1rem;
+  border: 1px solid var(--border, #cbd0db);
+  border-radius: 0.75rem;
+}
+.console dt {
+  font-weight: 600;
+}
+.console dd {
+  overflow-wrap: anywhere;
+}
+.console p[role="status"] {
+  min-height: 1.5em;
+}

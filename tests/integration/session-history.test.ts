@@ -1,10 +1,8 @@
 import { afterAll, beforeEach, it, expect } from "vitest";
 import { createDatabase } from "../../packages/db/src";
 import { acceptSessionHistory } from "../../packages/db/src/identity";
-import { resetDatabase } from "../helpers/database";
-const db = createDatabase(
-  "postgresql://lyraseo_identity:local_identity_only@127.0.0.1:54329/lyraseo_test",
-);
+import { resetDatabase, identityUrl } from "../helpers/database";
+const db = createDatabase(identityUrl);
 beforeEach(resetDatabase);
 afterAll(() => db.$disconnect());
 const start = new Date("2026-10-01T10:00:00Z"),

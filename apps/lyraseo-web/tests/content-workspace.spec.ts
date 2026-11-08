@@ -139,6 +139,7 @@ test("viewer can download a private report without draft or report creation cont
                 title:
                   "Private evidence report for the international product catalogue and accessibility review",
                 evidenceFormat: "saved-evidence-v2",
+                formatStatus: { pdf: "available", csv: "available" },
                 createdAt: "2026-11-02T00:00:00Z",
               },
             ],
@@ -179,7 +180,7 @@ test("viewer can download a private report without draft or report creation cont
 
 test("saved draft loads complete history and reports use their visible independent selection", async ({
   page,
-}) => {
+}, testInfo) => {
   const latest = {
     ...draft,
     revision: 2,
@@ -209,6 +210,12 @@ test("saved draft loads complete history and reports use their visible independe
   });
   let reportCommand: unknown;
   await page.route("**/api/reports**", (route) => {
+    if (
+      new URL(route.request().url()).searchParams.get("brandingOptions") === "1"
+    )
+      return route.fulfill({
+        json: { choices: [{ revision: 3, displayName: "Acme agency" }] },
+      });
     if (route.request().method() === "POST")
       reportCommand = route.request().postDataJSON();
     return route.fulfill({ json: [] });
@@ -270,11 +277,23 @@ test("saved draft loads complete history and reports use their visible independe
     .getByRole("checkbox")
     .nth(1)
     .check();
+  await page
+    .getByLabel("Report template", { exact: true })
+    .selectOption("editor");
+  await page
+    .getByLabel("Report branding", { exact: true })
+    .selectOption({ label: "Acme agency · version 3" });
+  await page.screenshot({
+    path: testInfo.outputPath("approved-branding-choice.png"),
+    fullPage: true,
+  });
   await create.click();
   expect(reportCommand).toEqual({
     workspaceId: "a",
     siteId: "site",
     title: "Evidence B report",
+    reportTemplate: "editor",
+    brandingRevision: 3,
     auditIds: ["audit-b"],
     searchSnapshotIds: [],
   });
@@ -368,6 +387,7 @@ test("explicit report comparison preserves independent selections on validation 
     workspaceId: "a",
     siteId: "site",
     title: "Immutable comparison acceptance",
+    reportTemplate: "founder",
     auditIds: ["before", "after"],
     searchSnapshotIds: [],
     comparison: { beforeAuditId: "before", afterAuditId: "after" },
@@ -581,9 +601,7 @@ test("pins a historical revision, retains a citation from an expired source and 
   await expect(page.getByLabel("Editable Markdown draft")).toHaveValue(
     "Unsaved edits",
   );
-  await expect(
-    page.getByText("Original downloads unavailable pending legacy review."),
-  ).toBeVisible();
+  await expect(page.getByText("PDF: pending-review.")).toBeVisible();
   await expect(page.getByRole("link", { name: "Download PDF" })).toHaveCount(0);
   await page.getByRole("button", { name: "Preview Original report" }).click();
   await expect(
@@ -602,4 +620,443 @@ test("pins a historical revision, retains a citation from an expired source and 
     path: `../../output/playwright/retention-${testInfo.project.name}.png`,
     fullPage: true,
   });
+});
+
+test("template assistance is reviewed, editable and rejectable before an explicit save", async ({
+  page,
+}, testInfo) => {
+  const commands: Array<Record<string, unknown>> = [];
+  await page.route("**/api/content**", (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: [] });
+    const command = route.request().postDataJSON();
+    commands.push(command);
+    if (command.action === "assist")
+      return route.fulfill({
+        json: {
+          method: "EVIDENCE_TEMPLATE_V1",
+          evidenceFingerprint: "f".repeat(64),
+          kind: "draft",
+          context: { id: "context-1", revision: 1 },
+          content: {
+            title: "Template title",
+            body: "Deterministic template, not AI generation.",
+            assumptions: ["Review intent"],
+            citations: [
+              { sourceId: "audit:audit", note: "Saved audit" },
+              {
+                sourceId: "context:context-1:v1",
+                note: "Reviewed site context revision 1",
+              },
+            ],
+          },
+          links: [
+            {
+              id: "link1",
+              sourceId: "audit:audit",
+              sourceUrl: "https://example.com/",
+              url: "https://example.com/contact",
+              anchorText: "Contact us",
+              recommendation:
+                "Review this existing raw link; rendered visibility needs review.",
+            },
+          ],
+          limitations: ["No provider request or charge."],
+        },
+      });
+    return route.fulfill({
+      json: { ...draft, history: [{ revision: 1, content: command }] },
+    });
+  });
+  await page.route("**/api/reports**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/audits**", (route) =>
+    route.fulfill({
+      json: [
+        { id: "audit", status: "COMPLETED", createdAt: "2026-11-02T00:00:00Z" },
+      ],
+    }),
+  );
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Controlled writing template</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  await page
+    .getByRole("group", {
+      name: "Select up to five audits and five search imports",
+      exact: true,
+    })
+    .getByRole("checkbox")
+    .check();
+  await page
+    .getByRole("button", { name: "Prepare evidence template", exact: true })
+    .click();
+  await expect(page.getByLabel("Draft title")).toHaveValue("Template title");
+  await expect(
+    page.getByText("Reviewed context revision 1", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel("Why context:context-1:v1 supports this draft", {
+      exact: true,
+    }),
+  ).toHaveValue("Reviewed site context revision 1");
+  expect(commands.map((command) => command.action)).toEqual(["assist"]);
+  await page.screenshot({
+    path: testInfo.outputPath("editorial-template-review.png"),
+    fullPage: true,
+  });
+  await page
+    .getByRole("button", { name: "Reject link suggestion", exact: true })
+    .click();
+  await expect(page.getByText("Contact us", { exact: true })).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Discard prepared template", exact: true })
+    .click();
+  await expect(page.getByLabel("Draft title")).toHaveValue("");
+  await page
+    .getByRole("button", { name: "Prepare evidence template", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Use link suggestion", exact: true })
+    .click();
+  await expect(page.getByLabel("Editable Markdown draft")).toHaveValue(
+    /https:\/\/example\.com\/contact/,
+  );
+  await page
+    .getByLabel("Editable Markdown draft")
+    .fill("My reviewed template edits");
+  await page
+    .getByRole("button", { name: "Save draft with evidence", exact: true })
+    .click();
+  expect(commands.map((command) => command.action)).toEqual([
+    "assist",
+    "assist",
+    "create",
+  ]);
+  expect(commands[2]).toMatchObject({
+    action: "create",
+    expectedContextRevisionId: "context-1",
+    expectedEvidenceFingerprint: "f".repeat(64),
+    body: "My reviewed template edits",
+  });
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});
+
+test("unavailable branding choices preserve typed work and recover independently", async ({
+  page,
+}) => {
+  let choices = 0,
+    posts = 0;
+  await page.route("**/api/content**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/reports**", (route) => {
+    if (route.request().method() === "POST") {
+      posts++;
+      return route.fulfill({ json: [] });
+    }
+    if (
+      new URL(route.request().url()).searchParams.get("brandingOptions") === "1"
+    ) {
+      choices++;
+      return choices === 1
+        ? route.fulfill({ status: 503, json: { error: "Unavailable" } })
+        : route.fulfill({
+            json: {
+              choices: [{ revision: 2, displayName: "Approved agency" }],
+            },
+          });
+    }
+    return route.fulfill({ json: [] });
+  });
+  await page.route("**/api/audits**", (route) =>
+    route.fulfill({
+      json: [
+        { id: "audit", status: "COMPLETED", createdAt: "2026-11-02T00:00:00Z" },
+      ],
+    }),
+  );
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Branding recovery fixture</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  await expect(
+    page.getByText(
+      "Workspace branding could not load. Lyraseo reports remain available.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await page
+    .getByLabel("Draft title", { exact: true })
+    .fill("My unsaved draft");
+  await page
+    .getByLabel("Editable Markdown draft", { exact: true })
+    .fill("My reviewed text");
+  await page
+    .getByLabel("Report title", { exact: true })
+    .fill("My unsaved report");
+  await page
+    .getByRole("group", {
+      name: "Report evidence: select up to five audits and five search imports",
+      exact: true,
+    })
+    .getByRole("checkbox")
+    .check();
+  await expect(
+    page.getByRole("button", {
+      name: "Create report from selected evidence",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Retry branding choices", exact: true })
+    .click();
+  await page
+    .getByLabel("Report branding", { exact: true })
+    .selectOption({ label: "Approved agency · version 2" });
+  await expect(page.getByLabel("Draft title", { exact: true })).toHaveValue(
+    "My unsaved draft",
+  );
+  await expect(
+    page.getByLabel("Editable Markdown draft", { exact: true }),
+  ).toHaveValue("My reviewed text");
+  await expect(page.getByLabel("Report title", { exact: true })).toHaveValue(
+    "My unsaved report",
+  );
+  expect(posts).toBe(0);
+  expect(choices).toBe(2);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
+for (const supporting of ["assumptions", "citation notes"] as const) {
+  test(`unsaved ${supporting} prevent template preparation without losing supporting text`, async ({
+    page,
+  }) => {
+    const commands: unknown[] = [];
+    await page.route("**/api/content**", (route) => {
+      if (route.request().method() === "POST")
+        commands.push(route.request().postDataJSON());
+      return route.fulfill({ json: [] });
+    });
+    await page.route("**/api/reports**", (route) =>
+      route.fulfill({
+        json: new URL(route.request().url()).searchParams.has("brandingOptions")
+          ? { choices: [] }
+          : [],
+      }),
+    );
+    await page.route("**/api/audits**", (route) =>
+      route.fulfill({
+        json: [
+          {
+            id: "audit",
+            status: "COMPLETED",
+            createdAt: "2026-11-02T00:00:00Z",
+          },
+        ],
+      }),
+    );
+    await page.route("**/api/search**", (route) =>
+      route.fulfill({ json: { snapshots: [] } }),
+    );
+    await page.goto("/sign-in");
+    await page.locator("main").evaluate((main) => {
+      main.className = "pilot-page";
+      main.innerHTML =
+        '<h1>Supporting text preservation</h1><div id="content-fixture"></div>';
+    });
+    await page.addScriptTag({ content: await bundle(true) });
+    await page
+      .getByRole("group", {
+        name: "Select up to five audits and five search imports",
+        exact: true,
+      })
+      .getByRole("checkbox")
+      .check();
+    const field =
+      supporting === "assumptions"
+        ? page.getByLabel("Assumptions to verify, one per line", {
+            exact: true,
+          })
+        : page.getByLabel("Why audit:audit supports this draft", {
+            exact: true,
+          });
+    await field.fill("My unsaved supporting text");
+    await expect(page.getByLabel("Draft title", { exact: true })).toHaveValue(
+      "",
+    );
+    await expect(
+      page.getByLabel("Editable Markdown draft", { exact: true }),
+    ).toHaveValue("");
+    const prepare = page.getByRole("button", {
+      name: "Prepare evidence template",
+      exact: true,
+    });
+    await expect(prepare).toBeDisabled();
+    await expect(prepare).toHaveAccessibleDescription(
+      /empty title, draft, assumptions, and citation notes/i,
+    );
+    await prepare.click({ force: true });
+    await expect(field).toHaveValue("My unsaved supporting text");
+    expect(commands).toEqual([]);
+    await field.fill("");
+    await expect(prepare).toBeEnabled();
+  });
+}
+
+test("withheld legacy draft snapshot keeps authored content readable without reporting empty evidence", async ({
+  page,
+  consoleHealth,
+}, testInfo) => {
+  const { snapshot: _snapshot, ...saved } = draft;
+  const withheld = { ...saved, evidenceStatus: "legacy-lineage-withheld" };
+  await page.route("**/api/content**", (route) =>
+    route.fulfill({ json: [withheld] }),
+  );
+  await page.route("**/api/reports**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/audits**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Controlled legacy draft fixture</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  await page
+    .getByRole("button", { name: "Product page improvement · revision 1" })
+    .click();
+  await expect(page.getByLabel("Editable Markdown draft")).toHaveValue(
+    "Reviewed draft",
+  );
+  await expect(
+    page.getByText("Historical source evidence is withheld", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Saved citation · The title finding supports the proposed change.",
+    ),
+  ).toBeVisible();
+  await page
+    .getByText("Observed internal-link evidence", { exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Historical internal-link evidence is withheld pending source-lineage verification.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No qualifying anchor context was captured", {
+      exact: false,
+    }),
+  ).toHaveCount(0);
+  expect(consoleHealth).toEqual([]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/legacy-draft-withheld-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
+
+test("report review states keep each format independent and show withdrawn originals", async ({
+  page,
+}, testInfo) => {
+  await page.route("**/api/content**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/audits**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { snapshots: [] } }),
+  );
+  await page.route("**/api/reports**", (route) =>
+    route.fulfill({
+      json: [
+        {
+          id: "withdrawn",
+          title: "Withdrawn historical report",
+          createdAt: "2020-01-01T00:00:00Z",
+          evidenceFormat: null,
+          formatStatus: { pdf: "withdrawn", csv: "withdrawn" },
+        },
+        {
+          id: "partial",
+          title: "Separate format decisions",
+          createdAt: "2020-01-01T00:00:00Z",
+          evidenceFormat: null,
+          formatStatus: { pdf: "pending-review", csv: "available" },
+        },
+        {
+          id: "current",
+          title: "Current saved report",
+          createdAt: "2020-01-01T00:00:00Z",
+          evidenceFormat: "saved-evidence-v2",
+          formatStatus: { pdf: "available", csv: "available" },
+        },
+      ],
+    }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Report review fixture</h1><div id="content-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(false) });
+  const withdrawn = page
+    .getByRole("listitem")
+    .filter({ hasText: "Withdrawn historical report" });
+  await expect(withdrawn.getByText("PDF: withdrawn.")).toBeVisible();
+  await expect(withdrawn.getByText("CSV: withdrawn.")).toBeVisible();
+  await expect(withdrawn.getByRole("link")).toHaveCount(0);
+  const partial = page
+    .getByRole("listitem")
+    .filter({ hasText: "Separate format decisions" });
+  await expect(partial.getByRole("link", { name: "Download PDF" })).toHaveCount(
+    0,
+  );
+  await expect(
+    partial.getByRole("link", { name: "Download CSV" }),
+  ).toBeVisible();
+  const current = page
+    .getByRole("listitem")
+    .filter({ hasText: "Current saved report" });
+  await expect(
+    current.getByRole("link", { name: "Download PDF" }),
+  ).toBeVisible();
+  await expect(
+    current.getByRole("link", { name: "Download CSV" }),
+  ).toBeVisible();
+  const metrics = await page.evaluate(() => ({
+    width: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(metrics.scroll).toBeLessThanOrEqual(metrics.width + 1);
+  await page.screenshot({
+    path: `../../output/playwright/report-review-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(
+      (v) => v.impact === "critical" || v.impact === "serious",
+    ),
+  ).toEqual([]);
 });

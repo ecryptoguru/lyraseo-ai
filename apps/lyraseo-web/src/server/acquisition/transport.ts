@@ -44,7 +44,19 @@ export async function publicHttpsTransport(
 ): Promise<Response> {
   const url = new URL(normalizeUrl(value));
   const address = await resolvePublicAddress(url.hostname, signal);
-  await beforeSocket?.();
+  if (beforeSocket) {
+    signal.throwIfAborted();
+    let abort = () => {};
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      await Promise.race([beforeSocket(), cancelled]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  }
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const req = request(

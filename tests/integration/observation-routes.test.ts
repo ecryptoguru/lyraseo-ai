@@ -228,3 +228,43 @@ it.each(["grant", "rights"])(
     expect(await response.text()).not.toContain("PRIVATE_ROUTE_ANSWER");
   },
 );
+it("reports a separately expired visibility result explicitly", async () => {
+  const p = await createVisibilityPanel(
+    db,
+    actor,
+    scope,
+    [{ id: "p", text: "Tools?", label: "neutral" }],
+    [{ id: "a", name: "Alpha", aliases: ["Alpha"], domains: [] }],
+  );
+  await reviewVisibilityPanel(db, actor, scope, p.id);
+  const observedAt = new Date(Date.now() - 450 * 86400000).toISOString();
+  const run = await recordVisibilityEvidence(db, actor, scope, p.id, {
+    profile: "azure-sol-api",
+    provider: "azure",
+    model: "fixture",
+    modelVersion: "v1",
+    retrievalMode: "fixture",
+    requestedLocale: { language: "en", market: "IN" },
+    confirmedLocale: { language: null, market: null },
+    synthetic: true,
+    rawAnswerRights: true,
+    observedAt,
+    slots: [
+      {
+        promptId: "p",
+        state: "successful",
+        body: "expired legacy",
+        annotations: [],
+        providerTaskId: "task",
+        completedAt: observedAt,
+      },
+    ],
+  });
+  const response = await GET(
+    new Request(
+      `http://localhost:3000/api/visibility?workspaceId=a&siteId=a-site&runId=${run.id}`,
+    ),
+  );
+  expect(response.status).toBe(410);
+  expect(await response.json()).toMatchObject({ state: "result-expired" });
+});

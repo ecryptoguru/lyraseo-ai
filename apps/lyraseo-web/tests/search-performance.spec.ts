@@ -135,6 +135,9 @@ test("reopens failed and stalled imports without dispatch and retries the exact 
   page,
 }, testInfo) => {
   const posts: unknown[] = [];
+  await page.route("**/api/keywords**", (route) =>
+    route.fulfill({ status: 503, json: { error: "UNAVAILABLE" } }),
+  );
   await page.route("**/api/search**", (route) => {
     if (route.request().method() === "POST") {
       posts.push(route.request().postDataJSON());
@@ -163,7 +166,15 @@ test("reopens failed and stalled imports without dispatch and retries the exact 
     page.getByRole("heading", { name: "Saved search evidence" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Refresh import status" }).click();
-  await expect(page.getByRole("status")).toContainText("No import was started");
+  const searchStatus = page
+    .getByRole("region", { name: "Search Console connection" })
+    .getByRole("status");
+  await expect(searchStatus).toContainText("No import was started");
+  await expect(
+    page
+      .getByRole("region", { name: "Keyword enrichment" })
+      .getByRole("status"),
+  ).toHaveText("Saved keyword selections could not load. Refresh to retry.");
   expect(posts).toEqual([]);
   const failed = page.getByRole("listitem").filter({
     has: page.getByRole("heading", {
@@ -171,9 +182,7 @@ test("reopens failed and stalled imports without dispatch and retries the exact 
     }),
   });
   await failed.getByRole("button", { name: "Retry this window" }).click();
-  await expect(page.getByRole("status")).toContainText(
-    "An import is already running",
-  );
+  await expect(searchStatus).toContainText("An import is already running");
   expect(posts).toEqual([
     {
       workspaceId: "a",
@@ -244,6 +253,9 @@ for (const mode of ["viewer", "paused"] as const) {
 test("search evidence shows partial coverage and preserves dates after import failure", async ({
   page,
 }, testInfo) => {
+  await page.route("**/api/keywords**", (route) =>
+    route.fulfill({ status: 503, json: { error: "UNAVAILABLE" } }),
+  );
   await page.route("**/api/search**", (route) =>
     route.request().method() === "POST"
       ? route.fulfill({
@@ -268,9 +280,16 @@ test("search evidence shows partial coverage and preserves dates after import fa
   await page.getByLabel("Start date").fill("2026-10-01");
   await page.getByLabel("End date").fill("2026-10-28");
   await page.getByRole("button", { name: "Import selected window" }).click();
-  await expect(page.getByRole("status")).toContainText(
-    "Reconnect Search Console",
-  );
+  await expect(
+    page
+      .getByRole("region", { name: "Search Console connection" })
+      .getByRole("status"),
+  ).toContainText("Reconnect Search Console");
+  await expect(
+    page
+      .getByRole("region", { name: "Keyword enrichment" })
+      .getByRole("status"),
+  ).toHaveText("Saved keyword selections could not load. Refresh to retry.");
   await expect(page.getByLabel("Start date")).toHaveValue("2026-10-01");
   await expect(
     page.getByRole("heading", { name: "Opportunities to inspect" }),
@@ -308,4 +327,106 @@ test("viewer sees evidence without Google connection or import controls", async 
   await expect(
     page.getByRole("button", { name: "Import selected window" }),
   ).toHaveCount(0);
+});
+
+test("withheld legacy search correlation keeps independent observations and never implies clean audit findings", async ({
+  page,
+}, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  let empty = false;
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({
+      json: {
+        ...evidence,
+        auditEvidenceStatus: "legacy-lineage-withheld",
+        opportunities: empty ? [] : evidence.opportunities,
+      },
+    }),
+  );
+  await reopenFixture(page, false);
+  await expect(
+    page.getByText("Audit-derived search opportunities are withheld", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "best observed page" }),
+  ).toBeVisible();
+  empty = true;
+  await reopenFixture(page, false);
+  await expect(
+    page.getByText("Audit-derived search opportunities are withheld", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No opportunities meet the current observed-data rules.", {
+      exact: false,
+    }),
+  ).toHaveCount(0);
+  expect(errors).toEqual([]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/legacy-search-withheld-r1-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
+
+test("shows the measured query-page CTR with its source and limitations", async ({
+  page,
+}) => {
+  const { buildSearchOpportunities } =
+    await import("../../../packages/visibility/src/search");
+  const opportunities = buildSearchOpportunities([
+    {
+      id: "pair-snapshot",
+      property: "https://example.com/",
+      shape: "query,page",
+      startDate: "2026-10-01",
+      endDate: "2026-10-28",
+      status: "partial",
+      rows: [
+        {
+          keys: ["buy widgets", "https://example.com/widgets"],
+          impressions: 100,
+          clicks: 1,
+          position: 3,
+        },
+        {
+          keys: ["long-query-" + "x".repeat(500), "https://example.com/long"],
+          impressions: 100,
+          clicks: 1,
+          position: 3,
+        },
+      ],
+    },
+  ]);
+  await page.route("**/api/search**", (route) =>
+    route.fulfill({ json: { ...evidence, opportunities } }),
+  );
+  await reopenFixture(page, false);
+  const item = page.getByRole("listitem").filter({
+    has: page.getByRole("heading", { name: "low observed query ctr" }),
+    hasText: "buy widgets",
+  });
+  await expect(item).toContainText("buy widgets");
+  await expect(item).toContainText("https://example.com/widgets");
+  await expect(item).toContainText(
+    "do not represent the query's property-wide totals",
+  );
+  await expect(item).toContainText("Partial");
+  await expect(item).toContainText("2026-10-01–2026-10-28");
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(page.viewportSize()!.width);
+  await item.getByText("Source evidence and thresholds").click();
+  await expect(item).toContainText('"ctr": 0.01');
+  await expect(item).toContainText('"status": "partial"');
+  await expect(item).toContainText("pair-snapshot");
 });

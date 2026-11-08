@@ -122,33 +122,62 @@ export async function verifySiteChallenge(
   challengeId: string,
   observe: (
     url: string,
+    beforeSocket: () => Promise<void>,
   ) => Promise<{ url: string; status: number; body: string }>,
+  refreshActor: () => Promise<Actor>,
 ) {
-  const url = await withActor(db, actor, scope.workspaceId, async (tx) => {
-    await manager(tx, actor, scope.workspaceId);
-    const site = await authorizeSiteIn(
-      tx,
-      actor,
-      scope.workspaceId,
-      scope.siteId,
-      "edit",
-    );
-    const challenge = await tx.siteVerificationChallenge.findFirst({
-      where: {
-        id: challengeId,
-        ...siteScope(scope),
-        issuedBy: actor.userId,
-        sessionId: actor.sessionId,
-        securityVersion: actor.securityVersion,
-        consumedAt: null,
-        revokedAt: null,
-        expiresAt: { gt: new Date() },
-      },
+  const pendingUrl = (current: Actor) =>
+    withActor(db, current, scope.workspaceId, async (tx) => {
+      await manager(tx, current, scope.workspaceId);
+      const site = await authorizeSiteIn(
+        tx,
+        current,
+        scope.workspaceId,
+        scope.siteId,
+        "edit",
+      );
+      const challenge = await tx.siteVerificationChallenge.findFirst({
+        where: {
+          id: challengeId,
+          ...siteScope(scope),
+          issuedBy: current.userId,
+          sessionId: current.sessionId,
+          securityVersion: current.securityVersion,
+          consumedAt: null,
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+      });
+      if (!challenge) throw new Error("INVALID_SITE_CHALLENGE");
+      return site.origin + "/.well-known/lyraseo-verification.txt";
     });
-    if (!challenge) throw new Error("INVALID_SITE_CHALLENGE");
-    return site.origin + "/.well-known/lyraseo-verification.txt";
+  const url = await pendingUrl(actor);
+  const currentActor = async () => {
+    const current = await refreshActor();
+    if (
+      current.userId !== actor.userId ||
+      current.sessionId !== actor.sessionId ||
+      current.securityVersion !== actor.securityVersion
+    )
+      throw new Error("FORBIDDEN");
+    return current;
+  };
+  let checked = false;
+  let checking = false;
+  const response = await observe(url, async () => {
+    if (checked || checking) throw new Error("INVALID_SITE_PROOF");
+    checking = true;
+    try {
+      const current = await currentActor();
+      if ((await pendingUrl(current)) !== url)
+        throw new Error("INVALID_SITE_CHALLENGE");
+      checked = true;
+    } finally {
+      checking = false;
+    }
   });
-  const response = await observe(url);
+  if (!checked) throw new Error("INVALID_SITE_PROOF");
+  await currentActor();
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await lock(tx, scope);
     await manager(tx, actor, scope.workspaceId);

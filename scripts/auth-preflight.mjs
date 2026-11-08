@@ -12,6 +12,14 @@ const kernelTables = [
 ];
 const tables = [
   ...kernelTables,
+  "WorkspaceAccessEvent",
+  "WorkspaceInvitation",
+  "WorkspaceInvitationSite",
+  "IssueAssignment",
+  "IssueAssignmentEvent",
+  "WorkspaceBrandingRevision",
+  "AgencyBatchQuote",
+  "AgencyBatchItem",
   "PageIdentity",
   "PageJournal",
   "ApiToken",
@@ -148,7 +156,15 @@ export async function checkDatabase(url, identity) {
       );
     const scoped = [
       ...kernelTables,
-      "PageIdentity",
+      "WorkspaceAccessEvent",
+  "WorkspaceInvitation",
+  "WorkspaceInvitationSite",
+  "IssueAssignment",
+  "IssueAssignmentEvent",
+  "WorkspaceBrandingRevision",
+  "AgencyBatchQuote",
+  "AgencyBatchItem",
+  "PageIdentity",
       "PageJournal",
       "ApiToken",
       "Workspace",

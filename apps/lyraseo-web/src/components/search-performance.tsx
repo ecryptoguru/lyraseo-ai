@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { KeywordEnrichment } from "./keyword-enrichment";
 import type { SearchOpportunity, SearchEvidenceRow } from "@lyraseo/visibility";
 type Snapshot = {
   id: string;
@@ -29,6 +30,7 @@ type SearchState = {
   }>;
   snapshots: Snapshot[];
   coverage: string;
+  auditEvidenceStatus?: string;
   opportunities: SearchOpportunity[];
 };
 const errors: Record<string, string> = {
@@ -416,18 +418,37 @@ export function SearchPerformance({
         <p>
           {state?.coverage ?? "Search evidence will appear after an import."}
         </p>
-        {state && !state.opportunities.length && (
+        {state?.auditEvidenceStatus === "legacy-lineage-withheld" && (
           <p>
-            No opportunities meet the current observed-data rules. Import a
-            supported window or inspect your page evidence below.
+            Audit-derived search opportunities are withheld pending
+            source-lineage verification. Independent search observations remain
+            available.
           </p>
         )}
+        {state &&
+          !state.opportunities.length &&
+          state.auditEvidenceStatus !== "legacy-lineage-withheld" && (
+            <p>
+              No opportunities meet the current observed-data rules. Import a
+              supported window or inspect your page evidence below.
+            </p>
+          )}
         <ul className="audit-findings">
           {state?.opportunities.map((item, index) => (
             <li key={`${item.kind}:${item.query}:${item.page}:${index}`}>
               <h3>{item.kind.replaceAll("-", " ")}</h3>
-              <p>{item.query}</p>
+              <p className="audit-url">{item.query}</p>
               <p className="audit-url">{item.page}</p>
+              {item.kind === "low-observed-query-ctr" &&
+                typeof item.evidence.startDate === "string" &&
+                typeof item.evidence.endDate === "string" && (
+                  <p>
+                    {item.evidence.startDate}–{item.evidence.endDate} ·{" "}
+                    {item.evidence.status === "partial"
+                      ? "Partial coverage"
+                      : "Available provider rows"}
+                  </p>
+                )}
               <p>{item.explanation}</p>
               <details>
                 <summary>Source evidence and thresholds</summary>
@@ -439,6 +460,13 @@ export function SearchPerformance({
           ))}
         </ul>
       </section>
+      <KeywordEnrichment
+        workspaceId={workspaceId}
+        siteId={siteId}
+        editable={editable}
+        collectionEnabled={collectionEnabled}
+        opportunities={state?.opportunities ?? []}
+      />
       {!!state?.snapshots.length && (
         <section className="pilot-card" aria-labelledby="search-data">
           <h2 id="search-data">Saved search evidence</h2>

@@ -1,9 +1,20 @@
+import {
+  captureWorkspaceBranding,
+  type FrozenWorkspaceBranding,
+} from "./branding";
+import {
+  buildEditorialTemplate,
+  contextCitationId,
+  editorialEvidenceFingerprint,
+} from "./editorial-assistance";
+export { buildEditorialTemplate } from "./editorial-assistance";
+import { lockLegacyInlineRead } from "./legacy-inline";
 import { legacyProjection } from "./legacy-evidence";
 import { withEvidenceRead } from "./context";
 import { obj, projectSnapshot, SAVED_FORMAT } from "./saved-evidence";
 export { projectSnapshot } from "./saved-evidence";
 import { pageReceipts } from "./page-receipts";
-import { fixedDays, readable, retention } from "./retention";
+import { readable } from "./retention";
 import { fingerprint } from "./audit-evidence";
 import { Prisma as Sql } from "../generated/client";
 import { siteScope } from "./sites";
@@ -15,7 +26,13 @@ import {
   type AuditComparison,
   type AuditEvaluation,
 } from "@lyraseo/visibility";
-import { withActor, authorizeSiteIn, type Actor, type Tx } from "./context";
+import {
+  withActor,
+  authorizeSiteIn,
+  verifyActorIn,
+  type Actor,
+  type Tx,
+} from "./context";
 export type ContentScope = { workspaceId: string; siteId: string };
 export type Citation = { sourceId: string; note: string };
 export type DraftContent = {
@@ -50,7 +67,10 @@ export type FrozenAuditComparison = {
   result: AuditComparison;
   counts: Record<Exclude<keyof AuditComparison, "scoreDelta">, number>;
 };
+export type ReportTemplate = "founder" | "editor" | "agency";
 export type EvidenceSnapshot = {
+  reportTemplate?: ReportTemplate;
+  reportBranding?: FrozenWorkspaceBranding;
   format?: string;
   comparisonUnavailable?: boolean;
   historicalComparisonCounts?: Partial<FrozenAuditComparison["counts"]>;
@@ -142,6 +162,7 @@ async function capture(
         selection.searchSnapshotIds.length)
   )
     throw new Error("INVALID_COMPARISON");
+  const legacyInlineEnrolled = await lockLegacyInlineRead(tx, scope);
   const now = new Date();
   const comparisons = new Map<
     string,
@@ -150,10 +171,24 @@ async function capture(
   const sources: EvidenceSnapshot["sources"] = [],
     links: EvidenceSnapshot["internalLinks"] = [];
   for (const id of new Set(selection.auditIds)) {
+    if (
+      legacyInlineEnrolled &&
+      (await tx.auditRun.count({
+        where: {
+          ...siteScope(scope),
+          id,
+          status: "COMPLETED",
+          storageFormat: null,
+        },
+      }))
+    )
+      throw new Error("LEGACY_EVIDENCE_WITHHELD");
     const run = await tx.auditRun.findFirst({
       where: { ...siteScope(scope), id, status: "COMPLETED" },
     });
     if (!run || !run.evaluation) throw new Error("INVALID_SOURCE");
+    if (legacyInlineEnrolled && run.storageFormat === null)
+      throw new Error("LEGACY_EVIDENCE_WITHHELD");
     if (!readable(now, run.resultExpiresAt)) throw new Error("SOURCE_EXPIRED");
     const pages = await pageReceipts(tx, { ...scope, auditId: id }, now);
     if (pair && [pair.beforeAuditId, pair.afterAuditId].includes(run.id)) {
@@ -334,7 +369,11 @@ export async function captureEvidenceReport(
   db: PrismaClient,
   actor: Actor,
   scope: ContentScope,
-  selection: SourceSelection & { comparison?: ReportComparisonSelection },
+  selection: SourceSelection & {
+    comparison?: ReportComparisonSelection;
+    reportTemplate?: ReportTemplate;
+    brandingRevision?: number;
+  },
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
@@ -345,12 +384,58 @@ export async function captureEvidenceReport(
         selection.searchSnapshotIds.length
     )
       throw new Error("INVALID_SOURCES");
-    return capture(
+    if (
+      selection.reportTemplate &&
+      !["founder", "editor", "agency"].includes(selection.reportTemplate)
+    )
+      throw new Error("INVALID_REPORT_TEMPLATE");
+    const snapshot = await capture(
       tx,
       scope,
       selection,
       actor.securityVersion,
       selection.comparison,
+    );
+    const branding = await captureWorkspaceBranding(
+      tx,
+      scope,
+      selection.brandingRevision,
+    );
+    return projectSnapshot({
+      ...snapshot,
+      ...(branding ? { reportBranding: branding } : {}),
+      ...(selection.reportTemplate
+        ? { reportTemplate: selection.reportTemplate }
+        : {}),
+    });
+  });
+}
+/** Preview only: no draft, provider job or charge is created. */
+export async function previewEditorialAssistance(
+  db: PrismaClient,
+  actor: Actor,
+  scope: ContentScope,
+  input: SourceSelection & { kind: "brief" | "draft" },
+) {
+  return withActor(db, actor, scope.workspaceId, async (tx) => {
+    await lockSite(tx, scope);
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
+    const snapshot = await capture(tx, scope, input, actor.securityVersion);
+    const contextId = obj(snapshot.context).id;
+    if (typeof contextId !== "string")
+      throw new Error("REVIEWED_CONTEXT_REQUIRED");
+    const reviewed = await tx.siteContextRevision.findFirst({
+      where: { ...siteScope(scope), id: contextId },
+      select: { content: true },
+    });
+    if (!reviewed) throw new Error("REVIEWED_CONTEXT_REQUIRED");
+    await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
+    await verifyActorIn(tx, actor, scope.workspaceId);
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
+    return buildEditorialTemplate(
+      snapshot,
+      reviewed.content as unknown as import("./sites").SiteContext,
+      input.kind,
     );
   });
 }
@@ -358,16 +443,42 @@ export async function createContentDraft(
   db: PrismaClient,
   actor: Actor,
   scope: ContentScope,
-  input: DraftContent & SourceSelection & { kind: "brief" | "draft" },
+  input: DraftContent &
+    SourceSelection & {
+      kind: "brief" | "draft";
+      expectedContextRevisionId?: string;
+      expectedEvidenceFingerprint?: string;
+    },
 ) {
   return withActor(db, actor, scope.workspaceId, async (tx) => {
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     if (!["brief", "draft"].includes(input.kind))
       throw new Error("INVALID_CONTENT");
     await lockSite(tx, scope);
+    await verifyActorIn(tx, actor, scope.workspaceId);
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     const snapshot = await capture(tx, scope, input, actor.securityVersion);
+    if (
+      input.expectedContextRevisionId !== undefined &&
+      obj(snapshot.context).id !== input.expectedContextRevisionId
+    )
+      throw new Error("CONTEXT_REVISION_CONFLICT");
+    if (
+      input.expectedEvidenceFingerprint !== undefined &&
+      editorialEvidenceFingerprint(snapshot) !==
+        input.expectedEvidenceFingerprint
+    )
+      throw new Error("SOURCE_CHANGED");
     await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
-    validate(input, new Set(snapshot.sources.map((s) => s.sourceId)));
+    validate(
+      input,
+      new Set([
+        ...snapshot.sources.map((s) => s.sourceId),
+        ...[contextCitationId(snapshot.context)].filter(
+          (id): id is string => !!id,
+        ),
+      ]),
+    );
     const draft = await tx.contentDraft.create({
       data: {
         ...siteScope(scope),
@@ -391,6 +502,8 @@ export async function createContentDraft(
       },
     });
     await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
+    await verifyActorIn(tx, actor, scope.workspaceId);
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     return { ...draft, history: [revision] };
   });
 }
@@ -447,6 +560,7 @@ export async function saveContentDraft(
   });
 }
 async function lockSite(tx: Tx, s: ContentScope) {
+  await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id=${s.workspaceId} FOR SHARE`;
   await tx.$queryRaw`SELECT id FROM "Site" WHERE "workspaceId"=${s.workspaceId} AND id=${s.siteId} FOR SHARE`;
 }
 async function sourceAvailability(
@@ -570,7 +684,7 @@ export function revisionEligibility(
     OR: [
       { revision: head },
       { pin: { isNot: null } },
-      { createdAt: { gt: fixedDays(now, -retention.revisionDays) } },
+      { historyExpiresAt: { gt: now } },
     ],
   };
 }
@@ -622,6 +736,12 @@ async function savedSnapshot(
   row: { id: string; evidenceFormat: string | null },
   table: "ContentDraft" | "EvidenceReport",
 ) {
+  if (
+    table === "ContentDraft" &&
+    row.evidenceFormat !== SAVED_FORMAT &&
+    (await lockLegacyInlineRead(tx, s))
+  )
+    throw new Error("LEGACY_EVIDENCE_WITHHELD");
   const from =
     table === "ContentDraft"
       ? Sql.sql`"ContentDraft"`
@@ -632,7 +752,12 @@ async function savedSnapshot(
   // costs far more than evaluating them once. The setting ends with this transaction.
   if (row.evidenceFormat !== SAVED_FORMAT)
     await tx.$executeRaw`SET LOCAL jit = off`;
-  const [record] = await tx.$queryRaw<Array<{ value: unknown }>>(Sql.sql`
+  const [record] =
+    table === "EvidenceReport"
+      ? await tx.$queryRaw<
+          Array<{ value: unknown }>
+        >`SELECT lyraseo_report.snapshot(${s.workspaceId},${s.siteId},${row.id}) AS value`
+      : await tx.$queryRaw<Array<{ value: unknown }>>(Sql.sql`
     SELECT ${projection} AS value FROM ${from} WHERE "workspaceId"=${s.workspaceId} AND "siteId"=${s.siteId} AND id=${row.id}`);
   const projected: EvidenceSnapshot = projectSnapshot(
     record?.value,
@@ -686,8 +811,11 @@ export async function readContentDrafts(
     const now = new Date();
     return Promise.all(
       drafts.map(async (draft) => {
+        const legacyWithheld =
+          draft.evidenceFormat !== SAVED_FORMAT &&
+          (await lockLegacyInlineRead(tx, scope));
         const snapshot =
-          draftId && beforeRevision === undefined
+          draftId && beforeRevision === undefined && !legacyWithheld
             ? await savedSnapshot(tx, scope, draft, "ContentDraft")
             : undefined;
         const history = await tx.contentRevision.findMany({
@@ -705,6 +833,9 @@ export async function readContentDrafts(
         });
         return {
           ...draft,
+          evidenceStatus: legacyWithheld
+            ? "legacy-lineage-withheld"
+            : "available",
           ...(snapshot
             ? {
                 snapshot,
@@ -723,6 +854,20 @@ export async function readContentDrafts(
       }),
     );
   });
+}
+async function verifyReportBranding(
+  tx: Tx,
+  scope: ContentScope,
+  snapshot: EvidenceSnapshot,
+) {
+  if (!snapshot.reportBranding) return;
+  const original = await captureWorkspaceBranding(
+    tx,
+    scope,
+    snapshot.reportBranding.revision,
+  );
+  if (fingerprint(original) !== fingerprint(snapshot.reportBranding))
+    throw new Error("SOURCE_CHANGED");
 }
 export async function storeEvidenceReport(
   db: PrismaClient,
@@ -751,6 +896,7 @@ export async function storeEvidenceReport(
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "edit");
     await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, "export");
     await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
+    await verifyReportBranding(tx, scope, snapshot);
   });
   const output = await input.render(input.title, snapshot);
   if (
@@ -783,8 +929,22 @@ export async function storeEvidenceReport(
         : undefined,
     );
     if (
-      fingerprint({ ...original, capturedAt: snapshot.capturedAt }) !==
-      fingerprint(snapshot)
+      fingerprint({
+        ...original,
+        ...(snapshot.reportBranding
+          ? {
+              reportBranding: await captureWorkspaceBranding(
+                tx,
+                scope,
+                snapshot.reportBranding.revision,
+              ),
+            }
+          : {}),
+        ...(snapshot.reportTemplate
+          ? { reportTemplate: snapshot.reportTemplate }
+          : {}),
+        capturedAt: snapshot.capturedAt,
+      }) !== fingerprint(snapshot)
     )
       throw new Error("SOURCE_CHANGED");
     await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
@@ -800,7 +960,7 @@ export async function storeEvidenceReport(
       select: { id: true, title: true, createdAt: true },
     });
     await verifySources(tx, scope, snapshot, new Date(), actor.securityVersion);
-    return report;
+    return { ...report, formatStatus: { pdf: "available", csv: "available" } };
   });
 }
 export async function readEvidenceReports(
@@ -823,19 +983,29 @@ export async function readEvidenceReports(
           select: { id: true, evidenceFormat: true },
         });
         if (!row) throw new Error("NOT_FOUND");
-        if (row.evidenceFormat !== SAVED_FORMAT)
-          throw new Error("LEGACY_REVIEW");
+        const states = await reportFormatStatus(tx, scope, reportId);
+        if (states[format ?? "pdf"] !== "available")
+          throw new Error(
+            states[format ?? "pdf"] === "withdrawn"
+              ? "REPORT_WITHDRAWN"
+              : "LEGACY_REVIEW",
+          );
         await savedSnapshot(tx, scope, row, "EvidenceReport");
-        return tx.evidenceReport.findFirstOrThrow({
-          where: {
-            ...siteScope(scope),
-            id: reportId,
-            evidenceFormat: SAVED_FORMAT,
-          },
-          select: { id: true, pdf: format !== "csv", csv: format !== "pdf" },
-        });
+        const [payload] = await tx.$queryRaw<
+          Array<{ id: string; pdf: Uint8Array | null; csv: string | null }>
+        >`
+          SELECT * FROM lyraseo_report.export(${scope.workspaceId},${scope.siteId},${reportId},${format ?? "pdf"})`;
+        if (!payload) throw new Error("NOT_FOUND");
+        if (!format) {
+          if (states.csv !== "available") throw new Error("LEGACY_REVIEW");
+          const [csv] = await tx.$queryRaw<Array<{ csv: string | null }>>`
+            SELECT csv FROM lyraseo_report.export(${scope.workspaceId},${scope.siteId},${reportId},'csv')`;
+          if (!csv) throw new Error("NOT_FOUND");
+          payload.csv = csv.csv;
+        }
+        return payload;
       }
-      return tx.evidenceReport.findMany({
+      const reports = await tx.evidenceReport.findMany({
         where: siteScope(scope),
         select: {
           id: true,
@@ -846,8 +1016,26 @@ export async function readEvidenceReports(
         orderBy: { createdAt: "desc" },
         take: 100,
       });
+      return Promise.all(
+        reports.map(async (report) => ({
+          ...report,
+          formatStatus: await reportFormatStatus(tx, scope, report.id),
+        })),
+      );
     },
   );
+}
+export async function reportFormatStatus(
+  tx: Tx,
+  scope: ContentScope,
+  id: string,
+) {
+  const [row] = await tx.$queryRaw<
+    Array<{ value: { pdf: string; csv: string } }>
+  >`
+    SELECT lyraseo_report.status(${scope.workspaceId},${scope.siteId},${id}) AS value`;
+  if (!row) throw new Error("NOT_FOUND");
+  return row.value;
 }
 export async function previewEvidenceReport(
   db: PrismaClient,
@@ -862,6 +1050,7 @@ export async function previewEvidenceReport(
     });
     if (!row) throw new Error("NOT_FOUND");
     const snapshot = await savedSnapshot(tx, scope, row, "EvidenceReport");
+    const formatStatus = await reportFormatStatus(tx, scope, id);
     return {
       ...row,
       snapshot,
@@ -871,8 +1060,17 @@ export async function previewEvidenceReport(
         snapshot,
         new Date(),
       ),
+      formatStatus,
       downloadStatus:
-        row.evidenceFormat === SAVED_FORMAT ? "available" : "pending-review",
+        formatStatus.pdf === "available" && formatStatus.csv === "available"
+          ? "available"
+          : formatStatus.pdf === "withdrawn" || formatStatus.csv === "withdrawn"
+            ? "withdrawn"
+            : "pending-review",
+      derivativeStatus:
+        row.evidenceFormat === SAVED_FORMAT
+          ? undefined
+          : "unavailable: exact retained fact contract required",
     };
   });
 }

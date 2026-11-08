@@ -7,6 +7,8 @@ export const capabilities = [
   "content",
   "visibility",
   "mcp",
+  "handoffs",
+  "agency",
 ] as const;
 export type Capability = (typeof capabilities)[number];
 export function capabilityEnabled(capability: Capability): boolean {

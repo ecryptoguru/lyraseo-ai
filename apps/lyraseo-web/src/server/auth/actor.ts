@@ -19,11 +19,11 @@ export type IdentitySource = {
   ) => Promise<unknown>;
 };
 /** Provider adapters supply verified data; HTTP callers cannot supply this structure. */
-export async function resolveVerifiedActor(
+export async function resolveVerifiedIdentity(
   source: IdentitySource,
   url: string,
   allowedEmails: string[],
-): Promise<Actor> {
+): Promise<{ actor: Actor; email: string }> {
   const user = await source.currentUser();
   if (
     !user ||
@@ -61,5 +61,13 @@ export async function resolveVerifiedActor(
   };
   checkSessionPolicy({ ...evidence, staff: await source.staff(actor) }, url);
   await source.history(actor, evidence.session!);
-  return actor;
+  return { actor, email: user.email.trim().toLowerCase() };
+}
+
+export async function resolveVerifiedActor(
+  source: IdentitySource,
+  url: string,
+  allowedEmails: string[],
+): Promise<Actor> {
+  return (await resolveVerifiedIdentity(source, url, allowedEmails)).actor;
 }

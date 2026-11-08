@@ -2,10 +2,15 @@
 import { useActionState, useState, useTransition } from "react";
 import {
   enrollAuthenticator,
+  enrollBackupAuthenticator,
   confirmAuthenticator,
   type Enrollment,
 } from "@/app/app/security/actions";
-export function AuthenticatorEnrollment() {
+export function AuthenticatorEnrollment({
+  hasAuthenticator = false,
+}: {
+  hasAuthenticator?: boolean;
+}) {
   const [setup, setSetup] = useState<Enrollment>({ message: "" }),
     [starting, start] = useTransition();
   const [result, confirm, pending] = useActionState<Enrollment, FormData>(
@@ -56,7 +61,11 @@ export function AuthenticatorEnrollment() {
           onClick={() =>
             start(async () => {
               try {
-                setSetup(await enrollAuthenticator());
+                setSetup(
+                  await (hasAuthenticator
+                    ? enrollBackupAuthenticator()
+                    : enrollAuthenticator()),
+                );
               } catch {
                 setSetup({
                   message: "Setup could not be loaded. Please try again.",
@@ -65,7 +74,11 @@ export function AuthenticatorEnrollment() {
             })
           }
         >
-          {starting ? "Preparing…" : "Set up authenticator"}
+          {starting
+            ? "Preparing…"
+            : hasAuthenticator
+              ? "Add backup authenticator"
+              : "Set up authenticator"}
         </button>
       )}
     </>

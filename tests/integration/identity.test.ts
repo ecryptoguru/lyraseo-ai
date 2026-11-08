@@ -1,10 +1,8 @@
 import { beforeEach, afterAll, it, expect } from "vitest";
 import { createDatabase } from "../../packages/db/src";
 import { provisionIdentity, throttle } from "../../packages/db/src/identity";
-import { resetDatabase, adminUrl } from "../helpers/database";
-const db = createDatabase(
-    "postgresql://lyraseo_identity:local_identity_only@127.0.0.1:54329/lyraseo_test",
-  ),
+import { resetDatabase, adminUrl, identityUrl } from "../helpers/database";
+const db = createDatabase(identityUrl),
   admin = createDatabase(adminUrl);
 beforeEach(async () => {
   await resetDatabase();

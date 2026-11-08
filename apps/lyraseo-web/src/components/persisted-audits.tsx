@@ -16,6 +16,7 @@ type Summary = { id: string; status: string; createdAt: string };
 type SavedRun = Summary & {
   manifest: string[];
   evaluation: AuditEvaluation | null;
+  evidenceStatus?: "available" | "legacy-lineage-withheld";
   declarations?: ReadinessDeclarations & { contextRevision?: number };
   methodologyVersion?: string;
   actions?: Array<{
@@ -58,6 +59,14 @@ export function PersistedAudits({
     [busy, setBusy] = useState(false);
   const [manifest, setManifest] = useState(`${origin}/`),
     [reason, setReason] = useState("");
+  const [discovery, setDiscovery] = useState<{
+    state: "available" | "unavailable";
+    candidates: string[];
+    sourceUrl: string;
+    truncated: boolean;
+    error?: string;
+  } | null>(null);
+  const [discoverySelection, setDiscoverySelection] = useState<string[]>([]);
   const manifestInput = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState<{
     revision: number;
@@ -166,6 +175,94 @@ export function PersistedAudits({
             }}
           >
             {!clientReady && <p role="status">Preparing audit controls…</p>}
+            <p>
+              Discovery requests the homepage and its robots policy. It does not
+              start an audit or use a paid provider.
+            </p>
+            <button
+              type="button"
+              className="button button-secondary"
+              disabled={!clientReady || busy}
+              onClick={() =>
+                void execute(async () => {
+                  setDiscovery(null);
+                  setDiscoverySelection([]);
+                  const result = await send("discover", {});
+                  setDiscovery(result);
+                  setMessage(
+                    result.state === "available"
+                      ? "Review the discovered page suggestions below."
+                      : "Homepage discovery was unavailable. Enter pages manually or retry later.",
+                  );
+                })
+              }
+            >
+              Discover homepage links
+            </button>
+            {discovery && (
+              <div>
+                <p>
+                  Only the homepage and its links were inspected. Suggested
+                  pages have not been checked or audited.
+                  {discovery.truncated &&
+                    " The suggestions were limited to 25 pages."}
+                </p>
+                {discovery.state === "unavailable" && (
+                  <p>
+                    Homepage unavailable: {discovery.error ?? "unknown error"}.
+                  </p>
+                )}
+                <fieldset
+                  className="audit-discovery"
+                  disabled={!clientReady || busy}
+                >
+                  <legend>Suggested pages from {discovery.sourceUrl}</legend>
+                  {discovery.candidates.map((url) => (
+                    <label key={url} className="audit-discovery-option">
+                      <input
+                        type="checkbox"
+                        checked={discoverySelection.includes(url)}
+                        onChange={(event) => {
+                          const checked = event.currentTarget.checked;
+                          setDiscoverySelection((selected) =>
+                            checked
+                              ? [...selected, url]
+                              : selected.filter((item) => item !== url),
+                          );
+                        }}
+                      />
+                      <span className="audit-url">{url}</span>
+                    </label>
+                  ))}
+                </fieldset>
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={!clientReady || busy || !discoverySelection.length}
+                  onClick={() => {
+                    const pages = [
+                      ...new Set([
+                        ...auditLines(manifest),
+                        ...discoverySelection,
+                      ]),
+                    ];
+                    if (pages.length > 25) {
+                      setMessage(
+                        "Choose at most 25 pages in total. Your page list is unchanged.",
+                      );
+                      return;
+                    }
+                    setManifest(pages.join("\n"));
+                    setDiscoverySelection([]);
+                    setMessage(
+                      "Suggestions added. Review all pages before confirming the audit.",
+                    );
+                  }}
+                >
+                  Add selected pages
+                </button>
+              </div>
+            )}
             <label htmlFor="audit-pages">
               Confirm up to 25 pages, one URL per line. Include the homepage.
             </label>
@@ -266,6 +363,12 @@ export function PersistedAudits({
                 Stop audit
               </button>
             </div>
+          )}
+          {selected.evidenceStatus === "legacy-lineage-withheld" && (
+            <p>
+              Historical findings are withheld because their source lineage
+              could not be verified. Capture receipts remain available.
+            </p>
           )}
           {selected.evaluation && (
             <>

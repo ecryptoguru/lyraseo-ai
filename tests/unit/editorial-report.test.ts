@@ -250,3 +250,114 @@ it("omits opaque nested page and provider data from report transport", async () 
     marker,
   );
 });
+
+it("keeps founder, editor and agency report framing distinct without rewriting historical reports", async () => {
+  const reports =
+    await import("../../apps/lyraseo-web/src/server/editorial/reports");
+  expect(reports).toHaveProperty("reportTemplateLines", expect.any(Function));
+  const base: EvidenceSnapshot = {
+    capturedAt: "2026-11-03T00:00:00Z",
+    scope: { workspaceId: "a", siteId: "s" },
+    methodology: "saved",
+    context: { id: "context", revision: 1 },
+    sources: [],
+    internalLinks: [],
+  };
+  const lines = (snapshot: unknown) =>
+    (
+      reports as unknown as {
+        reportTemplateLines: (snapshot: unknown) => string[];
+      }
+    )
+      .reportTemplateLines(snapshot)
+      .join("\n");
+  expect(lines({ ...base, reportTemplate: "founder" })).toContain(
+    "Founder decision brief",
+  );
+  expect(lines({ ...base, reportTemplate: "editor" })).toContain(
+    "Editor action worksheet",
+  );
+  expect(lines({ ...base, reportTemplate: "agency" })).toContain(
+    "Agency client delivery",
+  );
+  expect(lines(base)).toBe("");
+  const report = await renderEvidenceReport("Saved variant", {
+    ...base,
+    sources: [
+      {
+        sourceId: "gsc:sample",
+        kind: "google-search-console",
+        data: {
+          id: "sample",
+          shape: "page",
+          metrics: { clicks: 1, impressions: 2 },
+        },
+      },
+    ],
+    reportTemplate: "editor",
+  } as EvidenceSnapshot);
+  expect(report.csv).toContain("Report template");
+  expect(report.csv).toContain("editor");
+});
+
+it("freezes bounded local branding while refusing external assets, forged hashes and oversized image dimensions", async () => {
+  const { projectSnapshot } = await import("../../packages/db/src/content");
+  const { createHash } = await import("node:crypto");
+  const logo = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const branding = {
+    schemaVersion: 1,
+    brandingRevisionId: "brand-1",
+    revision: 1,
+    displayName: "Acme agency",
+    logo: {
+      base64: logo.toString("base64"),
+      sha256: createHash("sha256").update(logo).digest("hex"),
+      mime: "image/png",
+      width: 1,
+      height: 1,
+    },
+  };
+  const base = {
+    capturedAt: "2026-11-03T00:00:00Z",
+    scope: { workspaceId: "a", siteId: "s" },
+    methodology: "saved",
+    context: null,
+    sources: [],
+    internalLinks: [],
+    reportBranding: branding,
+  };
+  expect(projectSnapshot(base)).toHaveProperty("reportBranding", branding);
+  expect(() =>
+    projectSnapshot({
+      ...base,
+      reportBranding: {
+        ...branding,
+        logo: { ...branding.logo, base64: "https://evil.invalid/logo.png" },
+      },
+    }),
+  ).toThrow("INVALID_BRANDING");
+  expect(() =>
+    projectSnapshot({
+      ...base,
+      reportBranding: {
+        ...branding,
+        logo: { ...branding.logo, sha256: "0".repeat(64) },
+      },
+    }),
+  ).toThrow("INVALID_BRANDING");
+  expect(() =>
+    projectSnapshot({
+      ...base,
+      reportBranding: {
+        ...branding,
+        logo: { ...branding.logo, width: 100000 },
+      },
+    }),
+  ).toThrow("INVALID_BRANDING");
+  expect(
+    projectSnapshot({ ...base, reportBranding: undefined }),
+  ).not.toHaveProperty("reportBranding");
+});

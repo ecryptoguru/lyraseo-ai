@@ -1,7 +1,10 @@
+import { lockLegacyInlineRead } from "./legacy-inline";
 import { withEvidenceRead } from "./context";
 import { siteScope } from "./sites";
 import {
   buildSearchOpportunities,
+  balanceSearchOpportunities,
+  comparableSearchWindow,
   SEARCH_KEY_MAX_UNITS,
   buildSearchAuditOpportunities,
 } from "@lyraseo/visibility";
@@ -494,6 +497,7 @@ export async function readGoogleSearch(
   now = new Date(),
 ) {
   return withEvidenceRead(db, actor, s, "read", "search:read", async (tx) => {
+    const protectedLegacy = await lockLegacyInlineRead(tx, s);
     const c = await tx.googleConnection.findFirst({
       where: siteScope(s),
       select: { property: true, createdAt: true },
@@ -568,17 +572,7 @@ export async function readGoogleSearch(
     });
     const detailed = metadata.find((x) => x.shape === "query,page"),
       current = metadata.find((x) => x.shape === "page");
-    const prior =
-      current &&
-      metadata.find(
-        (x) =>
-          x.shape === "page" &&
-          x.endDate < current.startDate &&
-          x.property === current.property &&
-          x.status === "complete" &&
-          Date.parse(x.endDate) - Date.parse(x.startDate) ===
-            Date.parse(current.endDate) - Date.parse(current.startDate),
-      );
+    const prior = comparableSearchWindow(current, metadata);
     const evidenceIds = [detailed?.id, current?.id, prior?.id].filter(
       (id): id is string => !!id,
     );
@@ -598,7 +592,8 @@ export async function readGoogleSearch(
           select: { scopes: true },
         })
       )?.scopes.includes("audits:read");
-    const audits = includeAudits
+    // Select identity/format first: blocked evaluations never enter this process.
+    const auditMetadata = includeAudits
       ? await tx.auditRun.findMany({
           where: {
             ...siteScope(s),
@@ -611,12 +606,38 @@ export async function readGoogleSearch(
             id: true,
             createdAt: true,
             manifest: true,
-            evaluation: true,
+            storageFormat: true,
           },
         })
       : [];
+    const readableIds = auditMetadata
+      .filter((a) => !protectedLegacy || a.storageFormat === "AUDIT_PRIVATE_V1")
+      .map((a) => a.id);
+    const readableEvaluations = readableIds.length
+      ? await tx.auditRun.findMany({
+          where: {
+            ...siteScope(s),
+            id: { in: readableIds },
+            ...(protectedLegacy ? { storageFormat: "AUDIT_PRIVATE_V1" } : {}),
+          },
+          select: { id: true, evaluation: true },
+        })
+      : [];
+    // Retain blocked metadata in latest-manifest selection, preventing fallback
+    // to an older private audit for a URL whose latest findings are withheld.
+    const audits = auditMetadata.map((a) => ({
+      ...a,
+      evaluation:
+        readableEvaluations.find((e) => e.id === a.id)?.evaluation ?? null,
+    }));
+    const auditEvidenceStatus = !includeAudits
+      ? "not-authorized"
+      : protectedLegacy && auditMetadata.some((a) => a.storageFormat === null)
+        ? "legacy-lineage-withheld"
+        : "available";
     return {
       connection: c,
+      auditEvidenceStatus,
       imports: imports.map(({ leaseUntil, failure, ...receipt }) => ({
         ...receipt,
         // GET observes lease expiry; only the guarded POST may recover an import.
@@ -652,10 +673,10 @@ export async function readGoogleSearch(
       })),
       coverage:
         "Available provider rows only; Google omits some searches and limits daily rows. Empty rows mean no available data, not proven zero traffic.",
-      opportunities: [
+      opportunities: balanceSearchOpportunities([
         ...buildSearchAuditOpportunities(evidence, audits),
         ...searchOpportunities(evidence),
-      ].slice(0, 100),
+      ]),
     };
   });
 }

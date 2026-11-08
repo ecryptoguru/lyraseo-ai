@@ -3,7 +3,7 @@ import { createDatabase } from "../../packages/db/src";
 const ownedName = process.env.LYRA_TEST_DB_NAME;
 if (
   ownedName &&
-  !/^(?:lyraseo_p2a[12]|lyraseo_origin)_[a-f0-9]{12}$|^lyraseo_expiry_[a-f0-9]{8,12}$/.test(
+  !/^(?:lyraseo_p2a[12]|lyraseo_origin|lyraseo_agency|lyraseo_ledger|lyraseo_recovery)_[a-f0-9]{12}$|^lyraseo_expiry_[a-f0-9]{8,12}$|^lyraseo_legacy_[a-f0-9]{12}$/.test(
     ownedName,
   )
 )
@@ -11,6 +11,7 @@ if (
 const databaseName = ownedName ?? "lyraseo_test";
 export const adminUrl = `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${databaseName}`;
 export const runtimeUrl = `postgresql://lyraseo_runtime:local_runtime_only@127.0.0.1:54329/${databaseName}`;
+export const identityUrl = `postgresql://lyraseo_identity:local_identity_only@127.0.0.1:54329/${databaseName}`;
 export async function resetDatabase() {
   const db = createDatabase(adminUrl);
   try {

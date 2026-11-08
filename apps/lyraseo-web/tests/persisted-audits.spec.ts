@@ -312,3 +312,154 @@ test("retained original bytes, decoded legacy source and unavailable capture are
     path: `../../output/build-2026-11-02/private-artifact-${info.project.name}.png`,
   });
 });
+
+test("withheld legacy evaluation displays its status and preserves capture receipts", async ({
+  page,
+  consoleHealth,
+}, testInfo) => {
+  const withheld = {
+    ...run,
+    evaluation: null,
+    evidenceStatus: "legacy-lineage-withheld",
+  };
+  await page.route("**/api/audits**", (route) =>
+    route.fulfill({
+      json: new URL(route.request().url()).searchParams.has("auditId")
+        ? withheld
+        : [withheld],
+    }),
+  );
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.className = "pilot-page";
+    main.innerHTML =
+      '<h1>Controlled legacy audit fixture</h1><div id="audit-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(false) });
+  await page.getByRole("button", { name: /completed/ }).click();
+  await expect(
+    page.getByText("Historical findings are withheld", { exact: false }),
+  ).toBeVisible();
+  await page
+    .locator("summary")
+    .filter({ hasText: "https://example.com/" })
+    .click();
+  await expect(page.getByText("a".repeat(64), { exact: false })).toBeVisible();
+  expect(consoleHealth).toEqual([]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/legacy-audit-withheld-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
+
+test("discovers homepage links for review without changing or dispatching the manifest", async ({
+  page,
+}, testInfo) => {
+  const commands: string[] = [];
+  await page.route("**/api/audits**", async (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: [] });
+    const input = route.request().postDataJSON();
+    commands.push(input.action);
+    return route.fulfill({
+      json: {
+        state: "available",
+        sourceUrl: "https://example.com/",
+        candidates: [
+          "https://example.com/",
+          "https://example.com/about",
+          "https://example.com/?lang=en",
+        ],
+        truncated: false,
+      },
+    });
+  });
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.innerHTML = '<h1>Audit fixture</h1><div id="audit-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  const manifest = page.getByLabel(
+    "Confirm up to 25 pages, one URL per line. Include the homepage.",
+  );
+  await manifest.fill("https://example.com/\nhttps://example.com/kept");
+  await page.getByRole("button", { name: "Discover homepage links" }).click();
+  await expect(manifest).toHaveValue(
+    "https://example.com/\nhttps://example.com/kept",
+  );
+  await expect(
+    page.getByText(/Only the homepage and its links were inspected/),
+  ).toBeVisible();
+  const firstOption = await page
+    .getByRole("checkbox", { name: "https://example.com/", exact: true })
+    .boundingBox();
+  const secondOption = await page
+    .getByRole("checkbox", { name: "https://example.com/about", exact: true })
+    .boundingBox();
+  expect(firstOption && secondOption).toBeTruthy();
+  expect(secondOption!.y).toBeGreaterThan(firstOption!.y);
+  await page.screenshot({
+    path: `../../output/audit-runtime/discovery-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+  await page
+    .getByRole("checkbox", { name: "https://example.com/about" })
+    .check();
+  await page
+    .getByRole("checkbox", { name: "https://example.com/?lang=en" })
+    .check();
+  await page.getByRole("button", { name: "Add selected pages" }).click();
+  await expect(manifest).toHaveValue(
+    "https://example.com/\nhttps://example.com/kept\nhttps://example.com/about\nhttps://example.com/?lang=en",
+  );
+  expect(commands).toEqual(["discover"]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+});
+
+test("keeps the existing list unchanged when selected suggestions would exceed the page cap", async ({
+  page,
+}) => {
+  await page.route("**/api/audits**", async (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: [] });
+    return route.fulfill({
+      json: {
+        state: "available",
+        sourceUrl: "https://example.com/",
+        candidates: ["https://example.com/", "https://example.com/another"],
+        truncated: false,
+      },
+    });
+  });
+  await page.goto("/sign-in");
+  await page.locator("main").evaluate((main) => {
+    main.innerHTML = '<h1>Audit fixture</h1><div id="audit-fixture"></div>';
+  });
+  await page.addScriptTag({ content: await bundle(true) });
+  const manifest = page.getByLabel(
+    "Confirm up to 25 pages, one URL per line. Include the homepage.",
+  );
+  const initial = [
+    "https://example.com/",
+    ...Array.from({ length: 24 }, (_, i) => `https://example.com/page-${i}`),
+  ].join("\n");
+  await manifest.fill(initial);
+  await page.getByRole("button", { name: "Discover homepage links" }).click();
+  await page
+    .getByRole("checkbox", { name: "https://example.com/another", exact: true })
+    .check();
+  await page.getByRole("button", { name: "Add selected pages" }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Choose at most 25 pages" }),
+  ).toBeVisible();
+  await expect(manifest).toHaveValue(initial);
+});

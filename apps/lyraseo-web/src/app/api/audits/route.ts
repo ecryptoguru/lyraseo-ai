@@ -13,6 +13,7 @@ import {
   reviewAuditIssue,
 } from "@lyraseo/db/audits";
 import { runRawAuditStep } from "@/server/acquisition/runner";
+import { discoverSiteCandidates } from "@/server/acquisition/discovery";
 import { publicHttpsTransport } from "@/server/acquisition/transport";
 import { declarationsSchema, type AuditEvaluation } from "@lyraseo/visibility";
 
@@ -42,6 +43,7 @@ const scope = z.object({
 });
 const auditScope = scope.extend({ auditId: z.string().min(1).max(128) });
 const command = z.discriminatedUnion("action", [
+  scope.extend({ action: z.literal("discover") }).strict(),
   scope
     .extend({
       action: z.literal("create"),
@@ -64,6 +66,20 @@ const command = z.discriminatedUnion("action", [
 ]);
 function failure(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (code === "DISCOVERY_RATE_LIMITED")
+    return Response.json(
+      { error: "Please wait before discovering pages again." },
+      { status: 429, headers: { ...headers, "Retry-After": "30" } },
+    );
+  if (code === "LEGACY_EVIDENCE_WITHHELD")
+    return Response.json(
+      {
+        code,
+        error:
+          "Historical findings are withheld pending source-lineage verification. Capture receipts remain available.",
+      },
+      { status: 409, headers },
+    );
   if (code === "ARTIFACT_UNAVAILABLE")
     return Response.json(
       { error: "Private source storage is unavailable. Retry later." },
@@ -153,6 +169,16 @@ export async function POST(request: Request) {
       );
 
     switch (input.action) {
+      case "discover":
+        return Response.json(
+          await discoverSiteCandidates(
+            database(),
+            actor,
+            scope.parse(input),
+            request.signal,
+          ),
+          { headers },
+        );
       case "create": {
         const run = await createAuditRun(database(), actor, {
           workspaceId: input.workspaceId,
@@ -250,6 +276,8 @@ export async function GET(request: Request) {
         if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text)) text = "'" + text;
         return '"' + text.replace(/"/g, '""') + '"';
       };
+      if (run.evidenceStatus === "legacy-lineage-withheld")
+        throw new Error("LEGACY_EVIDENCE_WITHHELD");
       const evaluation = run.evaluation as unknown as AuditEvaluation | null;
       const current = run.methodologyVersion === "readiness-v2";
       const receipts = new Map(

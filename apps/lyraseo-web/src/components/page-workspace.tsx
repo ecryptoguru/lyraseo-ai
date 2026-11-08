@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useClientReady } from "./use-client-ready";
+import { IssueAssignment } from "./issue-assignment";
 type Page = {
   id: string;
   originalUrl: string;
@@ -11,6 +12,7 @@ type Page = {
 type Detail = {
   page: Page;
   actor: { userId: string; canEdit: boolean };
+  assignees?: Array<{ userId: string; role: string }>;
   historyLimit: number;
   history: Array<{
     id: string;
@@ -28,6 +30,7 @@ type Detail = {
     status: string;
     createdAt: string;
     methodologyVersion: string;
+    evidenceStatus?: "available" | "legacy-lineage-withheld";
     pages: Array<{
       requestedUrl: string;
       evidence: unknown;
@@ -42,6 +45,7 @@ type Detail = {
   }>;
   search: {
     source: string;
+    auditEvidenceStatus?: string;
     opportunities: Array<{
       query: string;
       kind: string;
@@ -69,6 +73,7 @@ type Detail = {
     title: string;
     createdAt: string;
     evidenceFormat?: string | null;
+    formatStatus?: { pdf: string; csv: string };
   }>;
   ai: { message: string };
 };
@@ -93,6 +98,7 @@ export function PageWorkspace({
   const [url, setUrl] = useState(`${origin}/`),
     [note, setNote] = useState(""),
     [draftId, setDraftId] = useState("");
+  const [assignee, setAssignee] = useState("");
   const [drafts, setDrafts] = useState<
     Array<{ id: string; history: Array<{ content: { title: string } }> }>
   >([]);
@@ -286,6 +292,45 @@ export function PageWorkspace({
                   ? "Assigned to another site editor"
                   : "Unassigned"}
             </p>
+            {editable && collectionEnabled && !!detail.assignees?.length && (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void perform(async () => {
+                    await request({
+                      action: "assign",
+                      pageId: detail.page.id,
+                      expectedRevision: detail.page.revision,
+                      idempotencyKey: crypto.randomUUID(),
+                      assigneeUserId: assignee || null,
+                    });
+                    setDetail(await request());
+                    setMessage("Page assignment saved.");
+                  });
+                }}
+              >
+                <label htmlFor="page-assignee">Assign page to a teammate</label>
+                <select
+                  id="page-assignee"
+                  value={assignee}
+                  onChange={(event) => setAssignee(event.target.value)}
+                  disabled={busy || !clientReady}
+                >
+                  <option value="">Unassigned</option>
+                  {detail.assignees.map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {member.userId} · {member.role.toLowerCase()}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="button button-secondary"
+                  disabled={busy || !clientReady}
+                >
+                  Save teammate assignment
+                </button>
+              </form>
+            )}
             {editable && collectionEnabled && detail.actor.canEdit && (
               <div className="pilot-tabs">
                 <button
@@ -437,6 +482,12 @@ export function PageWorkspace({
                     remains unevaluated.
                   </p>
                 )}
+                {audit.evidenceStatus === "legacy-lineage-withheld" && (
+                  <p>
+                    Historical findings are withheld pending source-lineage
+                    verification. Capture receipts remain available.
+                  </p>
+                )}
                 <ul>
                   {audit.findings.map((finding, index) => (
                     <li key={`${finding.ruleId}:${index}`}>
@@ -447,6 +498,18 @@ export function PageWorkspace({
                       {finding.evidence && (
                         <p className="audit-url">{finding.evidence}</p>
                       )}
+                      {collectionEnabled &&
+                        !!detail.assignees?.length &&
+                        ["FAIL", "WARNING"].includes(finding.outcome) && (
+                          <IssueAssignment
+                            workspaceId={workspaceId}
+                            siteId={siteId}
+                            auditId={audit.id}
+                            ruleId={finding.ruleId}
+                            scopeKey={detail.page.normalizedUrl}
+                            assignees={detail.assignees}
+                          />
+                        )}
                     </li>
                   ))}
                 </ul>
@@ -465,8 +528,18 @@ export function PageWorkspace({
               {detail.search.source}. Only exact URL matches are attached here.
               Missing rows remain unavailable.
             </p>
-            {!detail.search.opportunities.length && (
-              <p>No retained opportunity evidence matches this URL.</p>
+            {!detail.search.opportunities.length &&
+              detail.search.auditEvidenceStatus !==
+                "legacy-lineage-withheld" && (
+                <p>No retained opportunity evidence matches this URL.</p>
+              )}
+            {detail.search.auditEvidenceStatus ===
+              "legacy-lineage-withheld" && (
+              <p>
+                Audit-derived search opportunities are withheld pending
+                source-lineage verification. Independent search observations
+                remain available.
+              </p>
             )}
             {detail.search.opportunities.map((opportunity, index) => (
               <article key={index}>
@@ -496,17 +569,23 @@ export function PageWorkspace({
               {detail.reports.map((report) => (
                 <li key={report.id}>
                   {report.title} ·{" "}
-                  {report.evidenceFormat === "saved-evidence-v2" ? (
-                    <a
-                      href={`/api/reports?${query}&reportId=${encodeURIComponent(report.id)}&format=pdf`}
-                    >
-                      Download PDF
-                    </a>
-                  ) : (
-                    <span>
-                      Original download unavailable pending legacy review.
-                    </span>
-                  )}
+                  <div className="pilot-tabs">
+                    {(["pdf", "csv"] as const).map((format) =>
+                      report.formatStatus?.[format] === "available" ? (
+                        <a
+                          key={format}
+                          href={`/api/reports?${query}&reportId=${encodeURIComponent(report.id)}&format=${format}`}
+                        >
+                          Download {format.toUpperCase()}
+                        </a>
+                      ) : (
+                        <span key={format}>
+                          {format.toUpperCase()}:{" "}
+                          {report.formatStatus?.[format] ?? "pending-review"}.
+                        </span>
+                      ),
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>

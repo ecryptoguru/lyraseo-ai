@@ -13,6 +13,8 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EXPIRY_ROLE_GUARD } from "./lib/expiry-bootstrap.mjs";
+import { LOCAL_GRANT_BOOTSTRAP } from "./lib/local-grants.mjs";
 
 // Required local/CI gate. Every mutable database and cluster is created by this
 // process; no canonical database, source template or shared role is changed.
@@ -89,9 +91,10 @@ const migrations = readdirSync(migrationRoot, { withFileTypes: true })
   .map((e) => e.name)
   .sort();
 if (
-  migrations.length !== 27 ||
+  migrations.length < 28 ||
   migrations[25] !== "202611030004_artifact_origin_binding" ||
-  migrations[26] !== "202611030005_private_artifact_expiry"
+  migrations[26] !== "202611030005_private_artifact_expiry" ||
+  migrations[27] !== "202611030006_legacy_visibility_retention"
 )
   throw Error("UNEXPECTED_MIGRATION_SET");
 if (
@@ -143,16 +146,12 @@ function migrate(db, config) {
   );
 }
 function vitest(file, env) {
-  run("pnpm", ["exec", "vitest", "run", file], {
+  run("pnpm", ["exec", "vitest", "run", file, "--reporter=verbose"], {
     env: { ...process.env, ...env, LYRA_PRIVATE_EXPIRY_REQUIRED: "true" },
   });
 }
-const localBootstrap = readFileSync(join(root, "scripts/local-db.mjs"), "utf8");
-const bootstrap = localBootstrap.match(/const sql = `([\s\S]*?)`;/)?.[1];
-const guard = localBootstrap.match(
-  /localScalar\(`(SELECT EXISTS\(\s*SELECT FROM pg_roles r WHERE r\.rolname IN \('lyraseo_artifact_maintenance'[\s\S]*?)`\) === "t"/,
-)?.[1];
-if (!bootstrap || !guard) throw Error("LOCAL_BOOTSTRAP_CONTRACT_CHANGED");
+const bootstrap = LOCAL_GRANT_BOOTSTRAP;
+const guard = EXPIRY_ROLE_GUARD;
 const historyBootstrap = readFileSync(
   join(root, "tests/fixtures/expiry/history-bootstrap.sql"),
   "utf8",

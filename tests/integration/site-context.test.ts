@@ -3,7 +3,7 @@ import { createDatabase } from "../../packages/db/src";
 import {
   createSite,
   issueSiteChallenge,
-  verifySiteChallenge,
+  verifySiteChallenge as verifySiteChallengeWithFreshActor,
   emptySiteContext,
   reviewSiteContext,
   readSiteContextRevisions,
@@ -18,6 +18,24 @@ import {
 const db = createDatabase(runtimeUrl),
   admin = createDatabase(adminUrl);
 const scope = { workspaceId: "a", siteId: "a-site" };
+const verifySiteChallenge = (
+  db: Parameters<typeof verifySiteChallengeWithFreshActor>[0],
+  current: Parameters<typeof verifySiteChallengeWithFreshActor>[1],
+  scope: Parameters<typeof verifySiteChallengeWithFreshActor>[2],
+  challengeId: Parameters<typeof verifySiteChallengeWithFreshActor>[3],
+  observe: Parameters<typeof verifySiteChallengeWithFreshActor>[4],
+) =>
+  verifySiteChallengeWithFreshActor(
+    db,
+    current,
+    scope,
+    challengeId,
+    async (url, beforeSocket) => {
+      await beforeSocket();
+      return observe(url, beforeSocket);
+    },
+    async () => current,
+  );
 it("binds ownership proof to the issuing session before and after observation", async () => {
   const challenge = await issueSiteChallenge(db, actor, scope);
   let called = false;

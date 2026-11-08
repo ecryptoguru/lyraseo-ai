@@ -156,3 +156,34 @@ it("keeps the TLS and Host URL intact and pins the first public lookup even if D
   expect(mocks.lookup).toHaveBeenCalledTimes(1);
   expect(gate).toHaveBeenCalledOnce();
 });
+
+it("aborts an unresponsive pre-socket authority check without opening a connection", async () => {
+  mocks.lookup
+    .mockReset()
+    .mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+  const controller = new AbortController();
+  let entered!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  httpsMocks.request.mockClear();
+  const attempt = publicHttpsTransport(
+    "https://example.com/",
+    controller.signal,
+    async () => {
+      entered();
+      await new Promise<void>(() => {});
+    },
+  );
+  await waiting;
+  controller.abort(new Error("CANCELLED"));
+  const result = await Promise.race([
+    attempt.then(
+      () => "opened",
+      (error: Error) => error.message,
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("stuck"), 50)),
+  ]);
+  expect(result).toBe("CANCELLED");
+  expect(httpsMocks.request).not.toHaveBeenCalled();
+});

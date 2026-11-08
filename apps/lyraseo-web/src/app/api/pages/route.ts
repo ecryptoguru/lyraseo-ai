@@ -34,8 +34,23 @@ const command = z.discriminatedUnion("action", [
     .strict(),
   scopeSchema.extend({ action: z.literal("claim"), ...revision }).strict(),
   scopeSchema.extend({ action: z.literal("unassign"), ...revision }).strict(),
+  scopeSchema
+    .extend({
+      action: z.literal("assign"),
+      ...revision,
+      assigneeUserId: id.nullable(),
+    })
+    .strict(),
 ]);
 function failure(error: unknown) {
+  if (error instanceof Error && error.message === "SOURCE_CHANGED")
+    return Response.json(
+      {
+        error:
+          "Page evidence changed while loading. Please reload the latest revision and retry.",
+      },
+      { status: 409, headers: privateHeaders },
+    );
   if (error instanceof Error && error.message === "PAGE_LIMIT")
     return Response.json(
       { error: "This site has reached its 500 registered page limit." },

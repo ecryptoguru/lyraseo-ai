@@ -1,3 +1,4 @@
+import { listReportBrandingChoices } from "@lyraseo/db/branding";
 import { capabilityPause } from "@/server/capabilities";
 import { z } from "zod";
 import { database, resolveActor } from "@/server/auth/server";
@@ -21,6 +22,8 @@ export async function POST(request: Request) {
       input = scopeSchema
         .extend({
           title: z.string().min(1).max(200),
+          reportTemplate: z.enum(["founder", "editor", "agency"]).optional(),
+          brandingRevision: z.number().int().positive().optional(),
           ...selectionSchema,
           comparison: z
             .object({
@@ -43,6 +46,8 @@ export async function POST(request: Request) {
         auditIds: input.auditIds,
         searchSnapshotIds: input.searchSnapshotIds,
         comparison: input.comparison,
+        reportTemplate: input.reportTemplate,
+        brandingRevision: input.brandingRevision,
       },
     );
     return Response.json(
@@ -62,6 +67,14 @@ export async function GET(request: Request) {
     const actor = await resolveActor(),
       query = new URL(request.url).searchParams,
       scope = scopeSchema.parse(Object.fromEntries(query));
+    if (query.get("brandingOptions") === "1") {
+      if (query.has("reportId") || query.has("format"))
+        throw new Error("INVALID_REQUEST");
+      return Response.json(
+        { choices: await listReportBrandingChoices(database(), actor, scope) },
+        { headers: privateHeaders },
+      );
+    }
     const reportId = query.get("reportId") ?? undefined;
     if (reportId && query.get("format") === "preview")
       return Response.json(

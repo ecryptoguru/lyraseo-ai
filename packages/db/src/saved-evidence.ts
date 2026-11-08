@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { FrozenWorkspaceBranding } from "./branding";
 import type {
   AuditComparison,
   RuleResult,
@@ -337,6 +339,72 @@ export type ProjectedSnapshot = Omit<EvidenceSnapshot, "sources"> & {
   format: typeof SAVED_FORMAT;
   sources: SavedSource[];
 };
+/** Frozen branding accepts bounded embedded PNG bytes only; never an asset URL. */
+function projectBranding(value: unknown): FrozenWorkspaceBranding | undefined {
+  if (value === undefined) return undefined;
+  const brand = obj(value);
+  if (
+    brand.schemaVersion !== 1 ||
+    typeof brand.brandingRevisionId !== "string" ||
+    !brand.brandingRevisionId ||
+    brand.brandingRevisionId.length > 128 ||
+    !Number.isSafeInteger(brand.revision) ||
+    Number(brand.revision) < 1 ||
+    typeof brand.displayName !== "string" ||
+    brand.displayName.length > 100 ||
+    Buffer.byteLength(brand.displayName) > 400
+  )
+    throw new Error("INVALID_BRANDING");
+  let logo: FrozenWorkspaceBranding["logo"];
+  if (brand.logo !== undefined) {
+    const image = obj(brand.logo);
+    if (
+      typeof image.base64 !== "string" ||
+      image.base64.length > 87384 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        image.base64,
+      ) ||
+      image.mime !== "image/png" ||
+      typeof image.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(image.sha256) ||
+      !Number.isSafeInteger(image.width) ||
+      Number(image.width) < 1 ||
+      Number(image.width) > 512 ||
+      !Number.isSafeInteger(image.height) ||
+      Number(image.height) < 1 ||
+      Number(image.height) > 256
+    )
+      throw new Error("INVALID_BRANDING");
+    const bytes = Buffer.from(image.base64, "base64");
+    if (
+      bytes.length < 33 ||
+      bytes.length > 65536 ||
+      bytes.toString("base64") !== image.base64 ||
+      !bytes
+        .subarray(0, 8)
+        .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+      bytes.toString("ascii", 12, 16) !== "IHDR" ||
+      bytes.readUInt32BE(16) !== image.width ||
+      bytes.readUInt32BE(20) !== image.height ||
+      createHash("sha256").update(bytes).digest("hex") !== image.sha256
+    )
+      throw new Error("INVALID_BRANDING");
+    logo = {
+      base64: image.base64,
+      sha256: image.sha256,
+      mime: "image/png",
+      width: Number(image.width),
+      height: Number(image.height),
+    };
+  }
+  return {
+    schemaVersion: 1,
+    brandingRevisionId: brand.brandingRevisionId,
+    revision: Number(brand.revision),
+    displayName: brand.displayName,
+    ...(logo ? { logo } : {}),
+  };
+}
 export function projectSnapshot(
   v: unknown,
   source: "saved" | "legacy-sql" = "saved",
@@ -464,8 +532,13 @@ export function projectSnapshot(
     });
   }
   const frozen = comparison(s.comparison);
+  const reportBranding = projectBranding(s.reportBranding);
   const result: ProjectedSnapshot = {
     format: SAVED_FORMAT,
+    ...(reportBranding ? { reportBranding } : {}),
+    ...(["founder", "editor", "agency"].includes(String(s.reportTemplate))
+      ? { reportTemplate: s.reportTemplate as "founder" | "editor" | "agency" }
+      : {}),
     capturedAt: timestamp(s.capturedAt) ?? "",
     scope: {
       workspaceId: str(scope.workspaceId, 128) ?? "",

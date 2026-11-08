@@ -1,3 +1,4 @@
+import { lockLegacyInlineRead } from "./legacy-inline";
 import {
   artifactStore,
   attestArtifactReceipt,
@@ -57,14 +58,42 @@ async function scoped(
   now = new Date(),
 ) {
   await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, action);
-  const run = await tx.auditRun.findFirst({
-    where: {
-      id: scope.auditId,
-      workspaceId: scope.workspaceId,
-      siteId: scope.siteId,
-      resultExpiresAt: { gt: now },
-    },
-  });
+  const enrolled =
+    (action === "read" || action === "export" || action === "edit") &&
+    (await lockLegacyInlineRead(tx, scope));
+  if (action === "edit") {
+    // Scope acquisition may have waited behind enrollment or access changes.
+    try {
+      await tx.$queryRaw`SELECT lyraseo_legacy_inline.lock_issue_actor(${scope.workspaceId},${scope.siteId},${actor.securityVersion}::integer)`;
+    } catch (error) {
+      if (auditErrorCode(error) === "FORBIDDEN") throw new Error("FORBIDDEN");
+      throw error;
+    }
+    await authorizeSiteIn(tx, actor, scope.workspaceId, scope.siteId, action);
+  }
+  const where = {
+    id: scope.auditId,
+    workspaceId: scope.workspaceId,
+    siteId: scope.siteId,
+    resultExpiresAt: { gt: now },
+  };
+  const withheld =
+    enrolled &&
+    (await tx.auditRun.count({
+      where: { ...where, storageFormat: null },
+    })) > 0;
+  if (withheld && action === "edit")
+    throw new Error("LEGACY_EVIDENCE_WITHHELD");
+  const run = withheld
+    ? await tx.auditRun.findFirst({ where, omit: { evaluation: true } })
+    : await tx.auditRun.findFirst({
+        where: {
+          id: scope.auditId,
+          workspaceId: scope.workspaceId,
+          siteId: scope.siteId,
+          resultExpiresAt: { gt: now },
+        },
+      });
   if (!run)
     throw new Error(
       (await tx.auditRun.count({
@@ -73,7 +102,7 @@ async function scoped(
         ? "SOURCE_EXPIRED"
         : "NOT_FOUND",
     );
-  return run;
+  return { ...run, evaluation: "evaluation" in run ? run.evaluation : null };
 }
 function freshVerification(site: { verifiedAt: Date | null }) {
   const verified = site.verifiedAt?.getTime();
@@ -104,6 +133,9 @@ export async function createAuditRun(
     throw new Error("INVALID_AUDIT_INPUT");
   return withActor(db, actor, input.workspaceId, async (tx) => {
     await lock(tx, { ...input, auditId: "" });
+    // Recheck and lock the actor epoch after any workspace/site lock wait.
+    // The same guard is enforced by an INSERT policy for direct SQL callers.
+    await tx.$queryRaw`SELECT lyraseo_audit.web_guard_create(${input.siteId},${actor.securityVersion}::integer)`;
     const site = await authorizeSiteIn(
       tx,
       actor,
@@ -233,6 +265,8 @@ export async function readAuditRun(
     "audits:read",
     async (tx) => {
       const run = await scoped(tx, actor, scope, action, now);
+      const legacyWithheld =
+        run.storageFormat === null && (await lockLegacyInlineRead(tx, scope));
       const pages = await pageReceipts(
         tx,
         scope,
@@ -261,7 +295,10 @@ export async function readAuditRun(
               )
               .slice(0, 25)
           : [],
-        evaluation: compactEvaluation(run.evaluation),
+        evaluation: legacyWithheld ? null : compactEvaluation(run.evaluation),
+        evidenceStatus: legacyWithheld
+          ? "legacy-lineage-withheld"
+          : "available",
         pages,
         actions,
       };
@@ -306,6 +343,7 @@ export async function readAuditSource(
   };
   const ticket = (current: Actor = actor) =>
     withEvidenceRead(db, current, scope, "read", undefined, async (tx) => {
+      await lockLegacyInlineRead(tx, scope);
       const [row] = await tx.$queryRaw<
         { version: ArtifactVersion | null; format: string | null }[]
       >`
@@ -337,6 +375,7 @@ export async function readAuditSource(
   }
   const readLegacy = (current: Actor) =>
     withEvidenceRead(db, current, scope, "read", undefined, async (tx) => {
+      const protectedLegacy = await lockLegacyInlineRead(tx, scope);
       const now = new Date();
       const rows = await tx.$queryRaw<
         Array<{
@@ -352,9 +391,24 @@ export async function readAuditSource(
       JOIN "AuditPageRetention" t ON t."pageId"=p.id AND t."workspaceId"=p."workspaceId" AND t."auditId"=p."auditId"
       WHERE r."workspaceId"=${scope.workspaceId} AND r."siteId"=${scope.siteId} AND r.id=${scope.auditId}
         AND p."requestedUrl"=${url} AND r."resultExpiresAt">${now} AND t."rawExpiresAt">${now}
+        AND (NOT ${protectedLegacy}::boolean OR lyraseo_legacy_inline.classify(p,r,t)='not-due')
         AND r."storageFormat" IS NULL AND jsonb_typeof(p.provenance->'rawHtml')='string'
         AND octet_length(p.provenance->>'rawHtml')<=5242880`;
       if (!rows[0]?.raw) {
+        if (protectedLegacy) {
+          const [decision] = await tx.$queryRaw<Array<{ state: string }>>`
+            SELECT lyraseo_legacy_inline.classify(p,r,t) AS state FROM "AuditPage" p
+            JOIN "AuditRun" r ON (r."workspaceId",r.id)=(p."workspaceId",p."auditId")
+            LEFT JOIN "AuditPageRetention" t ON (t."workspaceId",t."auditId",t."pageId")=(p."workspaceId",p."auditId",p.id)
+            WHERE (r."workspaceId",r."siteId",r.id,p."requestedUrl")=(${scope.workspaceId},${scope.siteId},${scope.auditId},${url})`;
+          if (
+            decision &&
+            ["unsafe-to-separate", "clock-unknown", "active-writer"].includes(
+              decision.state,
+            )
+          )
+            throw new Error("LEGACY_EVIDENCE_WITHHELD");
+        }
         if (
           !(await tx.auditPage.count({
             where: {
@@ -577,6 +631,11 @@ export async function compareAuditRuns(
           "read",
           now,
         );
+      if (
+        (before.storageFormat === null || after.storageFormat === null) &&
+        (await lockLegacyInlineRead(tx, scope))
+      )
+        throw new Error("LEGACY_EVIDENCE_WITHHELD");
       if (!before.evaluation || !after.evaluation)
         throw new Error("AUDIT_INCOMPLETE");
       const result = compareAudits(

@@ -176,10 +176,18 @@ async function mount(page: Page, surface: Surface, detail = false) {
   );
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  let releaseReads!: () => void;
+  let releaseSavedReads!: () => void, releaseBranding!: () => void;
   const readsReady = new Promise<void>((resolve) => {
-    releaseReads = resolve;
+    releaseSavedReads = resolve;
   });
+  const brandingReady = new Promise<void>((resolve) => {
+    releaseBranding = resolve;
+  });
+  const releaseReads = () => {
+    releaseSavedReads();
+    releaseBranding();
+  };
+  const brandingReads: string[] = [];
   const reads: string[] = [],
     commands: unknown[] = [];
   await page.route("**/api/**", async (route) => {
@@ -190,11 +198,16 @@ async function mount(page: Page, surface: Surface, detail = false) {
         json: { error: "Unexpected mutation in hydration test" },
       });
     }
-    const path = new URL(route.request().url()).pathname;
-    reads.push(path);
-    await readsReady;
-    const value =
-      path === "/api/pages"
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const branding =
+      path === "/api/reports" &&
+      url.searchParams.get("brandingOptions") === "1";
+    (branding ? brandingReads : reads).push(path);
+    await (branding ? brandingReady : readsReady);
+    const value = branding
+      ? { choices: [{ revision: 1, displayName: "Approved brand" }] }
+      : path === "/api/pages"
         ? detail
           ? pageDetail
           : { pages: [] }
@@ -218,7 +231,15 @@ async function mount(page: Page, surface: Surface, detail = false) {
     content: `window.process={env:{}};${client.outputFiles[0].text}`,
   });
   expect(errors, "actual-component browser bundle boot").toEqual([]);
-  return { releaseReads, reads, commands, errors };
+  return {
+    releaseReads,
+    releaseSavedReads,
+    releaseBranding,
+    reads,
+    brandingReads,
+    commands,
+    errors,
+  };
 }
 async function hydrate(page: Page) {
   await page.evaluate(() =>
@@ -360,10 +381,21 @@ for (const surface of surfaces) {
         await expect
           .poll(() => fixture.reads.length)
           .toBe(surface.symbol === "ContentWorkspace" ? 4 : 1);
+      if (surface.symbol === "ContentWorkspace") {
+        await expect
+          .poll(() => fixture.brandingReads)
+          .toEqual(["/api/reports"]);
+        expect([...fixture.reads].sort()).toEqual([
+          "/api/audits",
+          "/api/content",
+          "/api/reports",
+          "/api/search",
+        ]);
+      }
       // The readiness gate ends before these held network reads complete.
       for (const [selector, value] of Object.entries(surface.fields))
         await expect(page.locator(selector)).toHaveValue(value);
-      fixture.releaseReads();
+      fixture.releaseSavedReads();
       if (surface.loadedText)
         await expect(
           page.getByText(surface.loadedText, { exact: true }),
@@ -373,6 +405,21 @@ for (const surface of surfaces) {
           page.getByText(/History refreshed\. Your unsaved draft is preserved/),
         ).toBeVisible();
       if (surface.symbol === "ContentWorkspace") {
+        await expect(
+          page.getByText(
+            "Loading approved workspace branding. Lyraseo reports remain available.",
+          ),
+        ).toBeVisible();
+        for (const [selector, value] of Object.entries(surface.fields))
+          await expect(page.locator(selector)).toHaveValue(value);
+        fixture.releaseBranding();
+        await expect(
+          page
+            .locator("#report-branding")
+            .getByRole("option", { name: "Approved brand · version 1" }),
+        ).toHaveCount(1);
+        for (const [selector, value] of Object.entries(surface.fields))
+          await expect(page.locator(selector)).toHaveValue(value);
         await page.locator("#draft-title").fill("Second-field draft update");
         await expect(page.locator("#draft-body")).toHaveValue(
           surface.fields["#draft-body"],

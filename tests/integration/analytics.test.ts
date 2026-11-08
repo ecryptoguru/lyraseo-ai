@@ -207,12 +207,14 @@ it("imports primary-shaped fixtures once, reads saved outcomes in GSC order, nev
   expect(transport).not.toHaveBeenCalled();
   expect(saved.opportunityOutcomes.map((x) => x.query)).toEqual([
     "first",
+    "first",
+    "second",
     "second",
   ]);
   expect(
     saved.opportunityOutcomes.map((x) => x.conversionEvidence.status),
-  ).toEqual(["available", "unavailable"]);
-  expect(saved.opportunityOutcomes[1]!.conversionEvidence).toMatchObject({
+  ).toEqual(["available", "available", "unavailable", "unavailable"]);
+  expect(saved.opportunityOutcomes[2]!.conversionEvidence).toMatchObject({
     reason: "no_matching_page",
   });
   expect(JSON.stringify(saved)).not.toContain("encryptedRefreshToken");

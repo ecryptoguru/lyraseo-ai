@@ -93,6 +93,13 @@ async function boundedBytes(
   maximum: number,
   signal: AbortSignal,
 ) {
+  // The pinned transport requests identity encoding and records original bytes.
+  // Parsing an unexpected encoded response would mislabel it as original HTML.
+  const encoding = response.headers.get("content-encoding");
+  if (encoding && encoding.trim().toLowerCase() !== "identity") {
+    await response.body?.cancel();
+    throw new Error("UNSUPPORTED_CONTENT_ENCODING");
+  }
   if (Number(response.headers.get("content-length")) > maximum) {
     await response.body?.cancel();
     throw new Error("BODY_TOO_LARGE");
@@ -134,10 +141,12 @@ async function requestSameOrigin(
   origin: string,
   transport: PublicTransport,
   signal: AbortSignal,
+  onRedirect?: (redirects: string[]) => void,
 ) {
   let current = normalizeUrl(url);
   const redirects: string[] = [];
   for (let hop = 0; hop <= 5; hop++) {
+    signal.throwIfAborted();
     if (new URL(current).origin !== origin)
       throw new Error("REDIRECT_OUTSIDE_ORIGIN");
     const response = await transport(current, signal);
@@ -154,7 +163,21 @@ async function requestSameOrigin(
     const location = response.headers.get("location");
     if (!location) return { response, finalUrl: current, redirects };
     await response.body?.cancel();
-    const next = normalizeUrl(new URL(location, current).href);
+    if (hop === 5) throw new Error("REDIRECT_LIMIT");
+    // Keep the observed, authorized hops even when the next destination is
+    // blocked or malformed. Never claim an unrequested target as the final URL.
+    const observed = [...redirects, current];
+    onRedirect?.(observed);
+    let next: string;
+    try {
+      const target = new URL(location, current);
+      if (target.origin !== origin) throw new Error("REDIRECT_OUTSIDE_ORIGIN");
+      next = normalizeUrl(target.href);
+    } catch (error) {
+      if (error instanceof Error && error.message === "REDIRECT_OUTSIDE_ORIGIN")
+        throw error;
+      throw new Error("REDIRECT_INVALID_LOCATION");
+    }
     if (next === current || redirects.includes(next))
       throw new Error("REDIRECT_LOOP");
     redirects.push(current);
@@ -475,6 +498,9 @@ export async function acquireRawPage(
         return transport(url, abort);
       },
       signal,
+      (redirects) => {
+        receipt.provenance.redirects = redirects;
+      },
     );
     const { response, finalUrl, redirects } = page;
     receipt.evidence.robotsGoogleAllowed = observeGoogle(finalUrl, "final");
@@ -518,10 +544,15 @@ export async function acquireRawPage(
     ).join("");
     // Preserve every accepted UTF-8 byte when the source is re-encoded
     // for persistence. HTML parsing consumes a leading BOM as a signature.
-    const source = new TextDecoder("utf-8", {
-      fatal: true,
-      ignoreBOM: true,
-    }).decode(bytes);
+    let source: string;
+    try {
+      source = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes);
+    } catch {
+      throw new Error("BODY_INVALID_UTF8");
+    }
     const html = source.startsWith("\uFEFF") ? source.slice(1) : source;
     // JSONB cannot represent NUL. Keep the original byte digest and an explicit
     // unreadable receipt, never a silently altered copy of the hashed source.
@@ -541,9 +572,15 @@ export async function acquireRawPage(
     receipt.evidence = evidence;
   } catch (error) {
     outer?.throwIfAborted();
-    const code = error instanceof Error ? error.message : "ACQUISITION_FAILED";
+    const code =
+      deadline.aborted ||
+      (error instanceof Error && error.name === "TimeoutError")
+        ? "ACQUISITION_TIMEOUT"
+        : error instanceof Error
+          ? error.message
+          : "ACQUISITION_FAILED";
     receipt.provenance.error =
-      /^(EMPTY_HTML_BODY|BODY_UNREPRESENTABLE|BODY_TOO_LARGE|EVIDENCE_TOO_LARGE|REDIRECT_\w+|ROBOTS_\w+|HTTP_ERROR|UNSUPPORTED_CONTENT_TYPE|UNSAFE_TRANSPORT_REDIRECT|DESTINATION_BLOCKED)$/.test(
+      /^(ACQUISITION_TIMEOUT|EMPTY_HTML_BODY|BODY_INVALID_UTF8|BODY_UNREPRESENTABLE|BODY_TOO_LARGE|EVIDENCE_TOO_LARGE|REDIRECT_\w+|ROBOTS_\w+|HTTP_ERROR|UNSUPPORTED_CONTENT_TYPE|UNSUPPORTED_CONTENT_ENCODING|UNSAFE_TRANSPORT_REDIRECT|DESTINATION_BLOCKED)$/.test(
         code,
       )
         ? code
@@ -614,4 +651,68 @@ export async function runAuditPage<T>(
   const receipt = await acquireRawPage(url, origin, transport, signal);
   signal?.throwIfAborted();
   return persist(receipt);
+}
+
+/**
+ * Discover a bounded candidate list from the homepage, without following any
+ * suggested page. This is transient discovery evidence, not an audit result.
+ */
+export async function discoverCandidates(
+  siteOrigin: string,
+  transport: PublicTransport,
+  assertAccess: () => Promise<void>,
+  signal?: AbortSignal,
+) {
+  const origin = new URL(normalizeUrl(siteOrigin)).origin;
+  const homepage = normalizeUrl(`${origin}/`);
+  let accessError: unknown;
+  const check = async () => {
+    try {
+      await assertAccess();
+    } catch (error) {
+      accessError = error;
+      throw error;
+    }
+  };
+  await check();
+  const receipt = await acquireRawPage(
+    homepage,
+    origin,
+    async (url, abort) => {
+      await check();
+      return transport(url, abort);
+    },
+    signal,
+  );
+  if (accessError !== undefined) throw accessError;
+  await check();
+  if (!receipt.evidence.acquired)
+    return {
+      candidates: [homepage],
+      state: "unavailable" as const,
+      sourceUrl: homepage,
+      truncated: false,
+      error: receipt.provenance.error ?? "ACQUISITION_FAILED",
+    };
+  const pages = new Set([homepage]);
+  let truncated = false;
+  for (const link of receipt.evidence.linkNames) {
+    try {
+      const url = normalizeUrl(link.href);
+      if (new URL(url).origin !== origin || pages.has(url)) continue;
+      if (pages.size === 25) {
+        truncated = true;
+        break;
+      }
+      pages.add(url);
+    } catch {
+      // Invalid, non-HTTPS, credentialed, or unsupported links are not candidates.
+    }
+  }
+  return {
+    candidates: [...pages],
+    state: "available" as const,
+    sourceUrl: receipt.provenance.finalUrl ?? homepage,
+    truncated,
+  };
 }

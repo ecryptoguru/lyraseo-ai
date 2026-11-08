@@ -217,3 +217,102 @@ test("registration exposes the stable page link without starting acquisition", a
   ).toHaveAttribute("href", "/app/sites/site/pages/page?workspaceId=a");
   await expect(page.getByRole("status")).toContainText("Page registered");
 });
+
+test("withheld legacy page findings remain explicit alongside permitted receipts", async ({
+  page,
+}, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const withheld = {
+    ...detail,
+    audits: detail.audits.map((a) => ({
+      ...a,
+      evidenceStatus: "legacy-lineage-withheld",
+      findings: [],
+    })),
+    search: {
+      ...detail.search,
+      auditEvidenceStatus: "legacy-lineage-withheld",
+    },
+  };
+  await page.route("**/api/pages**", (route) =>
+    route.fulfill({ json: withheld }),
+  );
+  await page.route("**/api/content**", (route) => route.fulfill({ json: [] }));
+  await mount(page, false);
+  await expect(
+    page.getByText(
+      "Historical findings are withheld pending source-lineage verification. Capture receipts remain available.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Audit-derived search opportunities are withheld", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await page
+    .getByText("Captured evidence and acquisition receipt", { exact: true })
+    .click();
+  await expect(page.getByText('"status": 403', { exact: false })).toBeVisible();
+  expect(errors).toEqual([]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: `../../output/playwright/legacy-page-withheld-r1-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+});
+
+test("page reports expose independent PDF and CSV decisions", async ({
+  page,
+}) => {
+  await page.route("**/api/pages**", (route) =>
+    route.fulfill({
+      json: {
+        ...detail,
+        reports: [
+          {
+            id: "csv-only",
+            title: "CSV reviewed independently",
+            createdAt: "2020-01-01T00:00:00Z",
+            formatStatus: { pdf: "withdrawn", csv: "available" },
+          },
+          {
+            id: "pdf-only",
+            title: "PDF reviewed independently",
+            createdAt: "2020-01-01T00:00:00Z",
+            formatStatus: { pdf: "available", csv: "pending-review" },
+          },
+        ],
+      },
+    }),
+  );
+  await mount(page, false);
+  const csv = page
+    .getByRole("listitem")
+    .filter({ hasText: "CSV reviewed independently" });
+  await expect(csv.getByText("PDF: withdrawn.")).toBeVisible();
+  await expect(csv.getByRole("link", { name: "Download PDF" })).toHaveCount(0);
+  await expect(csv.getByRole("link", { name: "Download CSV" })).toBeVisible();
+  const pdf = page
+    .getByRole("listitem")
+    .filter({ hasText: "PDF reviewed independently" });
+  await expect(pdf.getByText("CSV: pending-review.")).toBeVisible();
+  await expect(pdf.getByRole("link", { name: "Download PDF" })).toBeVisible();
+  await expect(pdf.getByRole("link", { name: "Download CSV" })).toHaveCount(0);
+  const metrics = await page.evaluate(() => ({
+    width: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(metrics.scroll).toBeLessThanOrEqual(metrics.width + 1);
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(
+      (v) => v.impact === "serious" || v.impact === "critical",
+    ),
+  ).toEqual([]);
+});

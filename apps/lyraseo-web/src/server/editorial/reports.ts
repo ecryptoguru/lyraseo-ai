@@ -3,6 +3,7 @@ import { createElement as h } from "react";
 import type { AuditEvaluation, RuleResult } from "@lyraseo/visibility";
 import {
   Document,
+  Image,
   Page,
   Text,
   View,
@@ -110,6 +111,30 @@ export function comparisonReportLines(
     }),
   ];
 }
+/** Framing is additive: historical snapshots without a variant retain their original layout. */
+export function reportTemplateLines(snapshot: EvidenceSnapshot): string[] {
+  if (!snapshot.reportTemplate) return [];
+  const details = {
+    founder: [
+      "Founder decision brief",
+      "Decision: choose a measured issue to investigate, assign a change and verify the same scope again. Search and AI effects require separate measurement.",
+    ],
+    editor: [
+      "Editor action worksheet",
+      "Workflow: inspect each source finding, verify supporting claims, edit the page, retain an evidence citation and rerun the frozen manifest. Unknown evidence is a verification task.",
+    ],
+    agency: [
+      "Agency client delivery",
+      "Client review: confirm the selected site, date windows, scope and limitations. Discuss measured changes and outstanding verification; this report promises no ranking, traffic or citation result.",
+    ],
+  }[snapshot.reportTemplate];
+  return [
+    ...details,
+    `Selected sources: ${snapshot.sources.length}. Audit sources: ${snapshot.sources.filter((s) => s.kind !== "google-search-console").length}; Search Console imports: ${snapshot.sources.filter((s) => s.kind === "google-search-console").length}.`,
+    "Coverage: selected saved evidence only; each source retains its original window, methodology, omissions and expiration. A workflow disposition does not change a measurement.",
+    "Next action: review the evidence and assumptions with the authorized site owner. Missing, expired or unevaluated evidence remains explicitly unavailable.",
+  ];
+}
 export async function renderEvidenceReport(
   title: string,
   snapshot: EvidenceSnapshot,
@@ -118,6 +143,8 @@ export async function renderEvidenceReport(
   const rows = [
     [
       "Title",
+      ...(snapshot.reportTemplate ? ["Report template"] : []),
+      ...(snapshot.reportBranding ? ["Frozen workspace branding"] : []),
       "Scope",
       "Captured UTC",
       "Methodology",
@@ -135,6 +162,17 @@ export async function renderEvidenceReport(
         evaluation = (data.evaluation ?? {}) as Record<string, unknown>;
       return [
         title,
+        ...(snapshot.reportTemplate ? [snapshot.reportTemplate] : []),
+        ...(snapshot.reportBranding
+          ? [
+              JSON.stringify({
+                brandingRevisionId: snapshot.reportBranding.brandingRevisionId,
+                revision: snapshot.reportBranding.revision,
+                displayName: snapshot.reportBranding.displayName,
+                logoSha256: snapshot.reportBranding.logo?.sha256,
+              }),
+            ]
+          : []),
         `${snapshot.scope.workspaceId}/${snapshot.scope.siteId}`,
         snapshot.capturedAt,
         snapshot.methodology,
@@ -285,6 +323,40 @@ export async function renderEvidenceReport(
           size: "A4",
           style: { padding: 36, paddingBottom: 52, fontFamily: "Helvetica" },
         },
+        ...(snapshot.reportBranding
+          ? [
+              ...(snapshot.reportBranding.logo
+                ? [
+                    h(Image, {
+                      key: "brand-logo",
+                      src: {
+                        data: Buffer.from(
+                          snapshot.reportBranding.logo.base64,
+                          "base64",
+                        ),
+                        format: "png",
+                      },
+                      style: {
+                        width: Math.min(
+                          160,
+                          snapshot.reportBranding.logo.width,
+                        ),
+                        height:
+                          Math.min(
+                            160 / snapshot.reportBranding.logo.width,
+                            1,
+                          ) * snapshot.reportBranding.logo.height,
+                        marginBottom: 8,
+                      },
+                    }),
+                  ]
+                : []),
+              text(snapshot.reportBranding.displayName),
+              text(
+                `Frozen branding revision ${snapshot.reportBranding.revision} | ${snapshot.reportBranding.brandingRevisionId}`,
+              ),
+            ]
+          : []),
         h(
           Text,
           { style: { fontSize: 20, marginBottom: 16 } },
@@ -292,6 +364,16 @@ export async function renderEvidenceReport(
         ),
         text(
           `Private report | Site reference: ${snapshot.scope.siteId} | ${snapshot.capturedAt}`,
+        ),
+        ...reportTemplateLines(snapshot).map((line, index) =>
+          h(
+            Text,
+            {
+              key: `template-${index}`,
+              style: { fontSize: 10, marginBottom: 8 },
+            },
+            line,
+          ),
         ),
         text(snapshot.methodology),
         text(

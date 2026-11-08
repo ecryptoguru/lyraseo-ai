@@ -49,6 +49,50 @@ export async function enrollAuthenticator(): Promise<Enrollment> {
     };
   }
 }
+export async function enrollBackupAuthenticator(): Promise<Enrollment> {
+  try {
+    const actor = await context();
+    if (!actor.mfaVerified) throw new Error("MFA_REQUIRED");
+    const client = await authClient();
+    const { data, error } = await client.auth.mfa.listFactors();
+    if (
+      error ||
+      !data?.all.some(
+        (factor) =>
+          factor.factor_type === "totp" && factor.status === "verified",
+      )
+    )
+      throw new Error("MFA_REQUIRED");
+    // Provider I/O may take long enough for the session or access to change.
+    const current = await resolveActor();
+    requireFreshAuthentication(current);
+    if (
+      !current.mfaVerified ||
+      current.userId !== actor.userId ||
+      current.sessionId !== actor.sessionId ||
+      current.securityVersion !== actor.securityVersion
+    )
+      throw new Error("MFA_REQUIRED");
+    const result = await client.auth.mfa.enroll({
+      factorType: "totp",
+      friendlyName: `Backup authenticator ${new Date().toISOString().slice(0, 16)}`,
+      issuer: "LyraSEO AI",
+    });
+    if (result.error || !result.data) throw result.error;
+    return {
+      message:
+        "Set up this backup on a separate device or app, then enter its current code to confirm it.",
+      factorId: result.data.id,
+      qrCode: result.data.totp.qr_code,
+      manualKey: result.data.totp.secret,
+    };
+  } catch {
+    return {
+      message:
+        "Backup setup could not start. Sign in again and verify an existing authenticator before retrying.",
+    };
+  }
+}
 export async function confirmAuthenticator(
   _previous: Enrollment,
   form: FormData,

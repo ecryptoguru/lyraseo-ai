@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { createDatabase } from "../../packages/db/src";
 import {
   registerPage,
@@ -23,6 +24,172 @@ beforeEach(async () => {
 afterAll(async () => {
   await db.$disconnect();
   await admin.$disconnect();
+});
+
+it("replays historical and intermediate page receipts without changing journal history", async () => {
+  const actions = ["change", "claim", "unassign"] as const;
+  for (const action of actions) {
+    for (const variant of ["published", "intermediate"] as const) {
+      const page = await registerPage(
+        db,
+        actor,
+        scope,
+        `https://example.com/${action}-${variant}`,
+      );
+      const common = {
+        pageId: page.id,
+        expectedRevision: 1,
+        idempotencyKey: `${action}-${variant}`,
+      };
+      const input =
+        action === "change"
+          ? { ...common, action, note: "Previously recorded" }
+          : { ...common, action };
+      const payload = {
+        pageId: page.id,
+        expectedRevision: 1,
+        action,
+        note: action === "change" ? "Previously recorded" : "",
+        ...(variant === "intermediate" ? { assigneeUserId: null } : {}),
+        contentDraftId: null,
+      };
+      const inputHash = createHash("sha256")
+        .update(JSON.stringify(payload))
+        .digest("hex");
+      await admin.pageIdentity.update({
+        where: { id: page.id },
+        data: { revision: 2 },
+      });
+      const prior = await admin.pageJournal.create({
+        data: {
+          ...scope,
+          pageId: page.id,
+          revision: 2,
+          action,
+          note: action === "change" ? "Previously recorded" : "",
+          userId: actor.userId,
+          idempotencyKey: common.idempotencyKey,
+          inputHash,
+        },
+      });
+      const replay = await changePage(db, actor, scope, input);
+      expect(replay.entry.id).toBe(prior.id);
+      expect(replay.entry.inputHash).toBe(inputHash);
+      expect(
+        await admin.pageJournal.count({ where: { pageId: page.id } }),
+      ).toBe(1);
+      await expect(
+        changePage(
+          db,
+          actor,
+          scope,
+          action === "change"
+            ? { ...common, action, note: "Altered note" }
+            : { ...common, action: action === "claim" ? "unassign" : "claim" },
+        ),
+      ).rejects.toThrow("REVISION_CONFLICT");
+      if (action === "change")
+        await expect(
+          changePage(db, actor, scope, {
+            ...common,
+            action,
+            note: "Previously recorded",
+            contentDraftId: "different-draft",
+          }),
+        ).rejects.toThrow("REVISION_CONFLICT");
+      expect(
+        (await admin.pageIdentity.findUniqueOrThrow({ where: { id: page.id } }))
+          .revision,
+      ).toBe(2);
+      expect(
+        await admin.pageJournal.count({ where: { pageId: page.id } }),
+      ).toBe(1);
+    }
+  }
+});
+
+it("uses the published hash for newly recorded legacy actions", async () => {
+  const page = await registerPage(
+    db,
+    actor,
+    scope,
+    "https://example.com/new-legacy-receipts",
+  );
+  const inputs = [
+    {
+      action: "change" as const,
+      pageId: page.id,
+      expectedRevision: 1,
+      idempotencyKey: "new-change",
+      note: "A change",
+    },
+    {
+      action: "claim" as const,
+      pageId: page.id,
+      expectedRevision: 2,
+      idempotencyKey: "new-claim",
+    },
+    {
+      action: "unassign" as const,
+      pageId: page.id,
+      expectedRevision: 3,
+      idempotencyKey: "new-unassign",
+    },
+  ];
+  for (const input of inputs) {
+    const result = await changePage(db, actor, scope, input);
+    const expectedHash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          pageId: input.pageId,
+          expectedRevision: input.expectedRevision,
+          action: input.action,
+          note: input.action === "change" ? input.note : "",
+          contentDraftId: null,
+        }),
+      )
+      .digest("hex");
+    expect(result.entry.inputHash).toBe(expectedHash);
+    expect((await changePage(db, actor, scope, input)).entry.id).toBe(
+      result.entry.id,
+    );
+  }
+  expect(await admin.pageJournal.count({ where: { pageId: page.id } })).toBe(3);
+});
+
+it("keeps new assignment receipts bound to the selected assignee", async () => {
+  const page = await registerPage(
+    db,
+    actor,
+    scope,
+    "https://example.com/assignment-replay",
+  );
+  const input = {
+    action: "assign" as const,
+    pageId: page.id,
+    expectedRevision: 1,
+    idempotencyKey: "assign-once",
+    assigneeUserId: "other",
+  };
+  const result = await changePage(db, actor, scope, input);
+  expect((await changePage(db, actor, scope, input)).entry.id).toBe(
+    result.entry.id,
+  );
+  await expect(
+    changePage(db, actor, scope, { ...input, assigneeUserId: "owner" }),
+  ).rejects.toThrow("REVISION_CONFLICT");
+  await expect(
+    changePage(db, actor, scope, { ...input, assigneeUserId: null }),
+  ).rejects.toThrow("REVISION_CONFLICT");
+  await expect(
+    changePage(db, actor, scope, {
+      pageId: page.id,
+      expectedRevision: 1,
+      idempotencyKey: input.idempotencyKey,
+      action: "claim",
+    }),
+  ).rejects.toThrow("REVISION_CONFLICT");
+  expect(await admin.pageJournal.count({ where: { pageId: page.id } })).toBe(1);
 });
 it("registers stable exact URL identities without merging regional, query or trailing-slash pages; GET is read-only", async () => {
   expect((await listPages(db, actor, scope)).pages).toEqual([]);

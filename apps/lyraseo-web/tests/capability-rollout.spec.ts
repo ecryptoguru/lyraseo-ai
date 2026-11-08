@@ -343,8 +343,14 @@ test("paused content preserves readable draft revisions and report downloads", a
   await page.route("**/api/**", (route) => {
     if (route.request().method() !== "GET")
       mutations.push(route.request().url());
-    const path = new URL(route.request().url()).pathname;
+    const url = new URL(route.request().url());
+    const path = url.pathname;
     readPaths.add(path);
+    if (
+      path === "/api/reports" &&
+      url.searchParams.get("brandingOptions") === "1"
+    )
+      return route.fulfill({ json: { choices: [] } });
     return route.fulfill({
       json:
         path === "/api/content"
@@ -356,12 +362,24 @@ test("paused content preserves readable draft revisions and report downloads", a
                   title: "Retained report",
                   createdAt: "2026-11-02T00:00:00Z",
                   evidenceFormat: "saved-evidence-v2",
+                  formatStatus: { pdf: "available", csv: "available" },
                 },
                 {
                   id: "legacy",
                   title: "Historical report",
                   createdAt: "2025-11-02T00:00:00Z",
                   evidenceFormat: null,
+                  formatStatus: {
+                    pdf: "pending-review",
+                    csv: "pending-review",
+                  },
+                },
+                {
+                  id: "withdrawn",
+                  title: "Withdrawn report",
+                  createdAt: "2025-10-02T00:00:00Z",
+                  evidenceFormat: null,
+                  formatStatus: { pdf: "withdrawn", csv: "withdrawn" },
                 },
               ]
             : path === "/api/search"
@@ -402,6 +420,9 @@ test("paused content preserves readable draft revisions and report downloads", a
       exact: true,
     }),
   });
+  const withdrawn = page.getByRole("listitem").filter({
+    has: page.getByRole("heading", { name: "Withdrawn report", exact: true }),
+  });
   for (const format of ["PDF", "CSV"]) {
     const link = retained.getByRole("link", {
       name: "Download " + format,
@@ -415,12 +436,16 @@ test("paused content preserves readable draft revisions and report downloads", a
     await expect(
       legacy.getByRole("link", { name: "Download " + format, exact: true }),
     ).toHaveCount(0);
+    await expect(
+      legacy.getByText(`${format}: pending-review.`, { exact: true }),
+    ).toBeVisible();
+    await expect(
+      withdrawn.getByRole("link", { name: "Download " + format, exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      withdrawn.getByText(`${format}: withdrawn.`, { exact: true }),
+    ).toBeVisible();
   }
-  await expect(
-    legacy.getByText("Original downloads unavailable pending legacy review.", {
-      exact: true,
-    }),
-  ).toBeVisible();
   await expect(
     legacy.getByRole("button", {
       name: "Preview Historical report",

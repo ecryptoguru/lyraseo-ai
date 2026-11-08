@@ -41,17 +41,33 @@ export async function privateBody(request: Request) {
 }
 export function editorialFailure(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (code === "LEGACY_EVIDENCE_WITHHELD")
+    return Response.json(
+      {
+        code,
+        error:
+          "Historical source evidence is withheld pending source-lineage verification. Your authored revisions remain available.",
+      },
+      { status: 409, headers: privateHeaders },
+    );
   if (
-    ["LEGACY_REVIEW", "SOURCE_EXPIRED", "REVISION_UNAVAILABLE"].includes(code)
+    [
+      "LEGACY_REVIEW",
+      "REPORT_WITHDRAWN",
+      "SOURCE_EXPIRED",
+      "REVISION_UNAVAILABLE",
+    ].includes(code)
   )
     return Response.json(
       {
         error:
-          code === "LEGACY_REVIEW"
-            ? "Original download unavailable pending review. The saved preview is available."
-            : code === "REVISION_UNAVAILABLE"
-              ? "This historical revision is no longer available."
-              : "This source has expired or disconnected.",
+          code === "REPORT_WITHDRAWN"
+            ? "This original report has been withdrawn."
+            : code === "LEGACY_REVIEW"
+              ? "Original download unavailable pending review. The saved preview is available."
+              : code === "REVISION_UNAVAILABLE"
+                ? "This historical revision is no longer available."
+                : "This source has expired or disconnected.",
       },
       { status: 410, headers: privateHeaders },
     );
@@ -65,16 +81,24 @@ export function editorialFailure(error: unknown) {
           : signInDestination(error)
             ? 401
             : error instanceof z.ZodError ||
-                /^(INVALID_|SOURCE_|REVISION_)/.test(code)
+                /^(INVALID_|SOURCE_|REVISION_|CONTEXT_REVISION_CONFLICT|REVIEWED_CONTEXT_REQUIRED)/.test(
+                  code,
+                )
               ? 409
               : 503;
   return Response.json(
     {
       error:
         status === 409
-          ? code === "INVALID_COMPARISON"
-            ? "Choose two distinct completed audits included in this report. Before must be no newer than after. Your selections are preserved."
-            : "Check the selected sources and fields, or reload the latest revision."
+          ? code === "REVIEWED_CONTEXT_REQUIRED"
+            ? "Review and save site business context before requesting a writing template."
+            : code === "SOURCE_CHANGED"
+              ? "Selected evidence changed after this template or report was prepared. Your edits remain available. Prepare it again from the current saved evidence before saving."
+              : code === "CONTEXT_REVISION_CONFLICT"
+                ? "Site context changed after this template was prepared. Your edits remain available. Request a new template using the latest reviewed context before saving."
+                : code === "INVALID_COMPARISON"
+                  ? "Choose two distinct completed audits included in this report. Before must be no newer than after. Your selections are preserved."
+                  : "Check the selected sources and fields, or reload the latest revision."
           : status === 404
             ? "Resource unavailable."
             : status === 401

@@ -106,14 +106,107 @@ test("editor saves and reviews a panel without inventing observations", async ({
   ).toBeVisible();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth + 1,
-    ),
-  ).toBe(true);
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
   await page.screenshot({
     path: `../../output/playwright/visibility-${testInfo.project.name}.png`,
     fullPage: true,
   });
+});
+test("reviews scope and allowance without issuing a quote or dispatching", async ({
+  page,
+}, testInfo) => {
+  const actions: string[] = [];
+  const reviewed = { ...panel, reviewedAt: "2026-11-02T00:00:00Z" };
+  await page.route("**/api/visibility**", (route) => {
+    if (route.request().method() === "GET")
+      return route.fulfill({
+        json: { panels: [reviewed], runs: [], availability },
+      });
+    const input = route.request().postDataJSON();
+    actions.push(input.action);
+    if (input.action !== "preview-run") return route.fulfill({ status: 500 });
+    if (input.profile === "azure-sol-api")
+      return route.fulfill({
+        status: 503,
+        json: { error: "Preview unavailable. Try again." },
+      });
+    return route.fulfill({
+      json: {
+        available: false,
+        panel: { id: "panel", version: 1, promptCount: 1 },
+        requested: { profile: input.profile, language: "en", market: "IN" },
+        verification: "current",
+        incompatiblePromptIds: ["x".repeat(80)],
+        quote: null,
+        maximumCost: null,
+        cacheStatus: "not-checked",
+        allowance: {
+          asOf: "2026-11-03T12:00:00.000Z",
+          period: "2026-11",
+          combined: {
+            bucket: "COMBINED",
+            limit: "10",
+            spent: "1",
+            reserved: "2",
+            remaining: "7",
+          },
+          provider: {
+            bucket: "DATAFORSEO",
+            limit: "1",
+            spent: "0.2",
+            reserved: "0.1",
+            remaining: "0.7",
+          },
+          observations: {
+            bucket: "CHATGPT_OBSERVATION",
+            limit: "100",
+            spent: "10",
+            reserved: "3",
+            remaining: "87",
+          },
+        },
+        reasons: ["Provider account is not qualified."],
+      },
+    });
+  });
+  await mount(page, true);
+  await page
+    .getByLabel("Surface for panel version 1")
+    .selectOption("consumer-chatgpt");
+  await page
+    .getByRole("button", { name: "Preview scope and allowance" })
+    .click();
+  const preview = page.getByRole("region", { name: "Observation run preview" });
+  await expect(preview).toContainText("Consumer ChatGPT");
+  await expect(preview).toContainText("1 question");
+  await expect(preview).toContainText("0.7 USD");
+  await expect(preview).toContainText("87 observations");
+  await expect(preview).toContainText(
+    "No quote or collection has been started",
+  );
+  await expect(preview).toContainText("Maximum cost is unavailable");
+  expect(actions).toEqual(["preview-run"]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
+  await page.screenshot({
+    path: `../../output/playwright/visibility-preview-${testInfo.project.name}.png`,
+    fullPage: true,
+  });
+  await page
+    .getByLabel("Surface for panel version 1")
+    .selectOption("azure-sol-api");
+  await expect(preview).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Preview scope and allowance" })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "Preview unavailable. Try again.",
+  );
+  await expect(preview).toHaveCount(0);
+  expect(actions).toEqual(["preview-run", "preview-run"]);
 });
 test("viewer traces synthetic evidence and failed slots without collection controls", async ({
   page,
@@ -130,7 +223,6 @@ test("viewer traces synthetic evidence and failed slots without collection contr
       model: "fixture-model",
     },
     rawExpired: false,
-    rawAnswers: [{ body: "Lyra is mentioned", annotations: [] }],
     slots: [
       {
         promptId: "p1",
@@ -152,10 +244,33 @@ test("viewer traces synthetic evidence and failed slots without collection contr
       },
     ],
   };
-  await page.route("**/api/visibility**", (route) =>
-    route.fulfill({ json: { panels: [panel], runs: [run], availability } }),
-  );
+  let detailReads = 0;
+  let rawState: "retained" | "raw-expired" | "classification-blocked" =
+    "retained";
+  await page.route("**/api/visibility**", (route) => {
+    const runId = new URL(route.request().url()).searchParams.get("runId");
+    if (runId) detailReads++;
+    return route.fulfill({
+      json: {
+        panels: [panel],
+        runs: [
+          runId
+            ? {
+                ...run,
+                rawState,
+                rawAnswers:
+                  rawState === "retained"
+                    ? [{ body: "Lyra is mentioned", annotations: [] }]
+                    : null,
+              }
+            : run,
+        ],
+        availability,
+      },
+    });
+  });
   await mount(page, false);
+  expect(detailReads).toBe(0);
   await expect(
     page.getByRole("button", { name: "Save panel version", exact: true }),
   ).toHaveCount(0);
@@ -181,11 +296,37 @@ test("viewer traces synthetic evidence and failed slots without collection contr
     }),
   ).toBeVisible();
   await page
-    .getByText("Original answer evidence and provenance", { exact: true })
+    .getByText("Parsed answer evidence and provenance", { exact: true })
     .click();
   await expect(
     page.locator("pre").filter({ hasText: "Lyra is mentioned" }),
   ).toBeVisible();
+  expect(detailReads).toBe(1);
+  await expect(
+    page.getByText(
+      "Legacy answers are stored as parsed JSON, not original provider responses.",
+    ),
+  ).toBeVisible();
+  for (const [state, message] of [
+    [
+      "raw-expired",
+      "Raw answer retention has expired; clearing has not been confirmed.",
+    ],
+    [
+      "classification-blocked",
+      "The raw answer is unavailable pending classification.",
+    ],
+  ] as const) {
+    rawState = state;
+    await page
+      .getByRole("button", { name: /Azure API.*Synthetic fixture/ })
+      .click();
+    await expect(page.getByText(message, { exact: true })).toBeVisible();
+    await expect(
+      page.locator("pre").filter({ hasText: "Lyra is mentioned" }),
+    ).toHaveCount(0);
+  }
+  expect(detailReads).toBe(3);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 test("private parsed fixtures show explicit per-answer availability without implicit raw reads", async ({

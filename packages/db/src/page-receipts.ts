@@ -1,3 +1,4 @@
+import { lockLegacyInlineRead } from "./legacy-inline";
 import type { Tx } from "./context";
 import { compactReceipt } from "./saved-evidence";
 import { readable } from "./retention";
@@ -10,6 +11,7 @@ export async function pageReceipts(
   now: Date,
   privateReaderEpoch: number | null = null,
 ) {
+  await lockLegacyInlineRead(tx, scope);
   const rows = await tx.$queryRaw<
     Array<{
       id: string;
