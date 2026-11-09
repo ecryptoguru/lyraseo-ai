@@ -155,6 +155,12 @@ try {
     done("emitted fresh known39 catalog metadata; no fixture data exported");
   } else {
     const registered = JSON.parse(await readFile(profilePath, "utf8"));
+    for (const key of Object.keys(profile)) {
+      if (JSON.stringify(profile[key]) !== JSON.stringify(registered[key]))
+        throw new Error(
+          `known 39-catalog fingerprint differs in ${key}: live ${profile[key].length} vs registered ${registered[key]?.length}`,
+        );
+    }
     assert.deepEqual(profile, registered);
     const admin = createDatabase(lab.url(source)),
       db = createDatabase(lab.url(source, "lyraseo_runtime"));

@@ -52471,14 +52471,12 @@
       "name": "pgcrypto",
       "schema": "lyraseo_artifact_crypto",
       "owner": "postgres",
-      "version": "1.3",
       "relocatable": true
     },
     {
       "name": "plpgsql",
       "schema": "pg_catalog",
       "owner": "postgres",
-      "version": "1.0",
       "relocatable": false
     }
   ],

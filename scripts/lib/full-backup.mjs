@@ -216,7 +216,7 @@ export async function catalog(client) {
   const extensions = (
     await query(
       client,
-      `SELECT e.extname name,n.nspname schema,pg_get_userbyid(e.extowner) owner,e.extversion version,e.extrelocatable relocatable
+      `SELECT e.extname name,n.nspname schema,pg_get_userbyid(e.extowner) owner,e.extrelocatable relocatable
     FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace ORDER BY e.extname`,
     )
   ).rows;
