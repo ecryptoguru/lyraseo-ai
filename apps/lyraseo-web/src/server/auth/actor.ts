@@ -49,6 +49,11 @@ export async function resolveVerifiedIdentity(
     staff: false,
   };
   const checked = checkSessionPolicy(evidence, url);
+  // Factorless identities have no qualified durable enrollment history yet.
+  // Keep optional first-factor access unavailable rather than mistaking removed
+  // factors for an account that never enrolled. This is an availability gate,
+  // not a new mandatory-customer-MFA policy or a recovery authorization.
+  if (!user.totpEnrolled) throw new Error("AUTH_POLICY_UNVERIFIED");
   const account = await source.account(user.id);
   const actor: Actor = {
     userId: account.id,

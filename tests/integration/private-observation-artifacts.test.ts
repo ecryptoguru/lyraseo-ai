@@ -429,16 +429,13 @@ it("requires separate source and physical publication confirmations under the ac
     "lyraseo_dispatch",
     "lyraseo_identity",
   ]) {
-    const password =
-      role === "lyraseo_runtime"
-        ? "local_runtime_only"
-        : role === "lyraseo_dispatch"
-          ? "local_dispatch_only"
-          : "local_identity_only";
-    const login = createDatabase(
-      adminUrl.replace("postgres:lyraseo_local_only", `${role}:${password}`),
-    );
+    const { testDatabaseRoleUrl } =
+      await import("../helpers/test-database-target");
+    const login = createDatabase(testDatabaseRoleUrl(role));
     try {
+      expect(await login.$queryRaw`SELECT current_user AS role`).toEqual([
+        { role },
+      ]);
       await expect(
         login.$queryRaw`SELECT secret FROM lyraseo_audit.artifact_verifier`,
       ).rejects.toThrow();

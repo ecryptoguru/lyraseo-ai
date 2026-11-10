@@ -32,7 +32,11 @@ vi.mock("@/server/auth/server", () => ({
   }),
 }));
 vi.mock("../../packages/db/src/identity", () => ({ throttle: mocks.throttle }));
-import { enrollBackupAuthenticator } from "../../apps/lyraseo-web/src/app/app/security/actions";
+import {
+  enrollAuthenticator,
+  enrollBackupAuthenticator,
+  confirmAuthenticator,
+} from "../../apps/lyraseo-web/src/app/app/security/actions";
 
 const actor = () => ({
   userId: "member",
@@ -97,4 +101,109 @@ it("rechecks current session and security version after provider factor lookup",
     .mockResolvedValueOnce({ ...actor(), securityVersion: 2 });
   expect((await enrollBackupAuthenticator()).factorId).toBeUndefined();
   expect(mocks.enroll).not.toHaveBeenCalled();
+});
+
+it("withholds initial enrollment when current factor absence cannot prove first enrollment", async () => {
+  mocks.actor.mockResolvedValue({ ...actor(), mfaVerified: false });
+  mocks.factors.mockResolvedValue({ data: { all: [] }, error: null });
+  const result = await enrollAuthenticator();
+  expect(result.factorId).toBeUndefined();
+  expect(result.qrCode).toBeUndefined();
+  expect(result.manualKey).toBeUndefined();
+  expect(mocks.enroll).not.toHaveBeenCalled();
+});
+
+function confirmation() {
+  const form = new FormData();
+  form.set("factorId", "pending");
+  form.set("code", "123456");
+  return form;
+}
+
+it("does not verify an unbound factor from an AAL1 session even with browser-supplied enrollment state", async () => {
+  mocks.actor.mockResolvedValue({ ...actor(), mfaVerified: false });
+  mocks.factors.mockResolvedValue({
+    data: {
+      all: [{ id: "pending", factor_type: "totp", status: "unverified" }],
+    },
+    error: null,
+  });
+  mocks.challengeAndVerify.mockResolvedValue({ error: null });
+  const result = await confirmAuthenticator(
+    { message: "", factorId: "pending", manualKey: "forged" },
+    confirmation(),
+  );
+  expect(result.factorId).toBeUndefined();
+  expect(mocks.challengeAndVerify).not.toHaveBeenCalled();
+});
+
+it("rejects backup confirmation after session revocation during factor lookup", async () => {
+  mocks.actor
+    .mockResolvedValueOnce(actor())
+    .mockResolvedValue({ ...actor(), securityVersion: 2 });
+  mocks.factors.mockResolvedValue({
+    data: {
+      all: [
+        { id: "primary", factor_type: "totp", status: "verified" },
+        { id: "pending", factor_type: "totp", status: "unverified" },
+      ],
+    },
+    error: null,
+  });
+  mocks.challengeAndVerify.mockResolvedValue({ error: null });
+  const result = await confirmAuthenticator({ message: "" }, confirmation());
+  expect(result.factorId).toBeUndefined();
+  expect(mocks.challengeAndVerify).not.toHaveBeenCalled();
+});
+
+it("confirms a provider-owned backup under the same fresh AAL2 session", async () => {
+  mocks.factors.mockResolvedValue({
+    data: {
+      all: [
+        { id: "primary", factor_type: "totp", status: "verified" },
+        { id: "pending", factor_type: "totp", status: "unverified" },
+      ],
+    },
+    error: null,
+  });
+  mocks.challengeAndVerify.mockResolvedValue({ error: null });
+  await expect(
+    confirmAuthenticator({ message: "" }, confirmation()),
+  ).rejects.toThrow("REDIRECT:/app/workspaces");
+  expect(mocks.challengeAndVerify).toHaveBeenCalledExactlyOnceWith({
+    factorId: "pending",
+    code: "123456",
+  });
+});
+
+it("does not confirm a backup without a currently verified primary factor", async () => {
+  mocks.factors.mockResolvedValue({
+    data: {
+      all: [{ id: "pending", factor_type: "totp", status: "unverified" }],
+    },
+    error: null,
+  });
+  const result = await confirmAuthenticator({ message: "" }, confirmation());
+  expect(result.factorId).toBeUndefined();
+  expect(mocks.challengeAndVerify).not.toHaveBeenCalled();
+});
+
+it("does not redirect after verification if the provider returns a replacement session", async () => {
+  mocks.actor
+    .mockResolvedValueOnce(actor())
+    .mockResolvedValueOnce(actor())
+    .mockResolvedValueOnce({ ...actor(), sessionId: "replacement" });
+  mocks.factors.mockResolvedValue({
+    data: {
+      all: [
+        { id: "primary", factor_type: "totp", status: "verified" },
+        { id: "pending", factor_type: "totp", status: "unverified" },
+      ],
+    },
+    error: null,
+  });
+  mocks.challengeAndVerify.mockResolvedValue({ error: null });
+  const result = await confirmAuthenticator({ message: "" }, confirmation());
+  expect(result.factorId).toBeUndefined();
+  expect(mocks.challengeAndVerify).toHaveBeenCalledOnce();
 });

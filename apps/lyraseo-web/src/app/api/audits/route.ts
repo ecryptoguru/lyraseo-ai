@@ -200,6 +200,8 @@ export async function POST(request: Request) {
             actor,
             auditScope.parse(input),
             publicHttpsTransport,
+            resolveActor,
+            request.signal,
           ),
           { headers },
         );

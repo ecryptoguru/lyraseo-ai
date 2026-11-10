@@ -167,8 +167,6 @@ export const fullBackupOmittedTables = new Set([
   "lyraseo_billing.closed_job_request",
   "lyraseo_billing.request_resolution",
   "lyraseo_billing.policy_intent",
-  "lyraseo_billing.inbox",
-  "lyraseo_billing.discovery",
   "lyraseo_billing.staff_rate",
   // Fixture-only binding and dispatch replay keys.
   "lyraseo_handoff.fixture_environment",
@@ -200,6 +198,81 @@ const atTime = (value: unknown) =>
   typeof value === "string"
     ? Date.parse(/[Z+-][0-9:]*$/.test(value) ? value : value + "Z")
     : NaN;
+const handoffOrigin = (value: unknown) => {
+  try {
+    const url = new URL(text(value));
+    if (url.protocol === "https:" && !url.username && !url.password)
+      return url.origin;
+  } catch {}
+  throw Error("BACKUP_HANDOFF_URL_CLASSIFICATION_BLOCKED");
+};
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const onlyKeys = (
+  value: unknown,
+  keys: string[],
+): value is Record<string, unknown> =>
+  record(value) && Object.keys(value).every((key) => keys.includes(key));
+const opaqueId = (value: unknown) =>
+  typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const backupAmount = (value: unknown) =>
+  typeof value === "string" && /^(0|[1-9][0-9]*)\.[0-9]{9}$/.test(value);
+// The current issuer stores a financial-only preview, never authored input.
+// Unknown JSON shapes cannot be silently blessed as that financial history.
+const classifiedBatchPreview = (value: unknown) => {
+  if (
+    !onlyKeys(value, [
+      "batchQuoteId",
+      "expiresAt",
+      "inputHash",
+      "items",
+      "totalsByProvider",
+      "combinedMaximum",
+      "currency",
+      "budgetOwnerId",
+      "unavailable",
+    ])
+  )
+    return false;
+  return (
+    opaqueId(value.batchQuoteId) &&
+    Number.isFinite(atTime(value.expiresAt)) &&
+    /^[a-f0-9]{64}$/.test(text(value.inputHash)) &&
+    value.currency === "USD" &&
+    opaqueId(value.budgetOwnerId) &&
+    typeof value.unavailable === "boolean" &&
+    (value.combinedMaximum === null || backupAmount(value.combinedMaximum)) &&
+    record(value.totalsByProvider) &&
+    Object.entries(value.totalsByProvider).every(
+      ([key, amount]) => opaqueId(key) && backupAmount(amount),
+    ) &&
+    Array.isArray(value.items) &&
+    value.items.length <= 10 &&
+    value.items.every(
+      (item: unknown) =>
+        onlyKeys(item, [
+          "siteId",
+          "ordinal",
+          "quoteId",
+          "maximumCost",
+          "provider",
+          "tariffVersion",
+          "status",
+          "errorCode",
+        ]) &&
+        opaqueId(item.siteId) &&
+        Number.isInteger(item.ordinal) &&
+        Number(item.ordinal) >= 0 &&
+        Number(item.ordinal) <= 9 &&
+        (item.quoteId === null || opaqueId(item.quoteId)) &&
+        (item.maximumCost === null || backupAmount(item.maximumCost)) &&
+        ["provider", "tariffVersion", "errorCode"].every(
+          (key) => item[key] === null || opaqueId(item[key]),
+        ) &&
+        ["QUOTED", "UNAVAILABLE"].includes(text(item.status)),
+    )
+  );
+};
 export function projectBackupTables(
   input: BackupTables,
   options: { at: string; phase: "BACKUP" | "RESTORE"; events?: Replay[] },
@@ -213,6 +286,10 @@ export function projectBackupTables(
   const tables = JSON.parse(JSON.stringify(input)) as BackupTables;
   const source = (name: string) =>
     original[name]?.map((packet) => packet.data) ?? [];
+  // Exact-site erasure is qualified below; workspace-wide authored data is not.
+  // A renamed workspace is not an erasure graph and must never be published.
+  if (source("public.Workspace").some((row) => row.deletedAt != null))
+    throw Error("BACKUP_WORKSPACE_DELETION_UNSUPPORTED");
   const environments = source("lyraseo_history.environment"),
     sites = source("public.Site"),
     drafts = source("public.ContentDraft"),
@@ -287,6 +364,68 @@ export function projectBackupTables(
       )
       .map((row) => row.id),
   );
+  const removedAssignments = new Set(
+    source("public.IssueAssignment")
+      .filter(
+        (row) =>
+          expiredOrDeletedAudit.has(row.auditId) ||
+          erased(row.workspaceId, row.siteId),
+      )
+      .map((row) => row.id),
+  );
+  const deletionCases = new Map(
+    source("lyraseo_deletion.scope_case").map((row) => [row.id, row]),
+  );
+  const deletionTasks = new Map<unknown, Record<string, unknown>[]>();
+  for (const task of source("lyraseo_deletion.task")) {
+    const group = deletionTasks.get(task.case_id) ?? [];
+    group.push(task);
+    deletionTasks.set(task.case_id, group);
+  }
+  const expiredDeletionCases = new Set(
+    [...deletionCases.values()]
+      .filter((row) => {
+        if (
+          ["accepted_at", "deadline", "record_expires_at"].some(
+            (key) => !Number.isFinite(atTime(row[key])),
+          )
+        )
+          throw Error("BACKUP_DELETION_RECEIPT_CLOCK_INVALID");
+        if (atTime(row.record_expires_at) > at) return false;
+        const tasks = deletionTasks.get(row.id) ?? [];
+        const required = [
+          "IMPORTS",
+          "CREDENTIALS",
+          "AUTHORED_PAYLOAD",
+          "AUDIT_PAYLOAD",
+          "ARTIFACTS",
+          "VISIBILITY_PAYLOAD",
+          "KEYWORD_DATA",
+          "HANDOFF_DATA",
+          "TEAM_DATA",
+          "PROCESSORS",
+          "BACKUPS",
+          "FINANCIAL_IDENTITY",
+        ];
+        // Receipt TTL never means unfinished processor/backup erasure completed.
+        if (
+          tasks.length !== required.length ||
+          required.some(
+            (kind) =>
+              !tasks.some(
+                (task) => task.kind === kind && task.state === "COMPLETE",
+              ),
+          )
+        )
+          throw Error("BACKUP_DELETION_WORK_UNRESOLVED");
+        return true;
+      })
+      .map((row) => row.id),
+  );
+  for (const name of ["lyraseo_deletion.task", "lyraseo_deletion.event"])
+    for (const row of source(name))
+      if (!deletionCases.has(row.case_id))
+        throw Error("BACKUP_DELETION_RECEIPT_PARENT_MISSING");
   const removedDrafts = new Set(
     drafts
       .filter((row) => erased(row.workspaceId, row.siteId))
@@ -302,20 +441,65 @@ export function projectBackupTables(
       .filter((row) => erased(row.workspace_id, row.site_id))
       .map((row) => row.id),
   );
-  // Handoff intents and agency quotes are removed with their scope; their
-  // children (receipt, dispatch, batch items) carry only the parent id, so
-  // they must be resolved against the same removal set or FK validation
-  // rejects the replay.
+  // Parent-only links must use the same removal set as their FK parents.
   const removedHandoffIntents = new Set(
     source("lyraseo_handoff.intent")
       .filter((row) => erased(row.workspace_id, row.site_id))
       .map((row) => row.id),
   );
+  const operationQuotes = new Map(
+    source("public.OperationQuote").map((row) => [row.id, row]),
+  );
+  const operations = new Map(
+    source("public.Operation").map((row) => [row.id, row]),
+  );
+  const batchQuotes = new Map(
+    source("public.AgencyBatchQuote").map((row) => [row.id, row]),
+  );
+  const committedBatchItemKeys = new Set<string>();
+  const committedBatchQuotes = new Set<unknown>();
+  for (const item of source("public.AgencyBatchItem")) {
+    const quote = operationQuotes.get(item.quoteId);
+    const batch = batchQuotes.get(item.batchQuoteId);
+    if (
+      !batch ||
+      batch.workspaceId !== item.workspaceId ||
+      batch.userId !== item.userId ||
+      (item.quoteId != null &&
+        (!quote ||
+          ["workspaceId", "siteId", "userId"].some(
+            (key) => quote[key] !== item[key],
+          )))
+    )
+      throw Error("BACKUP_BATCH_COMMITMENT_LINK_INVALID");
+    const operationId = item.operationId ?? quote?.consumedOperationId;
+    if (operationId == null) {
+      if (item.status === "ADMITTED")
+        throw Error("BACKUP_BATCH_COMMITMENT_LINK_INVALID");
+      continue;
+    }
+    const operation = operations.get(operationId);
+    if (
+      !operation ||
+      ["workspaceId", "siteId", "userId"].some(
+        (key) => operation[key] !== item[key],
+      ) ||
+      (item.operationId != null &&
+        quote?.consumedOperationId != null &&
+        item.operationId !== quote.consumedOperationId)
+    )
+      throw Error("BACKUP_BATCH_COMMITMENT_LINK_INVALID");
+    committedBatchItemKeys.add(fingerprint([item.batchQuoteId, item.ordinal]));
+    committedBatchQuotes.add(item.batchQuoteId);
+  }
   const expiredAgencyQuotes = new Set(
     source("public.AgencyBatchQuote")
       .filter(
         (row) =>
-          Number.isFinite(atTime(row.expiresAt)) && atTime(row.expiresAt) <= at,
+          row.confirmedAt == null &&
+          !committedBatchQuotes.has(row.id) &&
+          Number.isFinite(atTime(row.expiresAt)) &&
+          atTime(row.expiresAt) <= at,
       )
       .map((row) => row.id),
   );
@@ -382,9 +566,6 @@ export function projectBackupTables(
             options.at;
           row.verifiedAt = null;
         }
-      } else if (table === "public.Workspace") {
-        if (row.deletedAt !== null && row.deletedAt !== undefined)
-          row.name = "Deleted workspace";
       } else if (table === "public.ProductUser") {
         row.suspended = true;
         if (options.phase === "RESTORE")
@@ -446,11 +627,14 @@ export function projectBackupTables(
       } else if (
         table === "public.AuditPageRetention" ||
         table === "public.IssueAction" ||
-        table === "public.IssueAssignment" ||
-        table === "public.IssueAssignmentEvent"
+        table === "public.IssueAssignment"
       )
         omit =
           expiredOrDeletedAudit.has(row.auditId) ||
+          erased(row.workspaceId, row.siteId);
+      else if (table === "public.IssueAssignmentEvent")
+        omit =
+          removedAssignments.has(row.assignmentId) ||
           erased(row.workspaceId, row.siteId);
       else if (table === "public.ContentDraft") {
         omit = removedDrafts.has(row.id);
@@ -574,14 +758,25 @@ export function projectBackupTables(
         if (table === "public.AnalyticsImport") row.diagnostics = {};
       } else if (table === "public.AgencyBatchQuote") {
         omit = expiredAgencyQuotes.has(row.id);
-        // Executable preview input and one-use confirmation bearer.
+        if (
+          (row.confirmedAt == null) !== (row.confirmationKey == null) ||
+          (row.confirmedAt != null && !Number.isFinite(atTime(row.confirmedAt)))
+        )
+          throw Error("BACKUP_BATCH_CONFIRMATION_INVALID");
+        if (!omit && !classifiedBatchPreview(row.preview))
+          throw Error("BACKUP_BATCH_PREVIEW_CLASSIFICATION_BLOCKED");
+        // Confirmation key/date are an immutable idempotency receipt pair
+        // (CHECK enforces their shared nullability), not the confirmation proof.
+        // Revoke that proof separately; never reset a historical confirmation.
         jsonNull("requestInput");
-        row.confirmationKey = null;
-        row.confirmedAt = null;
+        row.confirmationHash = "RESTORE_DISABLED";
       } else if (table === "public.AgencyBatchItem") {
         omit =
           expiredAgencyQuotes.has(row.batchQuoteId) ||
-          erased(row.workspaceId, row.siteId);
+          (erased(row.workspaceId, row.siteId) &&
+            !committedBatchItemKeys.has(
+              fingerprint([row.batchQuoteId, row.ordinal]),
+            ));
       } else if (table === "lyraseo_history.environment") row.enabled = false;
       else if (table === "lyraseo_history.plan") {
         omit = erased(row.workspace_id, row.site_id);
@@ -604,6 +799,7 @@ export function projectBackupTables(
       // for REVOKED), in-flight intents are cancelled, dispatches suppressed.
       else if (table === "lyraseo_handoff.destination") {
         omit = erased(row.workspace_id, row.site_id);
+        if (!omit) row.url = handoffOrigin(row.url);
         row.status = "REVOKED";
         row.secret_cipher = null;
         row.previous_cipher = null;
@@ -612,6 +808,12 @@ export function projectBackupTables(
         row.key_id = null;
       } else if (table === "lyraseo_handoff.intent") {
         omit = erased(row.workspace_id, row.site_id);
+        if (!omit) {
+          row.destination_url = handoffOrigin(row.destination_url);
+          if (row.editor_url != null)
+            row.editor_url = handoffOrigin(row.editor_url);
+        }
+        row.mode = "QUARANTINED";
         if (
           row.state === "PREPARED" ||
           row.state === "SENDING" ||
@@ -622,6 +824,8 @@ export function projectBackupTables(
         row.next_due_at = options.at;
       } else if (table === "lyraseo_handoff.receipt") {
         omit = removedHandoffIntents.has(row.intent_id);
+        if (!omit && row.editor_url != null)
+          row.editor_url = handoffOrigin(row.editor_url);
       } else if (table === "lyraseo_handoff.dispatch") {
         omit = removedHandoffIntents.has(row.intent_id);
         row.state = "SUPPRESSED";
@@ -649,7 +853,40 @@ export function projectBackupTables(
       // Sandbox billing: financial facts are retained; entitlements,
       // merchants and staff authority are disabled.
       else if (table === "lyraseo_billing.merchant") row.enabled = false;
-      else if (table === "lyraseo_billing.subscription") {
+      else if (table === "lyraseo_billing.event") {
+        const refs = row.references_json;
+        if (
+          !onlyKeys(refs, [
+            "subscriptionId",
+            "paymentId",
+            "orderId",
+            "refundId",
+            "disputeId",
+            "customerId",
+            "accountVerified",
+          ]) ||
+          !Object.entries(refs).every(([key, value]) =>
+            key === "accountVerified"
+              ? typeof value === "boolean"
+              : opaqueId(value),
+          )
+        )
+          throw Error("BACKUP_BILLING_REFERENCE_CLASSIFICATION_BLOCKED");
+      }
+      // record_event EXACT_REPLAY does not recreate either queue. Keep their
+      // identity/state and fences, but make claim/resolve_pending not due.
+      // timestamptz is NOT NULL here; SQL infinity is the non-executable clock.
+      else if (
+        table === "lyraseo_billing.inbox" ||
+        table === "lyraseo_billing.discovery"
+      ) {
+        row.next_at = "infinity";
+        row.last_error = "RESTORE_REQUIRES_EXPLICIT_RECONCILIATION";
+        if (table === "lyraseo_billing.inbox") {
+          row.token = null;
+          row.lease_until = null;
+        }
+      } else if (table === "lyraseo_billing.subscription") {
         row.sandbox_entitled = false;
         row.production_entitled = false;
       } else if (table === "lyraseo_billing.staff_capability") {
@@ -680,6 +917,51 @@ export function projectBackupTables(
           erased(row.workspace_id, row.site_id) ||
           (Number.isFinite(atTime(row.receipt_expires_at)) &&
             atTime(row.receipt_expires_at) <= at);
+      } else if (table === "lyraseo_deletion.scope_case") {
+        omit = expiredDeletionCases.has(row.id);
+      } else if (
+        table === "lyraseo_deletion.task" ||
+        table === "lyraseo_deletion.event"
+      ) {
+        omit = expiredDeletionCases.has(row.case_id);
+        if (
+          !omit &&
+          !(table === "lyraseo_deletion.task" && row.result === null) &&
+          (!onlyKeys(row.result, ["reason"]) ||
+            (row.result.reason !== undefined &&
+              ![
+                "UNQUALIFIED_ERASURE_ADAPTER",
+                "BOUNDED_ERASURE_NOT_QUALIFIED",
+              ].includes(text(row.result.reason))))
+        )
+          throw Error("BACKUP_DELETION_RESULT_CLASSIFICATION_BLOCKED");
+      } else if (table === "public.WorkspaceAccessEvent") {
+        const createdAt = atTime(row.createdAt);
+        if (!Number.isFinite(createdAt))
+          throw Error("BACKUP_SECURITY_RECEIPT_CLOCK_INVALID");
+        omit = createdAt + 180 * 86400000 <= at;
+        const fields = new Set([
+          "id",
+          "workspaceId",
+          "actorId",
+          "action",
+          "targetUserId",
+          "siteId",
+          "accessRevision",
+          "createdAt",
+          "previousRole",
+          "nextRole",
+        ]);
+        for (const key of Object.keys(row))
+          if (!fields.has(key)) delete row[key];
+        for (const key of ["previousRole", "nextRole"]) {
+          if (row[key] == null) row[key] = null;
+          else if (
+            !["OWNER", "ADMIN", "EDITOR", "VIEWER"].includes(text(row[key]))
+          )
+            throw Error("BACKUP_SECURITY_RECEIPT_ROLE_INVALID");
+        }
+        packet.jsonNulls = packet.jsonNulls.filter((key) => fields.has(key));
       } else if ("workspaceId" in row && "siteId" in row)
         omit = erased(row.workspaceId, row.siteId);
       else if ("workspace_id" in row && "site_id" in row)

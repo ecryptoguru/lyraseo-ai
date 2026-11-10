@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { preparePrivacyMigrationPlan } from "./privacy-bootstrap.mjs";
+import { backupTestTarget } from "./backup-test-target.mjs";
 import {
   projectBackupTables,
   FULL_BACKUP_ADAPTER,
@@ -36,12 +37,13 @@ import {
 } from "../../packages/db/src/backup-projection.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
-  container = "lyraseo-phase1-postgres";
+  testTarget = backupTestTarget(process.env),
+  container = testTarget.container;
 const require = createRequire(join(root, "packages/db/package.json")),
   { Client } = require("pg");
 const maximum = 256 * 1024 * 1024;
 const roles = {
-  postgres: "lyraseo_local_only",
+  postgres: testTarget.password,
   lyraseo_runtime: "local_runtime_only",
   lyraseo_identity: "local_identity_only",
   lyraseo_artifact_maintenance: "local_expiry_only",
@@ -216,7 +218,7 @@ export async function catalog(client) {
   const extensions = (
     await query(
       client,
-      `SELECT e.extname name,n.nspname schema,pg_get_userbyid(e.extowner) owner,e.extrelocatable relocatable
+      `SELECT e.extname name,n.nspname schema,pg_get_userbyid(e.extowner) owner,e.extversion version,e.extrelocatable relocatable
     FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace ORDER BY e.extname`,
     )
   ).rows;
@@ -325,7 +327,8 @@ export async function createLocalBackupLab({
     inspect.Config.Image !== "postgres:17-alpine" ||
     ports?.length !== 1 ||
     ports[0].HostIp !== "127.0.0.1" ||
-    ports[0].HostPort !== "54329"
+    ports[0].HostPort !== String(testTarget.port) ||
+    !inspect.State.Running
   )
     throw issue("UNSAFE_BACKUP_CONTAINER");
   const directory = await realpath(
@@ -354,7 +357,7 @@ export async function createLocalBackupLab({
     if (!Object.hasOwn(roles, role)) throw issue("INVALID_BACKUP_ROLE");
     const client = new Client({
       host: "127.0.0.1",
-      port: 54329,
+      port: testTarget.port,
       database: entry.name,
       user: role,
       password: roles[role],
@@ -501,7 +504,7 @@ export async function createLocalBackupLab({
     url(handle, role = "postgres") {
       const entry = owned(handle);
       if (!Object.hasOwn(roles, role)) throw issue("INVALID_BACKUP_ROLE");
-      return `postgresql://${role}:${roles[role]}@127.0.0.1:54329/${entry.name}`;
+      return `postgresql://${role}:${encodeURIComponent(roles[role])}@127.0.0.1:${testTarget.port}/${entry.name}`;
     },
     async privateDirectory(label) {
       if (!/^[a-z-]+$/.test(label)) throw issue("INVALID_BACKUP_DIRECTORY");
@@ -724,6 +727,37 @@ function supported(actual, profile) {
       differences: differences(actual, profile),
     });
 }
+// Loading with replica triggers bypasses FK enforcement. Revalidate every FK
+// transactionally before signing a point, not only after attempting a restore.
+export async function validateBackupForeignKeys(client) {
+  await query(client, "BEGIN");
+  try {
+    const foreign = (
+      await query(
+        client,
+        `SELECT n.nspname schema,c.relname table_,k.conname name,k.convalidated validated,pg_get_constraintdef(k.oid) definition FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE k.contype='f' AND n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY n.nspname,c.relname,k.conname`,
+      )
+    ).rows;
+    for (const fk of foreign) {
+      if (!fk.validated) throw issue("FULL_BACKUP_FOREIGN_KEY_UNQUALIFIED");
+      const table = relation(fk.schema + "." + fk.table_);
+      await query(client, `ALTER TABLE ${table} DROP CONSTRAINT ${q(fk.name)}`);
+      await query(
+        client,
+        `ALTER TABLE ${table} ADD CONSTRAINT ${q(fk.name)} ${fk.definition} NOT VALID`,
+      );
+      await query(
+        client,
+        `ALTER TABLE ${table} VALIDATE CONSTRAINT ${q(fk.name)}`,
+      );
+    }
+    await query(client, "COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
 export async function createFullBackup(
   lab,
   source,
@@ -809,6 +843,7 @@ export async function createFullBackup(
         )
           throw issue("FULL_BACKUP_GENERATED_CLOCK_CHANGED");
       }
+      await validateBackupForeignKeys(target);
     } finally {
       await lab.close(target);
     }
@@ -1042,27 +1077,7 @@ export async function restoreFullBackup(
         );
       await query(client, "COMMIT");
       await lab.checkpoint(restored, "RESTORE_REPLAYED");
-      // Validate every FK again after scoped replay and generated-column loading.
-      const foreign = (
-        await query(
-          client,
-          `SELECT n.nspname schema,c.relname table_,k.conname name,pg_get_constraintdef(k.oid) definition FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE k.contype='f' ORDER BY n.nspname,c.relname,k.conname`,
-        )
-      ).rows;
-      for (const fk of foreign) {
-        await query(
-          client,
-          `ALTER TABLE ${relation(fk.schema + "." + fk.table_)} DROP CONSTRAINT ${q(fk.name)}`,
-        );
-        await query(
-          client,
-          `ALTER TABLE ${relation(fk.schema + "." + fk.table_)} ADD CONSTRAINT ${q(fk.name)} ${fk.definition} NOT VALID`,
-        );
-        await query(
-          client,
-          `ALTER TABLE ${relation(fk.schema + "." + fk.table_)} VALIDATE CONSTRAINT ${q(fk.name)}`,
-        );
-      }
+      await validateBackupForeignKeys(client);
       const after = await catalog(client);
       supported(after, profile);
       const runtimeConnect = (

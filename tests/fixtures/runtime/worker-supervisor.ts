@@ -11,6 +11,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { createDatabase } from "../../../packages/db/src";
+import { workerDatabaseTarget } from "../../../scripts/test-worker-bridge.mjs";
 import {
   runtimePaths,
   type RuntimeKey,
@@ -30,13 +31,7 @@ process.once(
     rotatedSecret: string;
     artifactParent: string;
   }) => {
-    const parsed = new URL(adminUrl);
-    if (
-      parsed.hostname !== "127.0.0.1" ||
-      parsed.port !== "54329" ||
-      !/^\/lyraseo_worker_[0-9a-f]{32}$/.test(parsed.pathname)
-    )
-      throw Error("OWNED_DISPOSABLE_DATABASE_REQUIRED");
+    const parsed = workerDatabaseTarget(adminUrl);
     const admin = createDatabase(adminUrl);
     parsed.username = "lyraseo_dispatch";
     parsed.password = "local_dispatch_only";

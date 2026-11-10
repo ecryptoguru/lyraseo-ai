@@ -2,6 +2,8 @@
 
 This describes the Supabase Auth path implemented locally. It does not qualify a hosted identity provider, a support-assisted reset, or customer acceptance.
 
+Final-review safety restriction (2026-11-10): general initial enrollment is unavailable. Factorless identities cannot obtain a product actor, even if an earlier token reports AAL2, because no trusted durable enrollment history exists. Legitimate never-enrolled users are also blocked pending that implementation. Current verified-factor AAL2 backup setup remains available locally; confirmation rechecks the same user/session/epoch before and after provider verification. These mitigations do not implement recovery or change the approved optional-customer-MFA policy.
+
 Users who have already enrolled and verified more than one TOTP factor can choose their backup from the authenticator selector after the normal Google or email-code sign-in. The server checks that the selected factor belongs to the current provider user and is verified, calls the provider challenge, and resolves the product actor again before opening the workspace. Site grants and product identity are not modified by the backup choice.
 
 To prepare a backup, complete a fresh sign-in and an existing authenticator challenge, open **Account security**, and select **Add backup authenticator**. Use a different device or authenticator app. Scan the setup code or enter its key privately, and confirm the new factor with its current code. The setup key must not be copied into support tickets, logs, screenshots or shared workspaces. A backup is useful only after it has been confirmed and appears in the sign-in selector.

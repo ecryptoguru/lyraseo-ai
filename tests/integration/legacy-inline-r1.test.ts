@@ -358,6 +358,7 @@ describe.skipIf(!name)("legacy inline R1 parity", () => {
                   "x-robots-tag": "noindex",
                 },
               }),
+        async () => actor,
       );
       expect(result.status).toBe("COMPLETED");
       const persisted = await admin.auditRun.findUniqueOrThrow({

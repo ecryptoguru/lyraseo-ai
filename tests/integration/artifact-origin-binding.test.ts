@@ -354,15 +354,18 @@ it("SQL independently rejects downgraded/pasted origin and cross-workspace sourc
   expect(await admin.artifactBlob.count()).toBe(0);
 });
 it("restricted runtime/dispatch/identity logins cannot enroll, read, mutate or bind origins", async () => {
-  for (const [role, password] of [
-    ["lyraseo_runtime", "local_runtime_only"],
-    ["lyraseo_dispatch", "local_dispatch_only"],
-    ["lyraseo_identity", "local_identity_only"],
+  const { testDatabaseRoleUrl } =
+    await import("../helpers/test-database-target");
+  for (const role of [
+    "lyraseo_runtime",
+    "lyraseo_dispatch",
+    "lyraseo_identity",
   ]) {
-    const login = createDatabase(
-      adminUrl.replace("postgres:lyraseo_local_only", role + ":" + password),
-    );
+    const login = createDatabase(testDatabaseRoleUrl(role));
     try {
+      expect(await login.$queryRaw`SELECT current_user AS role`).toEqual([
+        { role },
+      ]);
       for (const table of [
         "store_registration",
         "store_namespace",

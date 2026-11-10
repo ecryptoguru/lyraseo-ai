@@ -48,12 +48,25 @@ it("persists real controlled HTTP evidence, resumes checkpoints and verifies an 
       actor,
       resource,
       site.transport,
+      async () => actor,
     );
     expect(checkpoint.status).toBe("QUEUED");
     expect(checkpoint.pages).toHaveLength(1);
     // A new invocation loads the durable manifest and skips the completed page.
-    await runRawAuditStep(db, actor, resource, site.transport);
-    await runRawAuditStep(db, actor, resource, site.transport);
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
     expect((await readAuditRun(db, actor, resource)).status).toBe("COMPLETED");
     site.fix();
     const after = await start("after");
@@ -62,18 +75,21 @@ it("persists real controlled HTTP evidence, resumes checkpoints and verifies an 
       actor,
       { ...scope, auditId: after.id },
       site.transport,
+      async () => actor,
     );
     await runRawAuditStep(
       db,
       actor,
       { ...scope, auditId: after.id },
       site.transport,
+      async () => actor,
     );
     await runRawAuditStep(
       db,
       actor,
       { ...scope, auditId: after.id },
       site.transport,
+      async () => actor,
     );
     const delta = await compareAuditRuns(
       db,
@@ -131,9 +147,27 @@ it("checkpoints NUL as an unreadable receipt, resumes, and captures real raw anc
       idempotencyKey: "nul-anchor",
     });
     const resource = { ...scope, auditId: run.id };
-    await runRawAuditStep(db, actor, resource, site.transport);
-    await runRawAuditStep(db, actor, resource, site.transport);
-    await runRawAuditStep(db, actor, resource, site.transport);
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
     const saved = await readAuditRun(db, actor, resource);
     expect(saved.status).toBe("COMPLETED");
     const nul = saved.pages.find((p) => p.requestedUrl.endsWith("/nul"))!;
@@ -147,7 +181,7 @@ it("checkpoints NUL as an unreadable receipt, resumes, and captures real raw anc
     expect(nul.evidence.acquired).toBe(false);
     const checkpointCount = site.requests.length;
     await expect(
-      runRawAuditStep(db, actor, resource, site.transport),
+      runRawAuditStep(db, actor, resource, site.transport, async () => actor),
     ).rejects.toThrow("AUDIT_TERMINAL");
     expect(site.requests).toHaveLength(checkpointCount);
     const capture = await captureEditorialEvidence(db, actor, scope, {
@@ -222,9 +256,27 @@ it("persists a valid UTF-8 anchor crossing the text cap and its editorial snapsh
       idempotencyKey: "unicode-anchor",
     });
     const resource = { ...scope, auditId: run.id };
-    await runRawAuditStep(db, actor, resource, site.transport);
-    await runRawAuditStep(db, actor, resource, site.transport);
-    await runRawAuditStep(db, actor, resource, site.transport);
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
+    await runRawAuditStep(
+      db,
+      actor,
+      resource,
+      site.transport,
+      async () => actor,
+    );
     const saved = await readAuditRun(db, actor, resource);
     expect(saved.status).toBe("COMPLETED");
     const unicode = saved.pages.find((p) =>
@@ -287,7 +339,13 @@ it("checkpoints empty HTML 200/204/205 as unavailable with observed status/diges
     });
     const resource = { ...scope, auditId: run.id };
     for (let step = 0; step < 4; step++)
-      await runRawAuditStep(db, actor, resource, site.transport);
+      await runRawAuditStep(
+        db,
+        actor,
+        resource,
+        site.transport,
+        async () => actor,
+      );
     const saved = await readAuditRun(db, actor, resource);
     expect(saved.status).toBe("COMPLETED");
     for (const status of [200, 204, 205]) {

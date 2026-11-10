@@ -218,6 +218,7 @@ it("classifies current-schema relations: revoked handoff secrets, suppressed dis
       }),
       row({
         id: "dest-b",
+        url: "https://other.example/hook",
         workspace_id: "w",
         site_id: "b",
         secret_cipher: secret,
@@ -231,6 +232,7 @@ it("classifies current-schema relations: revoked handoff secrets, suppressed dis
     "lyraseo_handoff.intent": [
       row({
         id: "intent",
+        destination_url: "https://other.example/hook",
         workspace_id: "w",
         site_id: "b",
         state: "SENDING",
@@ -310,7 +312,18 @@ it("classifies current-schema relations: revoked handoff secrets, suppressed dis
         requestInput: { private: "PRIVATE_BATCH_INPUT" },
         expiresAt: "2027-01-01T00:00:00.000000Z",
         confirmedAt: "2026-11-02T00:00:00.000Z",
-        confirmationKey: "DO_NOT_ARCHIVE_CONFIRM",
+        confirmationKey: "confirmed-idempotency",
+        preview: {
+          batchQuoteId: "quote",
+          expiresAt: "2027-01-01T00:00:00.000Z",
+          inputHash: "a".repeat(64),
+          items: [],
+          totalsByProvider: {},
+          combinedMaximum: null,
+          currency: "USD",
+          budgetOwnerId: "u",
+          unavailable: true,
+        },
       }),
     ],
     "public.KeywordSelection": [
@@ -346,7 +359,6 @@ it("classifies current-schema relations: revoked handoff secrets, suppressed dis
     "DO_NOT_ARCHIVE_HANDOFF_SECRET",
     "DO_NOT_ARCHIVE_STEPUP",
     "DO_NOT_ARCHIVE_INVITE",
-    "DO_NOT_ARCHIVE_CONFIRM",
     "PRIVATE_ARGS",
     "PRIVATE_BATCH_INPUT",
     "PRIVATE_KEYWORD_REQUEST",
@@ -407,10 +419,890 @@ it("classifies current-schema relations: revoked handoff secrets, suppressed dis
   );
   // Agency/keyword inputs are hash-only projections of retained requests.
   expect(result.tables["public.AgencyBatchQuote"]![0]!.data).toMatchObject({
-    confirmationKey: null,
-    confirmedAt: null,
+    confirmationKey: "confirmed-idempotency",
+    confirmedAt: "2026-11-02T00:00:00.000Z",
+    confirmationHash: "RESTORE_DISABLED",
   });
   expect(result.tables["public.KeywordSelection"]).toHaveLength(1);
+});
+const projectionClock = "2026-11-03T00:00:00.000000Z";
+const deletionGraph = (): BackupTables => ({
+  "public.Workspace": [row({ id: "w", name: "Workspace", deletedAt: null })],
+  "public.Site": [
+    row({
+      id: "a",
+      workspaceId: "w",
+      origin: "https://private.example",
+      deletedAt: "2026-11-01T12:30:00.123Z",
+    }),
+  ],
+  "lyraseo_deletion.scope_case": [
+    row({
+      id: "00000000-0000-0000-0000-000000000010",
+      request_id: "00000000-0000-0000-0000-000000000011",
+      workspace_id: "w",
+      site_id: "a",
+      incarnation: "00000000-0000-0000-0000-000000000001",
+      actor_id: "u",
+      actor_security_version: 3,
+      policy_version: "SITE_DELETION_LOCAL_V1",
+      journal_partition: "00000000-0000-0000-0000-000000000012",
+      journal_sequence: "42",
+      journal_hash: "a".repeat(64),
+      accepted_at: "2026-11-01T12:30:00.123Z",
+      deadline: "2026-11-08T12:30:00.123Z",
+      record_expires_at: "2027-04-30T12:30:00.123Z",
+      receipt_hash: "b".repeat(64),
+    }),
+  ],
+  "lyraseo_deletion.task": [
+    row({
+      case_id: "00000000-0000-0000-0000-000000000010",
+      kind: "AUTHORED_PAYLOAD",
+      state: "NEEDS_ADAPTER",
+      fence: 4,
+      attempts: 3,
+      next_retry_at: "2026-11-02T12:30:00.123Z",
+      completed_at: null,
+      result: { reason: "BOUNDED_ERASURE_NOT_QUALIFIED" },
+    }),
+  ],
+  "lyraseo_deletion.event": [
+    row({
+      id: "00000000-0000-0000-0000-000000000013",
+      case_id: "00000000-0000-0000-0000-000000000010",
+      kind: "AUTHORED_PAYLOAD",
+      fence: 4,
+      result: { reason: "BOUNDED_ERASURE_NOT_QUALIFIED" },
+      recorded_at: "2026-11-02T12:30:00.123Z",
+    }),
+  ],
+  "public.ContentDraft": [
+    row({
+      id: "draft",
+      workspaceId: "w",
+      siteId: "a",
+      snapshot: { body: "ERASED_AUTHORED_PAYLOAD" },
+    }),
+  ],
+  "public.WorkspaceBrandingRevision": [
+    row({
+      id: "brand",
+      workspaceId: "w",
+      revision: 1,
+      displayName: "Shared agency",
+      logoBytes: "\\x89504e47",
+      logoSha256: "c".repeat(64),
+      mime: "image/png",
+      width: 1,
+      height: 1,
+      createdBy: "u",
+      createdAt: "2026-10-01T00:00:00.000Z",
+    }),
+  ],
+});
+it.each(["BACKUP", "RESTORE"] as const)(
+  "keeps the tombstoned deletion receipt graph and its original clocks in %s, not erased authored payload",
+  (phase) => {
+    const tables = projectBackupTables(deletionGraph(), {
+      at: projectionClock,
+      phase,
+    }).tables;
+    expect(tables["lyraseo_deletion.scope_case"]).toHaveLength(1);
+    expect(tables["lyraseo_deletion.scope_case"]![0]!.data).toMatchObject({
+      id: "00000000-0000-0000-0000-000000000010",
+      journal_sequence: "42",
+      accepted_at: "2026-11-01T12:30:00.123Z",
+      deadline: "2026-11-08T12:30:00.123Z",
+      record_expires_at: "2027-04-30T12:30:00.123Z",
+    });
+    expect(tables["lyraseo_deletion.task"]![0]!.data).toMatchObject({
+      case_id: "00000000-0000-0000-0000-000000000010",
+      fence: 4,
+      attempts: 3,
+      next_retry_at: "2026-11-02T12:30:00.123Z",
+    });
+    expect(tables["lyraseo_deletion.event"]![0]!.data).toMatchObject({
+      case_id: "00000000-0000-0000-0000-000000000010",
+      recorded_at: "2026-11-02T12:30:00.123Z",
+    });
+    expect(tables["public.Site"]![0]!.data.deletedAt).toBe(
+      "2026-11-01T12:30:00.123Z",
+    );
+    expect(tables["public.ContentDraft"]).toEqual([]);
+    expect(JSON.stringify(tables)).not.toContain("ERASED_AUTHORED_PAYLOAD");
+    expect(tables["public.WorkspaceBrandingRevision"]![0]!.data).toMatchObject({
+      displayName: "Shared agency",
+      logoBytes: "\\x89504e47",
+    });
+  },
+);
+it("expires completed deletion receipt parents and children together at the original receipt deadline", () => {
+  const input = deletionGraph();
+  input["lyraseo_deletion.task"] = [
+    "IMPORTS",
+    "CREDENTIALS",
+    "AUTHORED_PAYLOAD",
+    "AUDIT_PAYLOAD",
+    "ARTIFACTS",
+    "VISIBILITY_PAYLOAD",
+    "KEYWORD_DATA",
+    "HANDOFF_DATA",
+    "TEAM_DATA",
+    "PROCESSORS",
+    "BACKUPS",
+    "FINANCIAL_IDENTITY",
+  ].map((kind) =>
+    row({
+      ...input["lyraseo_deletion.task"]![0]!.data,
+      kind,
+      state: "COMPLETE",
+    }),
+  );
+  input["lyraseo_deletion.scope_case"]![0]!.data.record_expires_at =
+    projectionClock;
+  const tables = projectBackupTables(input, {
+    at: projectionClock,
+    phase: "RESTORE",
+  }).tables;
+  expect(tables["lyraseo_deletion.scope_case"]).toEqual([]);
+  expect(tables["lyraseo_deletion.task"]).toEqual([]);
+  expect(tables["lyraseo_deletion.event"]).toEqual([]);
+  expect(tables["public.Site"]).toHaveLength(1);
+});
+it.each(["PENDING", "NEEDS_ADAPTER"])(
+  "blocks an expired deletion receipt with unresolved %s work instead of dropping it",
+  (state) => {
+    const input = deletionGraph();
+    input["lyraseo_deletion.scope_case"]![0]!.data.record_expires_at =
+      projectionClock;
+    input["lyraseo_deletion.task"]![0]!.data.state = state;
+    expect(() =>
+      projectBackupTables(input, { at: projectionClock, phase: "RESTORE" }),
+    ).toThrow("BACKUP_DELETION_WORK_UNRESOLVED");
+  },
+);
+it("does not equate missing deletion-task coverage with completed deletion", () => {
+  const input = deletionGraph();
+  input["lyraseo_deletion.scope_case"]![0]!.data.record_expires_at =
+    projectionClock;
+  input["lyraseo_deletion.task"] = [];
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_DELETION_WORK_UNRESOLVED");
+});
+it("cascades expired audit assignments through assignmentId while preserving live audit event history", () => {
+  const tables = projectBackupTables(
+    {
+      "public.AuditRun": [
+        row({
+          id: "expired",
+          workspaceId: "w",
+          siteId: "a",
+          resultExpiresAt: projectionClock,
+        }),
+        row({
+          id: "live",
+          workspaceId: "w",
+          siteId: "a",
+          resultExpiresAt: "2026-12-01T00:00:00.000Z",
+        }),
+      ],
+      "public.IssueAssignment": [
+        row({
+          id: "old-assignment",
+          workspaceId: "w",
+          siteId: "a",
+          auditId: "expired",
+          ruleId: "schema",
+          scopeKey: "/",
+          revision: 1,
+        }),
+        row({
+          id: "live-assignment",
+          workspaceId: "w",
+          siteId: "a",
+          auditId: "live",
+          ruleId: "schema",
+          scopeKey: "/",
+          revision: 1,
+        }),
+      ],
+      "public.IssueAssignmentEvent": [
+        row({
+          id: "old-event",
+          workspaceId: "w",
+          siteId: "a",
+          assignmentId: "old-assignment",
+          revision: 1,
+          actorId: "u",
+          assigneeUserId: "v",
+          createdAt: "2026-11-01T00:00:00.000Z",
+          idempotencyKey: "old-key",
+          inputHash: "a".repeat(64),
+        }),
+        row({
+          id: "live-event",
+          workspaceId: "w",
+          siteId: "a",
+          assignmentId: "live-assignment",
+          revision: 1,
+          actorId: "u",
+          assigneeUserId: "v",
+          createdAt: "2026-11-01T00:00:00.000Z",
+          idempotencyKey: "live-key",
+          inputHash: "b".repeat(64),
+        }),
+      ],
+    },
+    { at: projectionClock, phase: "BACKUP" },
+  ).tables;
+  expect(tables["public.IssueAssignment"]!.map((p) => p.data.id)).toEqual([
+    "live-assignment",
+  ]);
+  expect(tables["public.IssueAssignmentEvent"]!.map((p) => p.data.id)).toEqual([
+    "live-event",
+  ]);
+});
+const billingGraph = (): BackupTables => ({
+  "public.Workspace": [row({ id: "w", deletedAt: null })],
+  "lyraseo_billing.merchant": [
+    row({
+      provider: "POLAR",
+      merchant_id: "merchant",
+      mode: "SANDBOX",
+      enabled: true,
+    }),
+  ],
+  "lyraseo_billing.account": [
+    row({
+      id: "00000000-0000-0000-0000-000000000020",
+      workspace_id: "w",
+      tombstoned_at: null,
+      revision: 1,
+      created_at: "2026-11-01T00:00:00.000Z",
+    }),
+  ],
+  "lyraseo_billing.binding": [
+    row({
+      provider: "POLAR",
+      merchant_id: "merchant",
+      resource_id: "subscription",
+      customer_id: "customer",
+      account_id: "00000000-0000-0000-0000-000000000020",
+    }),
+  ],
+  "lyraseo_billing.event": [
+    row({
+      id: "00000000-0000-0000-0000-000000000021",
+      provider: "POLAR",
+      merchant_id: "merchant",
+      external_id: "accepted-event",
+      payload_hash: "a".repeat(64),
+      key_version: "v1",
+      event_type: "subscription.active",
+      resource_id: "subscription",
+      account_id: "00000000-0000-0000-0000-000000000020",
+      references_json: {
+        subscriptionId: "subscription",
+        customerId: "customer",
+        accountVerified: true,
+      },
+      occurred_at: "2026-11-01T00:00:00.000Z",
+      received_at: "2026-11-01T01:00:00.000Z",
+      contract: "SYNTHETIC_CANONICAL_V2",
+      collision: false,
+      mode: "SANDBOX",
+    }),
+    row({
+      id: "00000000-0000-0000-0000-000000000022",
+      provider: "POLAR",
+      merchant_id: "merchant",
+      external_id: "unresolved-event",
+      payload_hash: "b".repeat(64),
+      key_version: "v1",
+      event_type: "payment.succeeded",
+      resource_id: "payment",
+      account_id: null,
+      references_json: { paymentId: "payment" },
+      occurred_at: "2026-11-01T00:00:00.000Z",
+      received_at: "2026-11-01T01:00:00.000Z",
+      contract: "SYNTHETIC_CANONICAL_V2",
+      collision: false,
+      mode: "SANDBOX",
+    }),
+  ],
+  "lyraseo_billing.event_route": [
+    row({
+      event_id: "00000000-0000-0000-0000-000000000021",
+      account_id: "00000000-0000-0000-0000-000000000020",
+      provider: "POLAR",
+      merchant_id: "merchant",
+      resource_id: "subscription",
+      basis: "SIGNED_SUBSCRIPTION_REFERENCE",
+    }),
+  ],
+  "lyraseo_billing.inbox": [
+    row({
+      id: "00000000-0000-0000-0000-000000000023",
+      provider: "POLAR",
+      merchant_id: "merchant",
+      resource_id: "subscription",
+      generation: 4,
+      fence: 3,
+      token: "00000000-0000-0000-0000-000000000099",
+      lease_until: "2026-11-03T00:01:00.000Z",
+      state: "READING",
+      attempts: 2,
+      next_at: "2026-11-01T00:00:00.000Z",
+      last_error: "RAW_READER_DETAIL",
+      completed_at: null,
+    }),
+  ],
+  "lyraseo_billing.discovery": [
+    row({
+      event_id: "00000000-0000-0000-0000-000000000022",
+      state: "PENDING",
+      attempts: 0,
+      next_at: "2026-11-01T00:00:00.000Z",
+      last_error: "RAW_READER_DETAIL",
+    }),
+  ],
+});
+it.each(["BACKUP", "RESTORE"] as const)(
+  "retains accepted billing event queues in %s without executable claims or due dispatch",
+  (phase) => {
+    const tables = projectBackupTables(billingGraph(), {
+      at: projectionClock,
+      phase,
+    }).tables;
+    expect(
+      tables["lyraseo_billing.event"]!.map((p) => p.data.external_id),
+    ).toEqual(["accepted-event", "unresolved-event"]);
+    expect(tables["lyraseo_billing.event_route"]![0]!.data.event_id).toBe(
+      "00000000-0000-0000-0000-000000000021",
+    );
+    expect(tables["lyraseo_billing.inbox"]).toHaveLength(1);
+    expect(tables["lyraseo_billing.inbox"]![0]!.data).toEqual({
+      id: "00000000-0000-0000-0000-000000000023",
+      provider: "POLAR",
+      merchant_id: "merchant",
+      resource_id: "subscription",
+      generation: 4,
+      fence: 3,
+      token: null,
+      lease_until: null,
+      state: "READING",
+      attempts: 2,
+      next_at: "infinity",
+      last_error: "RESTORE_REQUIRES_EXPLICIT_RECONCILIATION",
+      completed_at: null,
+    });
+    expect(tables["lyraseo_billing.discovery"]![0]!.data).toEqual({
+      event_id: "00000000-0000-0000-0000-000000000022",
+      state: "PENDING",
+      attempts: 0,
+      next_at: "infinity",
+      last_error: "RESTORE_REQUIRES_EXPLICIT_RECONCILIATION",
+    });
+    expect(JSON.stringify(tables)).not.toContain("RAW_READER_DETAIL");
+  },
+);
+const committedBatchGraph = (): BackupTables => ({
+  "public.Workspace": [row({ id: "w", deletedAt: null })],
+  "public.Site": [
+    row({
+      id: "a",
+      workspaceId: "w",
+      origin: "https://private.example",
+      deletedAt: "2026-11-01T00:00:00.000Z",
+    }),
+  ],
+  "public.Operation": [
+    row({
+      id: "charged",
+      workspaceId: "w",
+      siteId: "a",
+      userId: "u",
+      idempotencyKey: "child-idempotency",
+      reservedCost: "0.010000001",
+      actualCost: "0.009000001",
+      fence: 8,
+      attemptState: "INTENT",
+      requestInput: { body: "EXECUTABLE_BATCH_INPUT" },
+    }),
+  ],
+  "public.OperationQuote": [
+    row({
+      id: "child-quote",
+      workspaceId: "w",
+      siteId: "a",
+      userId: "u",
+      consumedOperationId: "charged",
+      maximumCost: "0.010000001",
+      inputHash: "a".repeat(64),
+      requestInput: { body: "EXECUTABLE_BATCH_INPUT" },
+    }),
+  ],
+  "public.AgencyBatchQuote": [
+    row({
+      id: "batch",
+      workspaceId: "w",
+      userId: "u",
+      securityVersion: 3,
+      requestInput: {
+        workspaceId: "w",
+        items: [
+          {
+            siteId: "a",
+            kind: "GENERATION",
+            input: { body: "EXECUTABLE_BATCH_INPUT" },
+          },
+        ],
+      },
+      inputHash: "b".repeat(64),
+      confirmationHash: "c".repeat(64),
+      preview: {
+        batchQuoteId: "batch",
+        expiresAt: "2026-11-01T00:05:00.000Z",
+        inputHash: "b".repeat(64),
+        items: [
+          {
+            siteId: "a",
+            ordinal: 0,
+            quoteId: "child-quote",
+            maximumCost: "0.010000001",
+            provider: "OPENAI",
+            tariffVersion: "v1",
+            status: "QUOTED",
+            errorCode: null,
+          },
+        ],
+        totalsByProvider: { OPENAI: "0.010000001" },
+        combinedMaximum: "0.010000001",
+        currency: "USD",
+        budgetOwnerId: "u",
+        unavailable: false,
+      },
+      createdAt: "2026-11-01T00:00:00.000Z",
+      expiresAt: "2026-11-01T00:05:00.000Z",
+      confirmedAt: "2026-11-01T00:00:10.000Z",
+      confirmationKey: "batch-idempotency",
+    }),
+  ],
+  "public.AgencyBatchItem": [
+    row({
+      batchQuoteId: "batch",
+      workspaceId: "w",
+      userId: "u",
+      siteId: "a",
+      ordinal: 0,
+      quoteId: "child-quote",
+      operationId: "charged",
+      status: "ADMITTED",
+      errorCode: null,
+    }),
+  ],
+  "public.BudgetPeriod": [
+    row({
+      id: "provider",
+      limit: "10.000000000",
+      reserved: "0.010000001",
+      spent: "0.009000001",
+    }),
+    row({
+      id: "product",
+      limit: "8.000000000",
+      reserved: "0.010000001",
+      spent: "0.009000001",
+    }),
+    row({
+      id: "api",
+      limit: "1.000000000",
+      reserved: "0.010000001",
+      spent: "0.009000001",
+    }),
+    row({
+      id: "visibility",
+      limit: "1.000000000",
+      reserved: "0.010000001",
+      spent: "0.009000001",
+    }),
+  ],
+});
+it.each(["BACKUP", "RESTORE"] as const)(
+  "preserves expired committed batch financial links, exact amounts and confirmation dates in %s",
+  (phase) => {
+    const tables = projectBackupTables(committedBatchGraph(), {
+      at: projectionClock,
+      phase,
+    }).tables;
+    expect(tables["public.AgencyBatchQuote"]).toHaveLength(1);
+    expect(tables["public.AgencyBatchQuote"]![0]!.data).toMatchObject({
+      id: "batch",
+      confirmedAt: "2026-11-01T00:00:10.000Z",
+      confirmationKey: "batch-idempotency",
+      confirmationHash: "RESTORE_DISABLED",
+      requestInput: null,
+      expiresAt: "2026-11-01T00:05:00.000Z",
+      preview: {
+        combinedMaximum: "0.010000001",
+        items: [{ ordinal: 0, maximumCost: "0.010000001" }],
+      },
+    });
+    expect(tables["public.AgencyBatchItem"]![0]!.data).toEqual({
+      batchQuoteId: "batch",
+      workspaceId: "w",
+      userId: "u",
+      siteId: "a",
+      ordinal: 0,
+      quoteId: "child-quote",
+      operationId: "charged",
+      status: "ADMITTED",
+      errorCode: null,
+    });
+    expect(tables["public.OperationQuote"]![0]!.data).toMatchObject({
+      consumedOperationId: "charged",
+      maximumCost: "0.010000001",
+      requestInput: null,
+    });
+    expect(tables["public.Operation"]![0]!.data).toMatchObject({
+      idempotencyKey: "child-idempotency",
+      reservedCost: "0.010000001",
+      actualCost: "0.009000001",
+      fence: 8,
+      attemptState: "INTENT",
+    });
+    expect(tables["public.BudgetPeriod"]!.map((p) => p.data.limit)).toEqual([
+      "10.000000000",
+      "8.000000000",
+      "1.000000000",
+      "1.000000000",
+    ]);
+    expect(JSON.stringify(tables)).not.toContain("EXECUTABLE_BATCH_INPUT");
+  },
+);
+it("keeps a committed child whose item link was not yet reconciled when its consumed quote committed", () => {
+  const input = committedBatchGraph();
+  Object.assign(input["public.AgencyBatchItem"]![0]!.data, {
+    operationId: null,
+    status: "PENDING",
+  });
+  const tables = projectBackupTables(input, {
+    at: projectionClock,
+    phase: "RESTORE",
+  }).tables;
+  expect(tables["public.AgencyBatchQuote"]).toHaveLength(1);
+  expect(tables["public.AgencyBatchItem"]![0]!.data).toMatchObject({
+    quoteId: "child-quote",
+    operationId: null,
+    status: "PENDING",
+  });
+  expect(tables["public.OperationQuote"]![0]!.data.consumedOperationId).toBe(
+    "charged",
+  );
+});
+it("fails closed on unsupported workspace tombstones before returning authored site or branding data", () => {
+  const input = deletionGraph();
+  input["public.Workspace"]![0]!.data.deletedAt = "2026-11-01T00:00:00.000Z";
+  input["public.Site"]![0]!.data.deletedAt = null;
+  for (const phase of ["BACKUP", "RESTORE"] as const)
+    expect(() =>
+      projectBackupTables(input, { at: projectionClock, phase }),
+    ).toThrow("BACKUP_WORKSPACE_DELETION_UNSUPPORTED");
+});
+it("keeps minimal opaque access receipts until exactly 180 days without refreshing createdAt", () => {
+  const input = deletionGraph();
+  input["public.WorkspaceAccessEvent"] = [
+    row({
+      id: "still-required",
+      workspaceId: "w",
+      actorId: "u",
+      action: "revoke",
+      targetUserId: "v",
+      siteId: "a",
+      previousRole: "EDITOR",
+      nextRole: null,
+      accessRevision: 2,
+      createdAt: "2026-05-07T00:00:00.001Z",
+      note: "PRIVATE_ACCESS_DETAIL",
+    }),
+    row({
+      id: "deadline",
+      workspaceId: "w",
+      actorId: "u",
+      action: "grant",
+      targetUserId: "v",
+      siteId: "a",
+      previousRole: null,
+      nextRole: "EDITOR",
+      accessRevision: 1,
+      createdAt: "2026-05-07T00:00:00.000Z",
+    }),
+  ];
+  const tables = projectBackupTables(input, {
+    at: projectionClock,
+    phase: "RESTORE",
+  }).tables;
+  expect(tables["public.WorkspaceAccessEvent"]).toEqual([
+    row({
+      id: "still-required",
+      workspaceId: "w",
+      actorId: "u",
+      action: "revoke",
+      targetUserId: "v",
+      siteId: "a",
+      previousRole: "EDITOR",
+      nextRole: null,
+      accessRevision: 2,
+      createdAt: "2026-05-07T00:00:00.001Z",
+    }),
+  ]);
+  expect(JSON.stringify(tables)).not.toContain("PRIVATE_ACCESS_DETAIL");
+});
+it("retains a recent access promotion and expires workspace-wide and active-site receipts at 180 days", () => {
+  const input = deletionGraph();
+  input["public.Site"]![0]!.data.deletedAt = null;
+  input["public.WorkspaceAccessEvent"] = [
+    row({
+      id: "promotion",
+      workspaceId: "w",
+      siteId: null,
+      actorId: "u",
+      targetUserId: "v",
+      action: "role",
+      previousRole: "VIEWER",
+      nextRole: "ADMIN",
+      accessRevision: 3,
+      createdAt: "2026-11-02T00:00:00.000Z",
+    }),
+    row({
+      id: "old-workspace",
+      workspaceId: "w",
+      siteId: null,
+      action: "role",
+      previousRole: "EDITOR",
+      nextRole: "ADMIN",
+      createdAt: "2026-05-07T00:00:00.000Z",
+    }),
+    row({
+      id: "old-active-site",
+      workspaceId: "w",
+      siteId: "a",
+      action: "grant",
+      previousRole: null,
+      nextRole: "VIEWER",
+      createdAt: "2026-05-07T00:00:00.000Z",
+    }),
+  ];
+  expect(
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }).tables[
+      "public.WorkspaceAccessEvent"
+    ],
+  ).toEqual([
+    row({
+      id: "promotion",
+      workspaceId: "w",
+      siteId: null,
+      actorId: "u",
+      targetUserId: "v",
+      action: "role",
+      previousRole: "VIEWER",
+      nextRole: "ADMIN",
+      accessRevision: 3,
+      createdAt: "2026-11-02T00:00:00.000Z",
+    }),
+  ]);
+});
+it("fails closed rather than silently discarding receipts with unclassifiable clocks or missing parents", () => {
+  const invalidClock = deletionGraph();
+  invalidClock["public.WorkspaceAccessEvent"] = [
+    row({
+      id: "bad-clock",
+      workspaceId: "w",
+      siteId: "a",
+      actorId: "u",
+      action: "revoke",
+      accessRevision: 1,
+      createdAt: null,
+    }),
+  ];
+  expect(() =>
+    projectBackupTables(invalidClock, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_SECURITY_RECEIPT_CLOCK_INVALID");
+  const missingParent = deletionGraph();
+  missingParent["lyraseo_deletion.scope_case"] = [];
+  expect(() =>
+    projectBackupTables(missingParent, {
+      at: projectionClock,
+      phase: "BACKUP",
+    }),
+  ).toThrow("BACKUP_DELETION_RECEIPT_PARENT_MISSING");
+});
+it.each(["BACKUP", "RESTORE"] as const)(
+  "removes path bearers from quarantined handoff routing and editor URLs in %s while preserving receipt hashes",
+  (phase) => {
+    const tables = projectBackupTables(
+      {
+        "lyraseo_handoff.destination": [
+          row({
+            id: "dest",
+            workspace_id: "w",
+            site_id: "a",
+            kind: "WORDPRESS",
+            generation: 1,
+            url: "https://handoff.example/PATH_BEARER/blog/",
+            status: "CONFIGURED",
+            secret_cipher: "OLD_CIPHER",
+            key_id: "k1",
+            previous_cipher: null,
+            previous_key_id: null,
+            previous_until: null,
+          }),
+        ],
+        "lyraseo_handoff.intent": [
+          row({
+            id: "intent",
+            workspace_id: "w",
+            site_id: "a",
+            destination_id: "dest",
+            destination_generation: 1,
+            kind: "WORDPRESS",
+            mode: "FIXTURE",
+            state: "CONFIRMED_DRAFT",
+            destination_url:
+              "https://handoff.example/PATH_BEARER/wp-json/wp/v2/posts?_fields=id,status,link",
+            remote_post_id: "42",
+            editor_url:
+              "https://handoff.example/PATH_BEARER/wp-admin/post.php?post=42&action=edit",
+            lease_until: null,
+            input_hash: "a".repeat(64),
+            body_hash: "b".repeat(64),
+            next_due_at: "2026-11-01T00:00:00.000Z",
+          }),
+        ],
+        "lyraseo_handoff.receipt": [
+          row({
+            id: "receipt",
+            intent_id: "intent",
+            fence: 2,
+            attempt: 1,
+            outcome: "CONFIRMED_DRAFT",
+            status: 201,
+            code: "CONFIRMED",
+            remote_post_id: "42",
+            editor_url:
+              "https://handoff.example/PATH_BEARER/wp-admin/post.php?post=42&action=edit",
+            recorded_at: "2026-11-01T00:00:00.000Z",
+          }),
+        ],
+        "lyraseo_handoff.dispatch": [
+          row({
+            intent_id: "intent",
+            state: "PENDING",
+            claim_token: "00000000-0000-0000-0000-000000000099",
+            lease_until: "2026-11-03T00:01:00.000Z",
+            next_due: projectionClock,
+          }),
+        ],
+      },
+      { at: projectionClock, phase },
+    ).tables;
+    expect(JSON.stringify(tables)).not.toContain("PATH_BEARER");
+    expect(JSON.stringify(tables)).not.toContain("OLD_CIPHER");
+    expect(tables["lyraseo_handoff.destination"]![0]!.data).toMatchObject({
+      url: "https://handoff.example",
+      status: "REVOKED",
+      secret_cipher: null,
+    });
+    expect(tables["lyraseo_handoff.intent"]![0]!.data).toMatchObject({
+      mode: "QUARANTINED",
+      destination_url: "https://handoff.example",
+      state: "CONFIRMED_DRAFT",
+      editor_url: "https://handoff.example",
+      input_hash: "a".repeat(64),
+      body_hash: "b".repeat(64),
+      remote_post_id: "42",
+    });
+    expect(tables["lyraseo_handoff.receipt"]![0]!.data).toMatchObject({
+      editor_url: "https://handoff.example",
+      recorded_at: "2026-11-01T00:00:00.000Z",
+      fence: 2,
+    });
+    expect(tables["lyraseo_handoff.dispatch"]![0]!.data).toMatchObject({
+      state: "SUPPRESSED",
+      claim_token: null,
+      lease_until: null,
+      next_due: null,
+    });
+  },
+);
+it("fails closed on unknown retained batch previews instead of publishing executable input hidden outside requestInput", () => {
+  const input = committedBatchGraph();
+  (
+    input["public.AgencyBatchQuote"]![0]!.data.preview as Record<
+      string,
+      unknown
+    >
+  ).privatePayload = { body: "UNCLASSIFIED_AUTHORED_PREVIEW" };
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_BATCH_PREVIEW_CLASSIFICATION_BLOCKED");
+});
+it("fails closed on an unclassifiable nested batch item preview", () => {
+  const input = committedBatchGraph();
+  const preview = input["public.AgencyBatchQuote"]![0]!.data.preview as {
+    items: Record<string, unknown>[];
+  };
+  preview.items[0]!.input = { body: "UNCLASSIFIED_AUTHORED_PREVIEW" };
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_BATCH_PREVIEW_CLASSIFICATION_BLOCKED");
+});
+it("fails closed on committed financial links without their consumed quote or batch parent", () => {
+  const missingQuote = committedBatchGraph();
+  missingQuote["public.OperationQuote"] = [];
+  expect(() =>
+    projectBackupTables(missingQuote, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_BATCH_COMMITMENT_LINK_INVALID");
+  const missingBatch = committedBatchGraph();
+  missingBatch["public.AgencyBatchQuote"] = [];
+  expect(() =>
+    projectBackupTables(missingBatch, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_BATCH_COMMITMENT_LINK_INVALID");
+});
+it("fails closed on a confirmation pair that cannot satisfy the migration CHECK rather than inventing a date", () => {
+  const input = committedBatchGraph();
+  input["public.AgencyBatchQuote"]![0]!.data.confirmationKey = null;
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_BATCH_CONFIRMATION_INVALID");
+});
+it("fails closed on unknown deletion receipt payloads rather than retaining ordinary authored data", () => {
+  const input = deletionGraph();
+  input["lyraseo_deletion.event"]![0]!.data.result = {
+    body: "ERASED_AUTHORED_PAYLOAD",
+  };
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_DELETION_RESULT_CLASSIFICATION_BLOCKED");
+});
+it("fails closed on unclassifiable deletion admission clocks without refreshing them", () => {
+  const input = deletionGraph();
+  input["lyraseo_deletion.scope_case"]![0]!.data.accepted_at = null;
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "RESTORE" }),
+  ).toThrow("BACKUP_DELETION_RECEIPT_CLOCK_INVALID");
+});
+it("fails closed on nonopaque billing event reference payloads while retaining accepted-event identity", () => {
+  const input = billingGraph();
+  input["lyraseo_billing.event"]![0]!.data.references_json = {
+    subscriptionId: "subscription",
+    body: "RAW_BILLING_PAYLOAD",
+  };
+  expect(() =>
+    projectBackupTables(input, { at: projectionClock, phase: "BACKUP" }),
+  ).toThrow("BACKUP_BILLING_REFERENCE_CLASSIFICATION_BLOCKED");
 });
 it("fails closed on unknown current relations and on replay of a pending deletion", () => {
   expect(() =>

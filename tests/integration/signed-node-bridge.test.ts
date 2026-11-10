@@ -1341,6 +1341,7 @@ async function oneHtmlRun(adapter: "browser" | "bridge", html: string) {
     actor,
     { workspaceId: "a", siteId: "a-site", auditId: audit.id },
     source,
+    async () => actor,
   );
   return admin.auditPage.findFirstOrThrow({ where: { auditId: audit.id } });
 }

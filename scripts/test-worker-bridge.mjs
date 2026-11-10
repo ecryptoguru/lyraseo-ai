@@ -6,9 +6,31 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { loopbackOrigin, writeIssuedPins } from "./lib/worker-test-mapper.mjs";
+import { backupTestTarget } from "./lib/backup-test-target.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const container = "lyraseo-phase1-postgres";
+const inspectFormat =
+  '[{"Id":{{json .Id}},"Name":{{json .Name}},"Config":{"Image":{{json .Config.Image}}},"State":{"Running":{{json .State.Running}}},"HostConfig":{"PortBindings":{{json .HostConfig.PortBindings}}},"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}}}}]';
+
+export function workerDatabaseTarget(adminUrl, environment = process.env) {
+  const selected = backupTestTarget(environment);
+  const parsed = new URL(adminUrl);
+  if (
+    /[\r\n\t]/.test(adminUrl) ||
+    parsed.protocol !== "postgresql:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    parsed.port !== String(selected.port) ||
+    parsed.username !== "postgres" ||
+    decodeURIComponent(parsed.password) !== selected.password ||
+    parsed.search ||
+    parsed.hash ||
+    !/^\/lyraseo_worker_[0-9a-f]{32}$/.test(parsed.pathname)
+  )
+    throw Error("OWNED_DISPOSABLE_DATABASE_REQUIRED");
+  return parsed;
+}
+
 export async function runWorkerBridge({
+  environment = process.env,
   command = spawnSync,
   testArgs = [],
   forkProcess = fork,
@@ -17,27 +39,43 @@ export async function runWorkerBridge({
   makePinDirectory = mkdtempSync,
   terminateGroup = (pid, signal) => process.kill(-pid, signal),
 } = {}) {
+  const selected = backupTestTarget(environment);
+  const env = { ...environment };
+  for (const key of Object.keys(env)) if (key.startsWith("PG")) delete env[key];
   function run(cmd, args, options = {}) {
     const result = command(cmd, args, {
       cwd: root,
+      env,
       stdio: "inherit",
       ...options,
     });
-    if (result.status !== 0)
-      throw Error(`Worker harness command failed: ${cmd}`);
+    if (result.error || result.status !== 0)
+      throw Object.assign(Error(`Worker harness command failed: ${cmd}`), {
+        exitCode: result.status ?? 1,
+      });
     return result;
   }
   const inspected = JSON.parse(
-    run("docker", ["inspect", container], { encoding: "utf8", stdio: "pipe" })
-      .stdout,
+    run("docker", ["inspect", "--format", inspectFormat, selected.container], {
+      encoding: "utf8",
+      stdio: "pipe",
+    }).stdout,
   )[0];
+  const validBinding = (bindings) =>
+    Object.keys(bindings ?? {}).length === 1 &&
+    bindings["5432/tcp"]?.length === 1 &&
+    bindings["5432/tcp"][0].HostIp === "127.0.0.1" &&
+    bindings["5432/tcp"][0].HostPort === String(selected.port);
   if (
+    !/^[a-f0-9]{64}$/.test(inspected.Id ?? "") ||
+    inspected.Name !== "/" + selected.container ||
     inspected.Config.Image !== "postgres:17-alpine" ||
-    inspected.HostConfig.PortBindings["5432/tcp"]?.length !== 1 ||
-    inspected.HostConfig.PortBindings["5432/tcp"][0].HostIp !== "127.0.0.1" ||
-    inspected.HostConfig.PortBindings["5432/tcp"][0].HostPort !== "54329"
+    inspected.State?.Running !== true ||
+    !validBinding(inspected.HostConfig?.PortBindings) ||
+    !validBinding(inspected.NetworkSettings?.Ports)
   )
     throw Error("Unexpected disposable DB container");
+  const container = inspected.Id;
   const database = "lyraseo_worker_" + randomUUID().replaceAll("-", "");
   const sql = (statement) =>
     run(
@@ -45,8 +83,15 @@ export async function runWorkerBridge({
       [
         "exec",
         "-i",
+        "--env",
+        "PGPASSWORD",
         container,
         "psql",
+        "-X",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "5432",
         "-U",
         "postgres",
         "-d",
@@ -55,11 +100,16 @@ export async function runWorkerBridge({
         "ON_ERROR_STOP=1",
         "-q",
       ],
-      { input: statement, stdio: ["pipe", "inherit", "inherit"] },
+      {
+        input: statement,
+        stdio: ["pipe", "inherit", "inherit"],
+        env: { ...env, PGPASSWORD: selected.password },
+      },
     );
   let listener, tests;
   let disposeSupervision = () => {};
   let ownsDatabase = false,
+    passed = false,
     pinDirectory,
     pinPath,
     pins;
@@ -92,13 +142,18 @@ export async function runWorkerBridge({
           }
           stopGroup("SIGKILL");
         }
-        if (ownsDatabase) {
-          sql(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
+        if (ownsDatabase && passed) {
+          sql(`DROP DATABASE ${database}`);
           ownsDatabase = false;
+          console.log(`Successful owned worker database removed: ${database}`);
         }
       } finally {
-        if (pinDirectory)
+        if (pinDirectory && passed && !ownsDatabase)
           rmSync(pinDirectory, { recursive: true, force: true });
+        if (ownsDatabase)
+          console.error(
+            `Retained failed owned worker database: ${database}; evidence: ${pinDirectory ?? "no pin directory created"}`,
+          );
       }
     })());
   const signalHandlers = [];
@@ -116,24 +171,32 @@ export async function runWorkerBridge({
     console.log(
       `Reserved disposable database ${database}; canonical lyraseo_test is untouched.`,
     );
-    sql(`CREATE DATABASE ${database}`);
+    sql(`CREATE DATABASE ${database} TEMPLATE template0`);
     ownsDatabase = true;
     mkdirSync(resolve(root, "tmp"), { recursive: true });
     pinDirectory = makePinDirectory(resolve(root, "tmp/worker-carrier-"));
     pinPath = resolve(pinDirectory, "issued-pins.json");
-    const admin = `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${database}`;
+    const admin = `postgresql://postgres:${encodeURIComponent(selected.password)}@127.0.0.1:${selected.port}/${database}`;
+    workerDatabaseTarget(admin, environment);
     run(
       "pnpm",
       ["--filter", "@lyraseo/db", "exec", "prisma", "migrate", "deploy"],
-      { env: { ...process.env, DIRECT_URL: admin } },
+      { env: { ...env, DIRECT_URL: admin } },
     );
     run(
       "docker",
       [
         "exec",
         "-i",
+        "--env",
+        "PGPASSWORD",
         container,
         "psql",
+        "-X",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "5432",
         "-U",
         "postgres",
         "-d",
@@ -143,6 +206,7 @@ export async function runWorkerBridge({
         "-q",
       ],
       {
+        env: { ...env, PGPASSWORD: selected.password },
         input:
           "INSERT INTO lyraseo_kernel.test_environment(database_oid,postmaster_started_at) SELECT oid,pg_catalog.pg_postmaster_start_time() FROM pg_database WHERE datname=current_database();",
         stdio: ["pipe", "inherit", "inherit"],
@@ -186,6 +250,7 @@ export async function runWorkerBridge({
       ["tests/fixtures/runtime/worker-supervisor.ts"],
       {
         cwd: root,
+        env,
         detached: true,
         stdio: ["ignore", "inherit", "inherit", "ipc"],
       },
@@ -265,7 +330,7 @@ export async function runWorkerBridge({
         detached: true,
         stdio: "inherit",
         env: {
-          ...process.env,
+          ...env,
           LYRA_WORKER_BRIDGE: ready.origin,
           LYRA_WORKER_CONTROL: ready.control,
           LYRA_WORKER_SECRET: secret,
@@ -283,7 +348,11 @@ export async function runWorkerBridge({
       }),
     );
     if (failureError) throw failureError;
-    if (status !== 0) throw Error("Workers runtime suite failed");
+    if (status !== 0)
+      throw Object.assign(Error("Workers runtime suite failed"), {
+        exitCode: status ?? 1,
+      });
+    passed = true;
   } finally {
     await cleanup();
     for (const [signal, handler] of signalHandlers)
@@ -293,5 +362,11 @@ export async function runWorkerBridge({
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-)
-  await runWorkerBridge({ testArgs: process.argv.slice(2) });
+) {
+  try {
+    await runWorkerBridge({ testArgs: process.argv.slice(2) });
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = error.exitCode ?? 1;
+  }
+}

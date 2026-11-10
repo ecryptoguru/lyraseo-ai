@@ -105,6 +105,20 @@ it("denies cross-origin mutations before dispatch", async () => {
   expect(response.status).toBe(403);
   expect(mocks.runRawAuditStep).not.toHaveBeenCalled();
 });
+it("binds local audit steps to current actor resolution and request cancellation", async () => {
+  mocks.runRawAuditStep.mockResolvedValue({ id: "audit", status: "QUEUED" });
+  const request = new Request(url, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1:3000" },
+    body: JSON.stringify({ action: "step", ...scope }),
+  });
+  const response = await POST(request);
+  expect(response.status).toBe(200);
+  expect(mocks.runRawAuditStep.mock.calls[0].slice(4)).toEqual([
+    mocks.resolveActor,
+    request.signal,
+  ]);
+});
 it("keeps hosted execution unavailable without runtime qualification", async () => {
   vi.stubEnv("VERCEL", "1");
   const response = await POST(

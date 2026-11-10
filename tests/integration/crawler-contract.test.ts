@@ -73,7 +73,13 @@ it("persists the real HTTP fault matrix through restricted checkpoints and resum
       // New pools model process restarts rather than relying on in-memory rows.
       const restarted = createDatabase(runtimeUrl);
       try {
-        await runRawAuditStep(restarted, actor, resource, site.transport);
+        await runRawAuditStep(
+          restarted,
+          actor,
+          resource,
+          site.transport,
+          async () => actor,
+        );
       } finally {
         await restarted.$disconnect();
       }
@@ -124,7 +130,7 @@ it("persists the real HTTP fault matrix through restricted checkpoints and resum
     );
     const requests = site.requests.length;
     await expect(
-      runRawAuditStep(db, actor, resource, site.transport),
+      runRawAuditStep(db, actor, resource, site.transport, async () => actor),
     ).rejects.toThrow("AUDIT_TERMINAL");
     expect(site.requests).toHaveLength(requests);
   } finally {
@@ -153,6 +159,7 @@ it("compares persisted fixed, removed and unreadable pages without promoting mis
         actor,
         { ...scope, auditId: run.id },
         site.transport,
+        async () => actor,
       );
     return run.id;
   };

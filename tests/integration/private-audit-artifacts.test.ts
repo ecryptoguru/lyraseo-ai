@@ -103,7 +103,13 @@ afterAll(() => Promise.all([db.$disconnect(), admin.$disconnect()]));
 it("persists scoped compact pages, P1 clocks and original bytes; scores the same two observations after a restart", async () => {
   const scope = await create();
   bindLocalArtifactStore(db, faultAfterMutation(store, "put"), authority);
-  const first = await runRawAuditStep(db, actor, scope, transport);
+  const first = await runRawAuditStep(
+    db,
+    actor,
+    scope,
+    transport,
+    async () => actor,
+  );
   expect(first).toMatchObject({
     status: "QUEUED",
     pages: [{ sourceAvailability: "current" }],
@@ -130,7 +136,15 @@ it("persists scoped compact pages, P1 clocks and original bytes; scores the same
     ).toBe("unavailable");
     bindLocalArtifactStore(restarted, restartedStore, authority);
     expect(
-      (await runRawAuditStep(restarted, actor, scope, transport)).status,
+      (
+        await runRawAuditStep(
+          restarted,
+          actor,
+          scope,
+          transport,
+          async () => actor,
+        )
+      ).status,
     ).toBe("COMPLETED");
   } finally {
     await restartedStore.close();
@@ -307,7 +321,7 @@ it("rejects changed content in a reserved slot, never downgrades a selected chec
 });
 it("rechecks authorization after object I/O and before delivery", async () => {
   const scope = await create();
-  await runRawAuditStep(db, actor, scope, transport);
+  await runRawAuditStep(db, actor, scope, transport, async () => actor);
   bindLocalArtifactStore(
     db,
     {
@@ -386,10 +400,16 @@ it("expires active facts before further acquisition and bounds scratch cleanup",
   );
   let hops = 0;
   await expect(
-    runRawAuditStep(db, actor, scope, async (u) => {
-      hops++;
-      return transport(u);
-    }),
+    runRawAuditStep(
+      db,
+      actor,
+      scope,
+      async (u) => {
+        hops++;
+        return transport(u);
+      },
+      async () => actor,
+    ),
   ).rejects.toThrow(/SOURCE_EXPIRED/);
   expect(hops).toBe(0);
   expect(await admin.artifactRef.count()).toBe(1);
@@ -556,14 +576,20 @@ it("round1 browser rejects reserving the second page before any object exists", 
 });
 it("round1 retired acquired input prevents a second browser fetch or score", async () => {
   const scope = await create();
-  await runRawAuditStep(db, actor, scope, transport);
+  await runRawAuditStep(db, actor, scope, transport, async () => actor);
   await admin.artifactBlob.updateMany({ data: { state: "ORPHAN" } });
   let hops = 0;
   await expect(
-    runRawAuditStep(db, actor, scope, async (u) => {
-      hops++;
-      return transport(u);
-    }),
+    runRawAuditStep(
+      db,
+      actor,
+      scope,
+      async (u) => {
+        hops++;
+        return transport(u);
+      },
+      async () => actor,
+    ),
   ).rejects.toThrow(/SOURCE_EXPIRED/);
   expect(hops).toBe(0);
   expect(await admin.auditPage.count()).toBe(1);
@@ -576,7 +602,7 @@ it.each(["wrong", "truncated"])(
   "round1 attachment rejects %s backend bytes after a valid ticket",
   async (fault) => {
     const scope = await create();
-    await runRawAuditStep(db, actor, scope, transport);
+    await runRawAuditStep(db, actor, scope, transport, async () => actor);
     bindLocalArtifactStore(db, {
       ...store,
       async openBounded(v) {
@@ -594,16 +620,16 @@ it.each(["wrong", "truncated"])(
 
 it("round1 retirement during browser terminal publication rolls back the last page and score", async () => {
   const scope = await create();
-  await runRawAuditStep(db, actor, scope, transport);
+  await runRawAuditStep(db, actor, scope, transport, async () => actor);
   await admin.$executeRawUnsafe(`CREATE FUNCTION p2a1_retire_at_finish() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
  BEGIN UPDATE public."ArtifactBlob" SET state='ORPHAN' WHERE "auditId"=NEW.id AND "requestedUrl"='https://example.com/';RETURN NEW;END $$`);
   try {
     await admin.$executeRawUnsafe(
       `CREATE TRIGGER p2a1_retirement AFTER UPDATE OF status ON "AuditRun" FOR EACH ROW WHEN(NEW.status='COMPLETED') EXECUTE FUNCTION p2a1_retire_at_finish()`,
     );
-    await expect(runRawAuditStep(db, actor, scope, transport)).rejects.toThrow(
-      /SOURCE_EXPIRED/,
-    );
+    await expect(
+      runRawAuditStep(db, actor, scope, transport, async () => actor),
+    ).rejects.toThrow(/SOURCE_EXPIRED/);
     expect(await admin.auditPage.count()).toBe(1);
     expect(await admin.artifactRef.count()).toBe(1);
     expect(
@@ -620,9 +646,9 @@ it("round1 retirement during browser terminal publication rolls back the last pa
 it("round1 replacing a qualified backend cannot inherit its signing authority", async () => {
   const scope = await create();
   bindLocalArtifactStore(db, { ...store });
-  await expect(runRawAuditStep(db, actor, scope, transport)).rejects.toThrow(
-    "ARTIFACT_UNAVAILABLE",
-  );
+  await expect(
+    runRawAuditStep(db, actor, scope, transport, async () => actor),
+  ).rejects.toThrow("ARTIFACT_UNAVAILABLE");
   expect(await admin.auditPage.count()).toBe(0);
   expect(await admin.artifactBlob.count()).toBe(0);
 });
@@ -634,9 +660,9 @@ it("round1 the attestor checks actual returned object bytes before issuing publi
     localArtifactFaultFacade(store, { readMutation: "zeros" }),
     authority,
   );
-  await expect(runRawAuditStep(db, actor, scope, transport)).rejects.toThrow(
-    "ARTIFACT_UNAVAILABLE",
-  );
+  await expect(
+    runRawAuditStep(db, actor, scope, transport, async () => actor),
+  ).rejects.toThrow("ARTIFACT_UNAVAILABLE");
   expect(await admin.artifactBlob.count({ where: { state: "STAGED" } })).toBe(
     1,
   );

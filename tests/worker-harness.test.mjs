@@ -11,11 +11,43 @@ import {
   readIssuedPins,
   writeIssuedPins,
 } from "../scripts/lib/worker-test-mapper.mjs";
-import { runWorkerBridge } from "../scripts/test-worker-bridge.mjs";
+import {
+  runWorkerBridge,
+  workerDatabaseTarget,
+} from "../scripts/test-worker-bridge.mjs";
 const bridge = "http://127.0.0.1:42001",
   control = "http://127.0.0.1:42002";
 const issued = { version: 1, bridge, control };
 const path = "/api/internal/runtime/dispatch";
+const disposableEnvironment = {
+  LYRA_BACKUP_TEST_CONTAINER: "lyraseo-disposable-20261107-123bf4ff",
+  LYRA_BACKUP_TEST_PORT: "54335",
+  LYRA_BACKUP_TEST_ADMIN_PASSWORD: "lyraseo_disposable_123bf4ff",
+};
+const containerId = "c".repeat(64);
+function inspectedContainer() {
+  return {
+    Id: containerId,
+    Name: "/lyraseo-phase1-postgres",
+    Config: { Image: "postgres:17-alpine" },
+    State: { Running: true },
+    HostConfig: {
+      PortBindings: {
+        "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "54329" }],
+      },
+    },
+    NetworkSettings: {
+      Ports: { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "54329" }] },
+    },
+  };
+}
+function disposableContainer() {
+  const inspected = inspectedContainer();
+  inspected.Name = "/lyraseo-disposable-20261107-123bf4ff";
+  inspected.HostConfig.PortBindings["5432/tcp"][0].HostPort = "54335";
+  inspected.NetworkSettings.Ports["5432/tcp"][0].HostPort = "54335";
+  return inspected;
+}
 function fixture(overrides = {}) {
   const calls = [];
   let pins = { ...issued };
@@ -128,21 +160,13 @@ test("round1 failed CREATE does not drop candidate database", async () => {
   const commands = [];
   await assert.rejects(() =>
     runWorkerBridge({
+      environment: {},
       command: (_cmd, args, options) => {
         commands.push({ args, input: options?.input });
         if (args[0] === "inspect")
           return {
             status: 0,
-            stdout: JSON.stringify([
-              {
-                Config: { Image: "postgres:17-alpine" },
-                HostConfig: {
-                  PortBindings: {
-                    "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "54329" }],
-                  },
-                },
-              },
-            ]),
+            stdout: JSON.stringify([inspectedContainer()]),
           };
         if (options?.input?.startsWith("CREATE DATABASE")) return { status: 1 };
         return { status: 0 };
@@ -366,12 +390,17 @@ for (const kind of ["non-ok", "encoded", "wrong-content-type"])
     );
     assert.deepEqual(calls, [control + "/restart", bridge + path]);
   });
-function simulatedSupervisor(failure) {
+function simulatedSupervisor(
+  failure,
+  environment = {},
+  inspected = inspectedContainer(),
+) {
   const commands = [],
     terminated = [],
     directories = [],
     escaped = [],
-    children = [];
+    children = [],
+    configurations = [];
   let publications = 0;
   const child = (pid) => {
     const value = new EventEmitter();
@@ -399,6 +428,7 @@ function simulatedSupervisor(failure) {
     }
   };
   listener.send = (message, callback) => {
+    if (message.secret) configurations.push(message);
     if (failure === "configure-send" && message.secret)
       throw Error("INJECTED_IPC_FAILURE");
     if (failure === "configure-async-send" && message.secret) {
@@ -434,21 +464,18 @@ function simulatedSupervisor(failure) {
     return true;
   };
   const options = {
-    command: (_command, args, settings) => {
-      commands.push({ args, input: settings?.input });
+    environment,
+    command: (command, args, settings) => {
+      commands.push({
+        command,
+        args,
+        input: settings?.input,
+        env: settings?.env,
+      });
       if (args[0] === "inspect")
         return {
           status: 0,
-          stdout: JSON.stringify([
-            {
-              Config: { Image: "postgres:17-alpine" },
-              HostConfig: {
-                PortBindings: {
-                  "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "54329" }],
-                },
-              },
-            },
-          ]),
+          stdout: JSON.stringify([inspected]),
         };
       return { status: 0 };
     },
@@ -466,12 +493,24 @@ function simulatedSupervisor(failure) {
         throw Error("INJECTED_PIN_FAILURE");
       writeIssuedPins(path, pins);
     },
-    forkProcess: () => {
+    forkProcess: (_cli, _args, settings) => {
+      commands.push({ command: "fork", args: [], env: settings.env });
       setImmediate(() => dispatch({ event: "configure" }));
       return listener;
     },
     spawnProcess: () => {
       tests = child(62002);
+      if (failure === "success") {
+        setImmediate(() => finish(tests));
+        return tests;
+      }
+      if (failure === "test-exit") {
+        setImmediate(() => {
+          tests.exitCode = 19;
+          tests.emit("exit", 19, null);
+        });
+        return tests;
+      }
       setImmediate(() =>
         dispatch({
           event: "restart-pin",
@@ -489,7 +528,15 @@ function simulatedSupervisor(failure) {
       if (value) finish(value, signal);
     },
   };
-  return { options, commands, terminated, directories, escaped, children };
+  return {
+    options,
+    commands,
+    terminated,
+    directories,
+    escaped,
+    children,
+    configurations,
+  };
 }
 for (const failure of [
   "startup-authorization",
@@ -524,18 +571,15 @@ for (const failure of [
     );
     const created = fixture.commands
       .filter((command) => command.input?.startsWith("CREATE DATABASE"))
-      .map((command) => command.input.slice("CREATE DATABASE ".length));
+      .map((command) => command.input.match(/^CREATE DATABASE (\w+)/)[1]);
     const dropped = fixture.commands
       .filter((command) => command.input?.startsWith("DROP DATABASE"))
-      .map(
-        (command) =>
-          command.input.match(/^DROP DATABASE IF EXISTS (\w+) WITH/)[1],
-      );
+      .map((command) => command.input);
     assert.equal(created.length, 1);
-    assert.deepEqual(dropped, created);
+    assert.deepEqual(dropped, []);
     assert.equal(fixture.directories.length, 1);
     for (const directory of fixture.directories)
-      assert.equal(existsSync(directory), false);
+      assert.equal(existsSync(directory), true);
     for (const child of fixture.children) {
       assert.equal(
         fixture.terminated.some(
@@ -547,4 +591,187 @@ for (const failure of [
       assert.equal(child.listenerCount("error"), 0);
       assert.equal(child.listenerCount("exit"), 0);
     }
+    for (const directory of fixture.directories)
+      rmSync(directory, { recursive: true, force: true });
   });
+
+test("worker bridge selects the approved disposable endpoint and never falls back to shared defaults", async () => {
+  const fixture = simulatedSupervisor(
+    "configure-send",
+    disposableEnvironment,
+    disposableContainer(),
+  );
+  try {
+    await assert.rejects(
+      () => runWorkerBridge(fixture.options),
+      /INJECTED_IPC_FAILURE/,
+    );
+    assert.equal(
+      fixture.commands[0].args.at(-1),
+      "lyraseo-disposable-20261107-123bf4ff",
+    );
+    assert.equal(
+      fixture.commands
+        .filter((entry) => entry.args[0] === "exec")
+        .every((entry) => entry.args.includes(containerId)),
+      true,
+    );
+    const admin = fixture.configurations[0].admin;
+    assert.match(
+      admin,
+      /^postgresql:\/\/postgres:lyraseo_disposable_123bf4ff@127\.0\.0\.1:54335\/lyraseo_worker_[a-f0-9]{32}$/,
+    );
+    assert.equal(
+      fixture.commands.find((entry) => entry.command === "pnpm").env.DIRECT_URL,
+      admin,
+    );
+    assert.equal(
+      fixture.commands.find((entry) => entry.command === "fork").env
+        .LYRA_BACKUP_TEST_PORT,
+      "54335",
+    );
+    assert.equal(
+      fixture.commands.filter((entry) =>
+        entry.input?.startsWith("DROP DATABASE"),
+      ).length,
+      0,
+    );
+  } finally {
+    for (const directory of fixture.directories)
+      rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+for (const unsafe of [
+  "stopped",
+  "runtime-binding",
+  "configured-binding",
+  "wrong-id",
+]) {
+  test(`worker bridge refuses ${unsafe} before creating a database`, async () => {
+    const inspected = inspectedContainer();
+    if (unsafe === "stopped") inspected.State.Running = false;
+    if (unsafe === "runtime-binding")
+      inspected.NetworkSettings.Ports["5432/tcp"][0].HostIp = "0.0.0.0";
+    if (unsafe === "configured-binding")
+      inspected.HostConfig.PortBindings["5432/tcp"][0].HostIp = "0.0.0.0";
+    if (unsafe === "wrong-id") inspected.Id = "not-a-container-id";
+    const fixture = simulatedSupervisor("configure-send", {}, inspected);
+    try {
+      await assert.rejects(
+        () => runWorkerBridge(fixture.options),
+        /Unexpected disposable DB container/,
+      );
+      assert.equal(
+        fixture.commands.some((entry) =>
+          entry.input?.startsWith("CREATE DATABASE"),
+        ),
+        false,
+      );
+    } finally {
+      for (const directory of fixture.directories)
+        rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("worker bridge preserves a raw child failure exit and retains its owned database", async () => {
+  const fixture = simulatedSupervisor("test-exit");
+  try {
+    await assert.rejects(
+      () => runWorkerBridge(fixture.options),
+      (error) => error.exitCode === 19,
+    );
+    assert.equal(
+      fixture.commands.some((entry) =>
+        entry.input?.startsWith("DROP DATABASE"),
+      ),
+      false,
+    );
+  } finally {
+    for (const directory of fixture.directories)
+      rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("successful worker bridge owns a template0 database and cleans only that resource", async () => {
+  const fixture = simulatedSupervisor("success");
+  try {
+    await runWorkerBridge(fixture.options);
+    const created = fixture.commands.find((entry) =>
+      entry.input?.startsWith("CREATE DATABASE"),
+    ).input;
+    assert.match(
+      created,
+      /^CREATE DATABASE lyraseo_worker_[a-f0-9]{32} TEMPLATE template0$/,
+    );
+    const name = created.match(/^CREATE DATABASE (\w+)/)[1];
+    assert.deepEqual(
+      fixture.commands
+        .filter((entry) => entry.input?.startsWith("DROP DATABASE"))
+        .map((entry) => entry.input),
+      [`DROP DATABASE ${name}`],
+    );
+    assert.equal(
+      fixture.directories.every((directory) => !existsSync(directory)),
+      true,
+    );
+  } finally {
+    for (const directory of fixture.directories)
+      rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("supervisor accepts only the environment-selected local port and owned worker database", () => {
+  const name = "lyraseo_worker_" + "a".repeat(32);
+  assert.equal(
+    workerDatabaseTarget(
+      `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${name}`,
+      {},
+    ).port,
+    "54329",
+  );
+  const parsed = workerDatabaseTarget(
+    `postgresql://postgres:lyraseo_disposable_123bf4ff@127.0.0.1:54335/${name}`,
+    disposableEnvironment,
+  );
+  assert.equal(parsed.port, "54335");
+  assert.equal(parsed.pathname, "/" + name);
+  assert.throws(
+    () =>
+      workerDatabaseTarget(
+        `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${name}`,
+        disposableEnvironment,
+      ),
+    /OWNED_DISPOSABLE_DATABASE_REQUIRED/,
+  );
+});
+
+for (const candidate of [
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@127.0.0.1:54335/lyraseo_test",
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@127.0.0.1:54336/lyraseo_worker_" +
+    "a".repeat(32),
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@remote.invalid:54335/lyraseo_worker_" +
+    "a".repeat(32),
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@localhost:54335/lyraseo_worker_" +
+    "a".repeat(32),
+  "postgresql://lyraseo_dispatch:local_dispatch_only@127.0.0.1:54335/lyraseo_worker_" +
+    "a".repeat(32),
+  "postgresql://postgres:wrong_admin_password@127.0.0.1:54335/lyraseo_worker_" +
+    "a".repeat(32),
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@127.0.0.1:54335/lyraseo_worker_" +
+    "a".repeat(32) +
+    "?host=remote.invalid",
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@127.0.0.1:54335/lyraseo_worker_" +
+    "a".repeat(32) +
+    "#fragment",
+  "postgresql://postgres:lyraseo_disposable_123bf4ff@127.0.0.1:54335/lyraseo_worker_" +
+    "a".repeat(31),
+]) {
+  test(`supervisor rejects unowned/redirected database target ${candidate.replace(/:[^:@/]+@/, ":<redacted>@")}`, () => {
+    assert.throws(
+      () => workerDatabaseTarget(candidate, disposableEnvironment),
+      /OWNED_DISPOSABLE_DATABASE_REQUIRED/,
+    );
+  });
+}

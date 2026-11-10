@@ -40,6 +40,12 @@ jobs:
       - name: Required real HTTP crawler contract matrix
         run: pnpm test:crawler
       - run: pnpm test:integration
+      - name: Required current-schema backup security catalog gate
+        run: node scripts/test-current-backup-catalog.mjs
+      - name: Required projected backup foreign-key integrity gate
+        run: node scripts/test-backup-integrity.mjs
+      - name: Required isolated baseline encrypted backup and journal replay gate
+        run: pnpm test:full-backup
       - name: Required legacy visibility retention gate
         run: pnpm test:legacy-visibility-retention
       - name: Required legacy inline evidence and authorization gate
@@ -63,8 +69,6 @@ jobs:
         run: pnpm test:sandbox-billing
       - name: Required local retention and deletion recovery gate
         run: pnpm test:history-retention
-      - name: Required isolated baseline encrypted backup and journal replay gate
-        run: pnpm test:full-backup
       - name: Real Workers carrier and signed Node bridge
         run: pnpm test:worker
       - name: Required signed handoff carrier replay and timeout gate

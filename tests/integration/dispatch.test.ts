@@ -868,10 +868,16 @@ it("rejects browser execution of a controlled audit before claim or transport an
   const scope = { workspaceId: "a", siteId: "a-site", auditId: work.auditId! };
   let calls = 0;
   await expect(
-    runRawAuditStep(web, actor, scope, async () => {
-      calls++;
-      throw new Error("fixture transport");
-    }),
+    runRawAuditStep(
+      web,
+      actor,
+      scope,
+      async () => {
+        calls++;
+        throw new Error("fixture transport");
+      },
+      async () => actor,
+    ),
   ).rejects.toThrow("FORBIDDEN");
   expect(calls).toBe(0);
   expect(

@@ -34,6 +34,7 @@ const { readFile, writeFile, unlink, readdir } =
 const { resolve, join } = await import("node:path");
 const { fileURLToPath } = await import("node:url");
 const assert = (await import("node:assert/strict")).default;
+const { isDeepStrictEqual } = await import("node:util");
 const root = resolve(fileURLToPath(new URL("..", import.meta.url))),
   profilePath = join(root, "tests/fixtures/backup/current-39-catalog.json");
 if (
@@ -156,10 +157,18 @@ try {
   } else {
     const registered = JSON.parse(await readFile(profilePath, "utf8"));
     for (const key of Object.keys(profile)) {
-      if (JSON.stringify(profile[key]) !== JSON.stringify(registered[key]))
-        throw new Error(
-          `known 39-catalog fingerprint differs in ${key}: live ${profile[key].length} vs registered ${registered[key]?.length}`,
-        );
+      if (!isDeepStrictEqual(profile[key], registered[key])) {
+        receipt.catalogMismatch = {
+          section: key,
+          actualCount: profile[key].length,
+          expectedCount: registered[key]?.length ?? null,
+          firstDifferingIndex: profile[key].findIndex(
+            (entry, index) =>
+              !isDeepStrictEqual(entry, registered[key]?.[index]),
+          ),
+        };
+        throw new Error("FULL_BACKUP_REGISTERED_CATALOG_MISMATCH");
+      }
     }
     assert.deepEqual(profile, registered);
     const admin = createDatabase(lab.url(source)),
@@ -412,6 +421,7 @@ try {
           reservedCost: "0.020000001",
           actualCost: complete ? "0.010000001" : null,
           status: complete ? "COMPLETED" : "RECONCILING",
+          createdAt: new Date(+now - 540000),
           expiresAt: new Date(+now + 3600000),
           settledAt: complete ? now : null,
           attemptState: complete ? "ACCEPTED" : "INTENT",
@@ -458,6 +468,66 @@ try {
         })),
       ],
     });
+    // Populated recovery graphs, not empty table-count or live-provider claims.
+    phase = "seed-populated-recovery-graphs";
+    const batchCreated = new Date(+now - 600000),
+      batchExpiry = new Date(+now - 480000),
+      batchConfirmed = new Date(+now - 540000);
+    await admin.operationQuote.create({
+      data: {
+        id: "backup-batch-quote",
+        workspaceId: "backup-alpha",
+        siteId: "backup-delete",
+        userId: actor.userId,
+        kind: "API_OBSERVATION",
+        provider: "AZURE",
+        route: "SYNTHETIC_BACKUP",
+        inputHash: "synthetic",
+        requestInput: { private: rawMarker },
+        maximumCost: "0.020000001",
+        tariffVersion: "SYNTHETIC_NOT_PROVIDER_BILLING",
+        securityVersion: 0,
+        createdAt: batchCreated,
+        expiresAt: batchExpiry,
+        consumedOperationId: settled,
+      },
+    });
+    const batchPreview = {
+      batchQuoteId: "backup-batch",
+      expiresAt: batchExpiry.toISOString(),
+      inputHash: "a".repeat(64),
+      currency: "USD",
+      budgetOwnerId: actor.userId,
+      unavailable: false,
+      combinedMaximum: "0.020000001",
+      totalsByProvider: { AZURE: "0.020000001" },
+      items: [
+        {
+          siteId: "backup-delete",
+          ordinal: 0,
+          quoteId: "backup-batch-quote",
+          maximumCost: "0.020000001",
+          provider: "AZURE",
+          tariffVersion: "SYNTHETIC_NOT_PROVIDER_BILLING",
+          status: "QUOTED",
+          errorCode: null,
+        },
+      ],
+    };
+    await admin.$executeRaw`INSERT INTO "AgencyBatchQuote"(id,"workspaceId","userId","securityVersion","requestInput","inputHash","confirmationHash",preview,"createdAt","expiresAt","confirmedAt","confirmationKey") VALUES('backup-batch','backup-alpha',${actor.userId},0,'{}','synthetic','synthetic',${JSON.stringify(batchPreview)}::jsonb,${batchCreated},${batchExpiry},${batchConfirmed},'backup-batch-confirmation')`;
+    await admin.$executeRaw`INSERT INTO "AgencyBatchItem"("batchQuoteId","workspaceId","userId","siteId",ordinal,"quoteId","operationId",status) VALUES('backup-batch','backup-alpha',${actor.userId},'backup-delete',0,'backup-batch-quote',${settled},'ADMITTED')`;
+    const billingGraph = await lab.connect(source);
+    try {
+      await billingGraph.query(`INSERT INTO lyraseo_billing.merchant(provider,merchant_id) VALUES('RAZORPAY','synthetic-backup');
+        INSERT INTO lyraseo_billing.account(id,workspace_id) VALUES('00000000-0000-4000-8000-000000000301','backup-alpha');
+        INSERT INTO lyraseo_billing.binding(provider,merchant_id,resource_id,customer_id,account_id) VALUES('RAZORPAY','synthetic-backup','synthetic-resource','synthetic-customer','00000000-0000-4000-8000-000000000301');
+        INSERT INTO lyraseo_billing.event(id,provider,merchant_id,external_id,payload_hash,key_version,event_type,resource_id,account_id,references_json,occurred_at,contract,collision)
+          VALUES('00000000-0000-4000-8000-000000000302','RAZORPAY','synthetic-backup','synthetic-event',repeat('a',64),'synthetic','subscription.updated','synthetic-resource','00000000-0000-4000-8000-000000000301','{"accountVerified":true}',now(),'SYNTHETIC_BACKUP_ONLY',false);
+        INSERT INTO lyraseo_billing.discovery(event_id,state) VALUES('00000000-0000-4000-8000-000000000302','PENDING');
+        INSERT INTO lyraseo_billing.inbox(provider,merchant_id,resource_id,state,token,lease_until,fence) VALUES('RAZORPAY','synthetic-backup','synthetic-resource','READING',gen_random_uuid(),now()+interval '1 minute',3);`);
+    } finally {
+      await lab.close(billingGraph);
+    }
     phase = "financial-source-invariants";
     const financialBefore =
       await admin.$queryRaw`SELECT id,"reservedCost"::text reserved,"actualCost"::text actual,status,fence,"attemptState","providerTaskId","createdAt","settledAt" FROM "Operation" ORDER BY id`;
@@ -550,6 +620,39 @@ try {
     );
     const restoredAdmin = createDatabase(lab.url(restored.handle));
     prisma.push(restoredAdmin);
+    phase = "verify-populated-recovery-graphs";
+    assert.deepEqual(
+      await restoredAdmin.$queryRaw`SELECT "operationId",status FROM "AgencyBatchItem" WHERE "batchQuoteId"='backup-batch'`,
+      [{ operationId: settled, status: "ADMITTED" }],
+    );
+    assert.deepEqual(
+      await restoredAdmin.$queryRaw`SELECT "confirmedAt","confirmationKey" FROM "AgencyBatchQuote" WHERE id='backup-batch'`,
+      [
+        {
+          confirmedAt: batchConfirmed,
+          confirmationKey: "backup-batch-confirmation",
+        },
+      ],
+    );
+    assert.deepEqual(
+      await restoredAdmin.$queryRaw`SELECT state,token,"lease_until" AS lease,"next_at"::text AS next FROM lyraseo_billing.inbox`,
+      [{ state: "READING", token: null, lease: null, next: "infinity" }],
+    );
+    assert.deepEqual(
+      await restoredAdmin.$queryRaw`SELECT state,next_at::text AS next FROM lyraseo_billing.discovery`,
+      [{ state: "PENDING", next: "infinity" }],
+    );
+    for (const table of [
+      "lyraseo_billing.event",
+      "lyraseo_billing.binding",
+      "lyraseo_billing.account",
+      "public.AgencyBatchItem",
+      "public.AgencyBatchQuote",
+    ])
+      assert.equal(restored.counts[table], 1, `populated graph lost: ${table}`);
+    done(
+      "populated billing queues and expired committed batch survive deletion replay; claims remain quarantined and FKs validate",
+    );
     phase = "assert-original-financial-facts";
     assert.deepEqual(
       await restoredAdmin.$queryRaw`SELECT id,"reservedCost"::text reserved,"actualCost"::text actual,status,fence,"attemptState","providerTaskId","createdAt","settledAt" FROM "Operation" ORDER BY id`,

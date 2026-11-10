@@ -1,5 +1,7 @@
 # Phase-one local delivery evidence
 
+> Historical checkpoint recorded on 2026-11-07. For the 2026-11-10 review, fixes, fresh receipts and remaining implementation, see [final-review findings](./phase-one-final-review-findings.md). Neither this checkpoint nor passing fixture tests establishes pilot completion.
+
 This document records implementation and verification separately from release acceptance. The scope is the private pilot in the approved phase-one plan. Phase two is not part of the current work.
 
 The integration branch starts from `21c33b2413a7f1b627ee59bc9f79f2129e676af2`. At that baseline, the associated draft pull request's push and pull-request verification runs both passed. The subsequent integration changes described here have not yet passed final combined CI or been deployed.

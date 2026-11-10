@@ -58,6 +58,14 @@ function barrier() {
   return { promise, release };
 }
 async function captured(selected = db) {
+  if (selected === legacy) {
+    // The controlled legacy receipt clock is shifted back below. Its site proof
+    // must precede that clock too; never relax the real future-proof guard.
+    await admin.site.update({
+      where: { workspaceId_id: { workspaceId: "a", id: "a-site" } },
+      data: { verifiedAt: new Date(Date.now() - 2000) },
+    });
+  }
   const run = await createAuditRun(selected, actor, {
     workspaceId: "a",
     siteId: "a-site",
@@ -70,7 +78,7 @@ async function captured(selected = db) {
   if (selected === legacy) vi.useFakeTimers({ toFake: ["Date"] });
   try {
     if (selected === legacy) vi.setSystemTime(Date.now() - 1000);
-    await runRawAuditStep(selected, actor, scope, transport);
+    await runRawAuditStep(selected, actor, scope, transport, async () => actor);
   } finally {
     vi.useRealTimers();
   }

@@ -1,18 +1,10 @@
 import { createDatabase } from "../../packages/db/src";
-// Focused migration work can reserve an independently created local fixture DB.
-const ownedName = process.env.LYRA_TEST_DB_NAME;
-if (
-  ownedName &&
-  !/^(?:lyraseo_p2a[12]|lyraseo_origin|lyraseo_agency|lyraseo_ledger|lyraseo_recovery)_[a-f0-9]{12}$|^lyraseo_expiry_[a-f0-9]{8,12}$|^lyraseo_legacy_[a-f0-9]{12}$/.test(
-    ownedName,
-  )
-)
-  throw Error("INVALID_LOCAL_TEST_DATABASE");
-const databaseName = ownedName ?? "lyraseo_test";
-export const adminUrl = `postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/${databaseName}`;
-export const runtimeUrl = `postgresql://lyraseo_runtime:local_runtime_only@127.0.0.1:54329/${databaseName}`;
-export const identityUrl = `postgresql://lyraseo_identity:local_identity_only@127.0.0.1:54329/${databaseName}`;
+import { testDatabaseTarget } from "./test-database-target";
+// Import-only consumers keep their read URLs; mutation always requires ownership.
+const target = testDatabaseTarget();
+export const { adminUrl, runtimeUrl, identityUrl } = target;
 export async function resetDatabase() {
+  if (!target.owned) throw Error("OWNED_LOCAL_TEST_DATABASE_REQUIRED");
   const db = createDatabase(adminUrl);
   try {
     await db.$executeRawUnsafe(
@@ -23,6 +15,7 @@ export async function resetDatabase() {
   }
 }
 export async function seedTenants() {
+  if (!target.owned) throw Error("OWNED_LOCAL_TEST_DATABASE_REQUIRED");
   const db = createDatabase(adminUrl);
   try {
     await db.productUser.createMany({

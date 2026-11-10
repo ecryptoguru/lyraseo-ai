@@ -26,7 +26,9 @@ pnpm test:e2e
 pnpm build
 ```
 
-`db:local` requires a running Docker daemon. It creates/reuses only `lyraseo-phase1-postgres`, a local PostgreSQL 17 test container at port 54329, applies the Prisma migration and provisions a restricted test role. Credentials in the script/tests are disposable local-only values. Integration tests reset only the fixed local `lyraseo_test` database; do not change them to point at customer/cloud data. Stop local resources with `docker stop lyraseo-phase1-postgres`; no automatic database deletion occurs.
+`db:local` requires Docker and targets the fixed `lyraseo-phase1-postgres` cluster at port 54329, applying migrations and cluster-wide role setup. Use it only on a fresh or separately qualified test cluster; do not restart or migrate existing/shared state blindly. `test:integration` verifies the running local container and roles, creates a randomly named owned database from `template0`, and resets only that database—not `lyraseo_test`. It drops successful owned runs and retains failed databases plus ignored raw receipts under `output/integration-owned/`.
+
+For a separately created disposable cluster, supply `LYRA_TEST_DB_CONTAINER`, `LYRA_TEST_DB_HOST_PORT` and `LYRA_TEST_DB_ADMIN_PASSWORD` privately. The runner accepts only validated loopback test containers; it does not start containers or repair roles. Backup/worker rehearsal equivalents use the corresponding `LYRA_BACKUP_TEST_CONTAINER`, `LYRA_BACKUP_TEST_PORT` and `LYRA_BACKUP_TEST_ADMIN_PASSWORD` settings. Never target customer/cloud databases or put real credentials in source control. No volume pruning or shared-database reset is part of these commands.
 
 A new machine may need `pnpm --filter @lyraseo/web exec playwright install chromium` for browser tests. Tests cover desktop/mobile interactions and bounded automated accessibility checks; these are not a full accessibility-conformance claim. Generated Prisma client files are reproduced by `db:local` and excluded from source tracking. For a plain type check after a fresh checkout without Docker, run `pnpm --filter @lyraseo/db exec prisma generate` first.
 

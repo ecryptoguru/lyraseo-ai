@@ -316,6 +316,7 @@ it("uses the official SDK client for initialization, tool discovery and real sta
         actor,
         { ...scope, auditId: fresh.id },
         fixture.transport,
+        async () => actor,
       );
       const v2 = await client.callTool({
         name: "lyraseo_read_audit",

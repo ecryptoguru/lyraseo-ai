@@ -8,7 +8,7 @@
     "check": "pnpm --filter @lyraseo/web lint && pnpm -r typecheck",
     "test:unit": "vitest run tests/unit",
     "test:crawler": "vitest run tests/crawler",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "node scripts/test-integration-owned.mjs",
     "test:legacy-visibility-retention": "node scripts/test-legacy-visibility-retention.mjs",
     "test:legacy-inline": "node scripts/test-legacy-inline.mjs",
     "test:legacy-report-role-isolation": "node scripts/test-legacy-report-role-isolation.mjs",
