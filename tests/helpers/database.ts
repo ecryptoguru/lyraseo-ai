@@ -1,19 +1,21 @@
 import { createDatabase } from "../../packages/db/src";
-export const adminUrl =
-  "postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/lyraseo_test";
-export const runtimeUrl =
-  "postgresql://lyraseo_runtime:local_runtime_only@127.0.0.1:54329/lyraseo_test";
+import { testDatabaseTarget } from "./test-database-target";
+// Import-only consumers keep their read URLs; mutation always requires ownership.
+const target = testDatabaseTarget();
+export const { adminUrl, runtimeUrl, identityUrl } = target;
 export async function resetDatabase() {
+  if (!target.owned) throw Error("OWNED_LOCAL_TEST_DATABASE_REQUIRED");
   const db = createDatabase(adminUrl);
   try {
     await db.$executeRawUnsafe(
-      'TRUNCATE TABLE "ProductUser", "Workspace", "StaffGrant", "StepUpGrant", "BudgetPeriod", "ProductSession" CASCADE',
+      'TRUNCATE TABLE lyraseo_origin.blob_store_binding,lyraseo_origin.store_namespace,lyraseo_origin.source_store_key,lyraseo_origin.store_registration,"ProductUser", "Workspace", "StaffGrant", "StepUpGrant", "BudgetPeriod", "ProductSession" CASCADE',
     );
   } finally {
     await db.$disconnect();
   }
 }
 export async function seedTenants() {
+  if (!target.owned) throw Error("OWNED_LOCAL_TEST_DATABASE_REQUIRED");
   const db = createDatabase(adminUrl);
   try {
     await db.productUser.createMany({

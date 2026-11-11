@@ -19,11 +19,11 @@ export type IdentitySource = {
   ) => Promise<unknown>;
 };
 /** Provider adapters supply verified data; HTTP callers cannot supply this structure. */
-export async function resolveVerifiedActor(
+export async function resolveVerifiedIdentity(
   source: IdentitySource,
   url: string,
   allowedEmails: string[],
-): Promise<Actor> {
+): Promise<{ actor: Actor; email: string }> {
   const user = await source.currentUser();
   if (
     !user ||
@@ -49,6 +49,11 @@ export async function resolveVerifiedActor(
     staff: false,
   };
   const checked = checkSessionPolicy(evidence, url);
+  // Factorless identities have no qualified durable enrollment history yet.
+  // Keep optional first-factor access unavailable rather than mistaking removed
+  // factors for an account that never enrolled. This is an availability gate,
+  // not a new mandatory-customer-MFA policy or a recovery authorization.
+  if (!user.totpEnrolled) throw new Error("AUTH_POLICY_UNVERIFIED");
   const account = await source.account(user.id);
   const actor: Actor = {
     userId: account.id,
@@ -61,5 +66,13 @@ export async function resolveVerifiedActor(
   };
   checkSessionPolicy({ ...evidence, staff: await source.staff(actor) }, url);
   await source.history(actor, evidence.session!);
-  return actor;
+  return { actor, email: user.email.trim().toLowerCase() };
+}
+
+export async function resolveVerifiedActor(
+  source: IdentitySource,
+  url: string,
+  allowedEmails: string[],
+): Promise<Actor> {
+  return (await resolveVerifiedIdentity(source, url, allowedEmails)).actor;
 }

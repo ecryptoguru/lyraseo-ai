@@ -4,7 +4,7 @@ This tranche adds application code and local PostgreSQL proofs. It does not prov
 
 ## Local sample and local database
 
-`pnpm dev` without authentication configuration remains a loopback-only, visibly synthetic sample. `/app/workspaces`, `/app/security` and `/api/account` do not accept fixture users or identity headers. `pnpm db:local` creates only the disposable local database described in the README; `pnpm test:integration` resets it. Never point those tests at a cloud/customer database.
+`pnpm dev` without authentication configuration remains a loopback-only, visibly synthetic sample. `/app/workspaces`, `/app/security` and `/api/account` do not accept fixture users or identity headers. `pnpm db:local` targets a fixed cluster and must not be run against existing/shared state without separate safety qualification. `pnpm test:integration` now verifies the selected local container, creates its own randomly named database from `template0`, applies migrations/grants, and resets only that owned database. Failed databases and raw receipts are retained. Never point those tests at a cloud/customer database or reset `lyraseo_test`.
 
 ## Configure an approved dedicated free project later
 
@@ -20,7 +20,7 @@ This tranche adds application code and local PostgreSQL proofs. It does not prov
 
 ## Operator and MFA checks
 
-Customers can enroll an authenticator (and a separate backup) at `/app/security` after a fresh sign-in. Enrollment and owner changes require authentication within ten minutes; an MFA-enabled actor also needs recent verified MFA. Once enrolled, either Google or email first-factor login must be followed by TOTP. Sign-in offers the currently verified authenticator choices, including the backup, and verifies the chosen factor against the provider-owned list. Do not assign a staff grant until the operator has enrolled MFA and tested it. Staff grants are explicit database/operator assignments and cannot be self-issued by the web role.
+General initial enrollment is currently unavailable: empty factor inventory does not prove that an identity never enrolled. Until trusted durable enrollment history exists, factorless identities cannot obtain product access. This is a temporary availability restriction, not a change to the approved optional-customer-MFA policy. Existing verified-factor users can prepare a separate backup after fresh AAL2 authentication at `/app/security`; confirmation requires a verified primary and rechecks user/session/security epoch around provider verification. Sign-in offers provider-owned verified factors, including the backup. Do not assign a staff grant until the operator has enrolled MFA through a qualified process and tested it. Staff grants cannot be self-issued by the web role; enrollment-only staff bootstrap remains unfinished.
 
 Single-use owner-change grants are hashed, bound to user/session/action/workspace, and consumed in the membership transaction. The workspace row lock prevents concurrent demotions/removals from leaving no active owner; suspended accounts do not count as surviving owners. Any future suspension workflow must take the same workspace locks and preserve this invariant. Editors/viewers only see granted sites; viewers cannot run jobs. Deleted scopes and suspended/stale-security-version actors are denied.
 

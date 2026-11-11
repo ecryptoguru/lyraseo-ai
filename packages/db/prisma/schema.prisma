@@ -12,9 +12,12 @@ enum Role {
   VIEWER
 }
 model ProductUser {
+  keywordSelections KeywordSelection[]
   id String @id @default(cuid())
   suspended Boolean @default(false)
   securityVersion Int @default(0)
+  auditRuns AuditRun[]
+  revisionPins ContentRevisionPin[]
   quotes OperationQuote[]
   operations Operation[]
   createdAt DateTime @default(now())
@@ -32,6 +35,7 @@ model ProviderIdentity {
 model Workspace {
   id String @id @default(cuid())
   name String
+  accessRevision Int @default(0)
   deletedAt DateTime?
   createdAt DateTime @default(now())
   memberships Membership[]
@@ -47,6 +51,17 @@ model Membership {
   @@id([workspaceId,userId])
 }
 model Site {
+  keywordSelections KeywordSelection[]
+  analyticsStates AnalyticsOAuthState[]
+  analyticsConnection AnalyticsConnection?
+  analyticsImports AnalyticsImport[]
+  googleStates GoogleOAuthState[]
+  googleConnection GoogleConnection?
+  searchSnapshots SearchSnapshot[]
+  searchImports SearchImport[]
+  contextRevisions SiteContextRevision[]
+  verificationChallenges SiteVerificationChallenge[]
+  auditRuns AuditRun[]
   quotes OperationQuote[]
   operations Operation[]
   id String @id @default(cuid())
@@ -68,6 +83,75 @@ model SiteGrant {
   site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
   member Membership @relation(fields:[workspaceId,userId],references:[workspaceId,userId],onDelete:Cascade)
   @@id([workspaceId,siteId,userId])
+  @@index([workspaceId,userId,siteId])
+}
+
+model WorkspaceAccessEvent {
+ id String @id @default(cuid())
+ workspaceId String
+ actorId String
+ action String
+ targetUserId String?
+ siteId String?
+ previousRole String?
+ nextRole String?
+ accessRevision Int
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,accessRevision])
+ @@index([workspaceId,createdAt,id])
+}
+model WorkspaceInvitation {
+ id String @id @default(cuid())
+ workspaceId String
+ tokenHash String @unique
+ invitedEmailDigest String
+ role Role
+ createdBy String
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ acceptedAt DateTime?
+ acceptedBy String?
+ revokedAt DateTime?
+ sites WorkspaceInvitationSite[]
+ @@unique([workspaceId,id])
+ @@index([workspaceId,createdAt,id])
+ @@index([expiresAt,id])
+}
+model WorkspaceInvitationSite {
+ workspaceId String
+ invitationId String
+ siteId String
+ invitation WorkspaceInvitation @relation(fields:[workspaceId,invitationId],references:[workspaceId,id],onDelete:Cascade)
+ @@id([workspaceId,invitationId,siteId])
+}
+model IssueAssignment {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ auditId String
+ ruleId String
+ scopeKey String
+ assigneeUserId String?
+ revision Int
+ updatedAt DateTime @default(now())
+ @@unique([workspaceId,siteId,auditId,ruleId,scopeKey])
+ @@unique([workspaceId,siteId,id])
+ @@index([workspaceId,siteId,updatedAt,id])
+ @@index([workspaceId,siteId,assigneeUserId,updatedAt,id])
+}
+model IssueAssignmentEvent {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ assignmentId String
+ revision Int
+ actorId String
+ assigneeUserId String?
+ createdAt DateTime @default(now())
+ idempotencyKey String
+ inputHash String
+ @@unique([assignmentId,revision])
+ @@unique([workspaceId,siteId,actorId,idempotencyKey])
 }
 
 model StaffGrant {
@@ -111,6 +195,9 @@ model Operation {
   tariffVersion String
   reservedCost Decimal @db.Decimal(20,9)
   actualCost Decimal? @db.Decimal(20,9)
+  keywordResult KeywordEnrichmentResult?
+  ledgerMode String @default("LEGACY")
+  ledgerVersion Int @default(0)
   status String @default("QUEUED")
   createdAt DateTime @default(now())
   expiresAt DateTime
@@ -125,12 +212,15 @@ model Operation {
   user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
   quote OperationQuote?
   outbox OutboxEvent?
+  dispatchRecords WorkDispatch[]
+  @@unique([workspaceId,siteId,userId,id])
   receipts UsageReceipt[]
   @@unique([userId,workspaceId,route,idempotencyKey])
   @@index([workspaceId,createdAt,id])
   @@index([status,leaseUntil])
 }
 model OutboxEvent {
+  dispatch WorkDispatch?
   id String @id @default(cuid())
   operationId String @unique
   workspaceId String
@@ -187,4 +277,699 @@ model OperationQuote {
   site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
   consumedOperation Operation? @relation(fields:[consumedOperationId],references:[id],onDelete:Restrict)
   @@index([userId,expiresAt])
+ @@unique([workspaceId,siteId,userId,id])
+}
+
+model AuditRun {
+ storageFormat String?
+ artifactBlobs ArtifactBlob[]
+ @@unique([workspaceId,siteId,id])
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ userId String
+ securityVersion Int
+ idempotencyKey String
+ inputHash String
+ manifest Json
+ profile String
+ declarations Json
+ methodologyVersion String
+ status String @default("QUEUED")
+ fence Int @default(0)
+ leaseOwner String?
+ leaseUntil DateTime?
+ createdAt DateTime @default(now())
+ completedAt DateTime?
+ evaluation Json?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ user ProductUser @relation(fields:[userId],references:[id],onDelete:Restrict)
+ dispatchRecords WorkDispatch[]
+ @@unique([workspaceId,siteId,userId,id])
+ pages AuditPage[]
+ actions IssueAction[]
+ @@unique([workspaceId,id])
+ @@unique([workspaceId,siteId,userId,idempotencyKey])
+ @@index([workspaceId,siteId,createdAt,id])
+}
+model AuditPage {
+ id String @id @default(cuid())
+ workspaceId String
+ auditId String
+ requestedUrl String
+ evidence Json
+ provenance Json
+ createdAt DateTime @default(now())
+ audit AuditRun @relation(fields:[workspaceId,auditId],references:[workspaceId,id],onDelete:Restrict)
+ retention AuditPageRetention?
+ @@unique([workspaceId,auditId,id])
+ @@unique([auditId,requestedUrl])
+}
+model IssueAction {
+ id String @id @default(cuid())
+ workspaceId String
+ auditId String
+ userId String
+ ruleId String
+ scopeKey String
+ disposition String
+ reason String
+ createdAt DateTime @default(now())
+ audit AuditRun @relation(fields:[workspaceId,auditId],references:[workspaceId,id],onDelete:Restrict)
+ @@index([workspaceId,auditId,createdAt])
+}
+
+model SiteVerificationChallenge {
+ sessionId String
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ tokenHash String
+ issuedBy String
+ securityVersion Int
+ expiresAt DateTime
+ createdAt DateTime @default(now())
+ consumedAt DateTime?
+ revokedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ @@index([workspaceId,siteId,createdAt])
+}
+model SiteContextRevision {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ revision Int
+ content Json
+ reviewedBy String
+ reviewedAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ @@unique([workspaceId,siteId,revision])
+}
+
+model GoogleOAuthState {
+ id String @id
+ workspaceId String
+ siteId String
+ userId String
+ sessionId String
+ securityVersion Int
+ verifier String
+ expiresAt DateTime
+ consumedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId])
+}
+model GoogleConnection {
+ @@unique([workspaceId,siteId])
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String @unique
+ encryptedRefreshToken String
+ property String?
+ generation Int @default(0)
+ createdAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+}
+model SearchSnapshot {
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ property String
+ startDate String
+ endDate String
+ shape String
+ status String
+ rows Json
+ importedAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@unique([workspaceId,siteId,property,startDate,endDate,shape])
+ @@index([workspaceId,siteId,importedAt])
+}
+
+model ContentDraft {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ kind String
+ revision Int @default(1)
+ evidenceFormat String?
+ snapshot Json
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,siteId,id])
+ @@index([workspaceId,siteId,createdAt])
+}
+model ContentRevision {
+ historyExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,draftId,historyExpiresAt],map:"ContentRevision_history_expiry")
+ id String @id @default(cuid())
+ workspaceId String
+ draftId String
+ revision Int
+ content Json
+ userId String
+ createdAt DateTime @default(now())
+ pin ContentRevisionPin?
+ @@unique([workspaceId,draftId,revision])
+ @@unique([draftId,revision])
+}
+model EvidenceReport {
+ id String @id @default(cuid())
+ // Derived stored identity digest; PostgreSQL GENERATED ALWAYS controls writes.
+ identifierKey String @default(dbgenerated())
+ workspaceId String
+ siteId String
+ title String
+ evidenceFormat String?
+ snapshot Json
+ pdf Bytes?
+ csv String?
+ createdAt DateTime @default(now())
+ @@index([workspaceId,siteId,createdAt])
+ @@index([workspaceId,siteId,identifierKey], map: "EvidenceReport_opaque_key_idx")
+}
+
+model VisibilityPanel {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ version Int
+ prompts Json
+ brands Json
+ createdBy String
+ reviewedBy String?
+ reviewedAt DateTime?
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,siteId,version])
+}
+model VisibilityRun {
+ storageFormat String?
+ @@unique([workspaceId,siteId,panelId,id])
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ panelId String
+ profile String
+ cohort String
+ provenance Json
+ slots Json
+ rawAnswers Json?
+ rawExpiresAt DateTime
+ createdAt DateTime @default(now())
+ @@index([workspaceId,siteId,createdAt])
+}
+
+model ApiToken {
+ id String @id @default(cuid())
+ workspaceId String
+ createdBy String
+ name String
+ tokenHash String @unique
+ securityVersion Int
+ accessPolicyHash String
+ siteIds String[]
+ scopes String[]
+ requestKey String
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ revokedAt DateTime?
+ @@unique([createdBy,workspaceId,requestKey])
+ @@index([createdBy,workspaceId,createdAt])
+}
+model ApiThrottle {
+ key String @id
+ count Int
+ expiresAt DateTime
+}
+
+model PageIdentity {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ originalUrl String
+ normalizedUrl String
+ revision Int @default(1)
+ assignedTo String?
+ createdBy String
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,siteId,normalizedUrl])
+ @@unique([workspaceId,siteId,id])
+ @@index([workspaceId,siteId,createdAt,id])
+}
+model PageJournal {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String
+ pageId String
+ revision Int
+ action String
+ note String
+ userId String
+ assigneeUserId String?
+ idempotencyKey String
+ inputHash String
+ contentDraftId String?
+ contentDraftRevision Int?
+ createdAt DateTime @default(now())
+ @@unique([pageId,revision])
+ @@unique([workspaceId,pageId,userId,idempotencyKey])
+ @@index([workspaceId,siteId,pageId,revision])
+}
+
+model AnalyticsOAuthState {
+ id String @id
+ workspaceId String
+ siteId String
+ userId String
+ sessionId String
+ securityVersion Int
+ verifier String
+ expiresAt DateTime
+ consumedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId])
+}
+model AnalyticsConnection {
+ id String @id @default(cuid())
+ workspaceId String
+ siteId String @unique
+ encryptedRefreshToken String
+ property String?
+ streamId String?
+ timeZone String?
+ status String @default("connected")
+ catalog Json @default("[]")
+ generation Int @default(0)
+ createdAt DateTime @default(now())
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@unique([workspaceId,siteId])
+}
+model AnalyticsImport {
+ resultExpiresAt DateTime? @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
+ id String @id
+ workspaceId String
+ siteId String
+ property String
+ streamId String
+ timeZone String
+ origin String
+ startDate String
+ endDate String
+ shape String
+ generation Int
+ status String
+ failure String?
+ rows Json @default("[]")
+ diagnostics Json @default("{}")
+ startedAt DateTime @default(now())
+ importedAt DateTime?
+ leaseUntil DateTime
+ attempt String
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId,startedAt])
+}
+
+model SearchImport {
+ resultExpiresAt DateTime @default(dbgenerated())
+ @@index([workspaceId,siteId,resultExpiresAt])
+ id String @id
+ workspaceId String
+ siteId String
+ property String
+ startDate String
+ endDate String
+ shape String
+ generation Int
+ status String
+ attempt String
+ leaseUntil DateTime
+ failure String?
+ startedAt DateTime @default(now())
+ completedAt DateTime?
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Cascade)
+ @@index([workspaceId,siteId,status])
+}
+
+model RuntimePolicy {
+  key String @id
+  enabled Boolean @default(false)
+  revision Int @default(0)
+  changedAt DateTime @default(now()) @db.Timestamptz(6)
+  changes RuntimePolicyChange[]
+}
+model RuntimePolicyChange {
+  key String
+  revision Int
+  enabled Boolean
+  operatorId String
+  changedAt DateTime @db.Timestamptz(6)
+  policy RuntimePolicy @relation(fields:[key],references:[key],onDelete:NoAction,onUpdate:NoAction)
+  @@id([key,revision])
+}
+model WorkDispatch {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String
+  siteId String
+  userId String
+  admittedSecurityVersion Int
+  initiatedSessionId String?
+  targetKind String
+  operationId String? @unique
+  auditId String? @unique
+  archiveId String? @unique
+  capability String
+  profile String
+  eligibility String
+  ledgerHandoff String @default("NONE")
+  admittedAt DateTime @db.Timestamptz(6)
+  expiresAt DateTime @db.Timestamptz(6)
+  revokedAt DateTime? @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  disposition String
+  generation Int @default(1)
+  nextAttemptAt DateTime? @db.Timestamptz(6)
+  deliveredAt DateTime? @db.Timestamptz(6)
+  claimToken String? @db.Uuid
+  leaseUntil DateTime? @db.Timestamptz(6)
+  sendAttempts Int @default(0)
+  lastErrorCode String?
+  audit AuditRun? @relation(fields:[workspaceId,siteId,userId,auditId],references:[workspaceId,siteId,userId,id],onDelete:Restrict,onUpdate:Restrict)
+  operation Operation? @relation(fields:[workspaceId,siteId,userId,operationId],references:[workspaceId,siteId,userId,id],onDelete:Restrict,onUpdate:Restrict)
+  archive OutboxEvent? @relation(fields:[archiveId],references:[id],onDelete:Restrict,onUpdate:Restrict)
+  @@index([workspaceId,siteId,userId],map:"dispatch_scope")
+}
+model InternalRequest {
+  servicePrincipalId String
+  requestId String @db.Uuid
+  fingerprint Bytes
+  issuedAt DateTime @db.Timestamptz(6)
+  expiresAt DateTime @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  state String
+  ownerToken String? @db.Uuid
+  fence Int
+  leaseUntil DateTime? @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+  result Json?
+  @@id([servicePrincipalId,requestId])
+  @@index([expiresAt,requestId],map:"request_cleanup")
+}
+
+model AuditPageRetention {
+ artifactRefs ArtifactRef[]
+ scratch AuditEvaluationScratch?
+ pageId String @id
+ workspaceId String
+ auditId String
+ capturedAt DateTime?
+ rawExpiresAt DateTime?
+ clockStatus String
+ page AuditPage @relation(fields:[workspaceId,auditId,pageId],references:[workspaceId,auditId,id],onDelete:Cascade)
+ @@unique([workspaceId,auditId,pageId])
+ @@index([workspaceId,auditId,rawExpiresAt])
+}
+model ContentRevisionPin {
+ workspaceId String
+ draftId String
+ revision Int
+ pinnedAt DateTime @default(now())
+ pinnedBy String
+ pinner ProductUser @relation(fields:[pinnedBy], references:[id], onDelete:NoAction, onUpdate:NoAction)
+ entry ContentRevision @relation(fields:[workspaceId,draftId,revision],references:[workspaceId,draftId,revision],onDelete:Cascade)
+ @@id([workspaceId,draftId,revision])
+}
+
+model ArtifactBlob {
+  ownerKind String @default("AUDIT_PAGE")
+  recordingId String? @db.Uuid
+  runId String?
+  panelId String?
+  promptId String?
+  @@unique([workspaceId,siteId,panelId,runId,recordingId,promptId,id,generation,capturedAt,expiresAt])
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId    String
+  siteId         String
+  auditId        String?
+  requestedUrl   String?
+  pageId         String?      @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fence          Int?
+  workId         String?      @db.Uuid
+  workGeneration Int?
+  category       String       @default("AUDIT_SOURCE")
+  rights         String       @default("PRIVATE_AUDIT")
+  expiryClass    String       @default("CAPTURE_30D")
+  capturedAt     DateTime
+  expiresAt      DateTime
+  pendingReceipt Json?
+  factHash       String
+  storageKey     String       @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  generation     String       @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  codec          String       @default("IDENTITY")
+  sourceHash     String
+  sourceLength   Int
+  storedHash     String
+  storedLength   Int
+  state          String       @default("STAGED")
+  createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  audit AuditRun?    @relation(fields: [workspaceId, siteId, auditId], references: [workspaceId, siteId, id], onDelete: NoAction, onUpdate: NoAction)
+  refs ArtifactRef[]
+
+  @@unique([id, generation, workspaceId])
+  @@unique([auditId, requestedUrl, fence])
+  @@unique([workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt])
+  @@index([state, expiresAt, id])
+  @@index([workspaceId, id])
+}
+
+model ArtifactRef {
+  recordingId String? @db.Uuid
+  runId String?
+  panelId String?
+  promptId String?
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId        String
+  siteId             String
+  auditId            String?
+  pageId             String?            @unique
+  anchors            Json
+  slotPageId         String?            @db.Uuid
+  blobId             String             @unique @db.Uuid
+  generation         String             @db.Uuid
+  ownerKind          String             @default("AUDIT_PAGE")
+  role               String             @default("ORIGINAL_BODY")
+  capturedAt         DateTime
+  expiresAt          DateTime
+  page AuditPageRetention? @relation(fields: [workspaceId, auditId, pageId], references: [workspaceId, auditId, pageId], onDelete: NoAction, onUpdate: NoAction)
+  blob ArtifactBlob?      @relation(fields: [workspaceId, siteId, auditId, slotPageId, blobId, generation, capturedAt, expiresAt], references: [workspaceId, siteId, auditId, pageId, id, generation, capturedAt, expiresAt], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([expiresAt, id])
+  @@index([workspaceId, auditId, pageId])
+}
+
+model AuditEvaluationScratch {
+  workspaceId        String
+  auditId            String
+  pageId             String
+  expiresAt          DateTime
+  facts              Json
+  page AuditPageRetention @relation(fields: [workspaceId, auditId, pageId], references: [workspaceId, auditId, pageId], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([workspaceId, auditId, pageId])
+  @@index([expiresAt, pageId])
+}
+
+// Controlled local active-store expiry. SQL owns all writes and the private enrollment.
+model ArtifactExpiryPlan {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ policyVersion String
+ workspaceId String
+ siteId String
+ environmentId String @db.Uuid
+ databaseOid Unsupported("oid")
+ postmasterStartedAt DateTime @db.Timestamptz(6)
+ storeId String @db.Uuid
+ namespaceId String @db.Uuid
+ plannedAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ expiresAt DateTime @db.Timestamptz(6)
+ manifest Json
+ manifestHash String
+ paused Boolean @default(false)
+ rotation Int @default(0)
+ classCursors Json @default("{}")
+}
+
+model ArtifactExpiryItem {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ class String
+ logicalKey String @unique
+ workspaceId String
+ siteId String
+ blobId String? @db.Uuid
+ generation String? @db.Uuid
+ ownerKind String?
+ deadline DateTime @db.Timestamp(3)
+ fingerprint String
+ origin String?
+ version Json?
+ currentPlanId String @db.Uuid
+ status String @default("READY")
+ attemptSequence BigInt @default(0)
+ token String? @db.Uuid
+ workerTokenHash String?
+ leaseUntil DateTime? @db.Timestamptz(6)
+ nextRetryAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ completedAt DateTime? @db.Timestamptz(6)
+
+ @@index([status,nextRetryAt,id])
+ @@index([workspaceId,siteId,class,deadline,id])
+}
+
+model ArtifactExpiryEvent {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ planId String @db.Uuid
+ itemId String @db.Uuid
+ sequence BigInt
+ token String? @db.Uuid
+ outcome String
+ reason String
+ proofDigest String?
+ proofAt DateTime? @db.Timestamptz(6)
+ createdAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+ @@index([planId,itemId,sequence])
+}
+
+model VisibilityRecording {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ runId String @unique @default(dbgenerated("gen_random_uuid()::text"))
+ workspaceId String
+ siteId String
+ panelId String
+ userId String
+ securityVersion Int
+ sessionId String
+ sourceNamespace String
+ recordingKey String
+ sourceBinding String
+ manifestHash String
+ manifest Json
+ state String @default("STAGED")
+ proof String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ proofExpiresAt DateTime @default(dbgenerated("clock_timestamp() + interval '5 minutes'")) @db.Timestamptz(6)
+ observedAt DateTime
+ rawExpiresAt DateTime
+ retiredAt DateTime? @db.Timestamptz(6)
+ @@unique([workspaceId,siteId,sourceNamespace,recordingKey])
+ @@unique([workspaceId,siteId,panelId,runId,id])
+ @@index([state,proofExpiresAt,id])
+}
+model VisibilityObservationSlot {
+ workspaceId String
+ siteId String
+ panelId String
+ runId String
+ recordingId String @db.Uuid
+ promptId String
+ observedAt DateTime
+ clockContract String @default("COMMON_OBSERVED_AT_V1")
+ factDigest String
+ answerHash String?
+ answerLength Int
+ rawExpiresAt DateTime
+ disposition String
+ @@id([workspaceId,siteId,runId,promptId])
+ @@unique([workspaceId,siteId,panelId,runId,recordingId,promptId,observedAt,rawExpiresAt])
+ @@index([rawExpiresAt,runId,promptId])
+}
+
+model WorkspaceBrandingRevision {
+ id String @id
+ workspaceId String
+ revision Int
+ displayName String
+ logoBytes Bytes?
+ logoSha256 String?
+ mime String?
+ width Int?
+ height Int?
+ createdBy String
+ createdAt DateTime @default(now())
+ @@unique([workspaceId,revision])
+ @@index([workspaceId,createdAt,id])
+}
+
+model AgencyBatchQuote {
+ id String @id
+ workspaceId String
+ userId String
+ securityVersion Int
+ requestInput Json
+ inputHash String
+ confirmationHash String
+ preview Json
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ confirmedAt DateTime?
+ confirmationKey String?
+ @@unique([workspaceId,userId,id])
+ @@unique([workspaceId,userId,confirmationKey])
+ @@index([userId,createdAt,id])
+ @@index([expiresAt,id])
+}
+model AgencyBatchItem {
+ batchQuoteId String
+ workspaceId String
+ userId String
+ siteId String
+ ordinal Int
+ quoteId String?
+ operationId String? @unique
+ status String
+ errorCode String?
+ @@id([batchQuoteId,ordinal])
+ @@unique([batchQuoteId,siteId])
+}
+
+model KeywordSelection {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ workspaceId String
+ siteId String
+ createdBy String
+ idempotencyKey String
+ requestHash String
+ request Json
+ sourceSnapshotId String
+ status String @default("UNQUALIFIED")
+ createdAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ resultExpiresAt DateTime @db.Timestamptz(6)
+ site Site @relation(fields:[workspaceId,siteId],references:[workspaceId,id],onDelete:Restrict)
+ user ProductUser @relation(fields:[createdBy],references:[id],onDelete:Restrict)
+ result KeywordEnrichmentResult?
+ @@unique([workspaceId,siteId,id])
+ @@unique([workspaceId,siteId,createdBy,idempotencyKey])
+ @@index([workspaceId,siteId,createdAt,id],map:"keyword_selection_scope")
+}
+model KeywordEnrichmentResult {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ workspaceId String
+ siteId String
+ selectionId String @unique @db.Uuid
+ operationId String @unique
+ source String
+ currency String?
+ method String
+ market Json
+ collectedAt DateTime @db.Timestamptz(6)
+ recordedAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+ resultExpiresAt DateTime @db.Timestamptz(6)
+ rows Json
+ @@unique([workspaceId,siteId,selectionId])
+ selection KeywordSelection @relation(fields:[workspaceId,siteId,selectionId],references:[workspaceId,siteId,id],onDelete:Restrict)
+ operation Operation @relation(fields:[operationId],references:[id],onDelete:Restrict)
 }

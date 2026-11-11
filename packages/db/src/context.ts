@@ -8,25 +8,117 @@ export type Actor = {
   authProvider: "supabase";
   mfaAuthenticatedAt?: string;
 };
+/** Verified bearer credentials never impersonate a browser session. */
+export type TokenActor = {
+  credential: "api-token";
+  userId: string;
+  securityVersion: number;
+  tokenId: string;
+  tokenHash: string;
+  workspaceId: string;
+};
+export type ReadActor = Actor | TokenActor;
+export const isTokenActor = (actor: ReadActor): actor is TokenActor =>
+  "credential" in actor;
+export type ReadScope = "sites:read" | "audits:read" | "search:read";
+export async function requireReadScope(
+  tx: Tx,
+  actor: ReadActor,
+  scope: ReadScope,
+) {
+  if (isTokenActor(actor)) {
+    const token = await tx.apiToken.findUnique({
+      where: { id: actor.tokenId },
+    });
+    if (!token?.scopes.includes(scope)) throw new Error("FORBIDDEN");
+  }
+}
 export type Tx = Prisma.TransactionClient;
+export async function verifyActorIn(
+  tx: Tx,
+  actor: ReadActor,
+  workspaceId: string,
+) {
+  const user = await tx.productUser.findUnique({
+    where: { id: actor.userId },
+  });
+  if (!user || user.suspended || user.securityVersion !== actor.securityVersion)
+    throw new Error("FORBIDDEN");
+  if (isTokenActor(actor)) {
+    const token = await tx.apiToken.findUnique({
+      where: { id: actor.tokenId },
+    });
+    const member = await tx.membership.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId: actor.userId } },
+    });
+    const workspace = await tx.workspace.findUnique({
+      where: { id: workspaceId },
+    });
+    if (
+      !token ||
+      token.tokenHash !== actor.tokenHash ||
+      token.createdBy !== actor.userId ||
+      token.workspaceId !== workspaceId ||
+      actor.workspaceId !== workspaceId ||
+      token.revokedAt ||
+      token.expiresAt.getTime() <= Date.now() ||
+      token.securityVersion !== user.securityVersion ||
+      !member ||
+      !workspace ||
+      workspace.deletedAt
+    )
+      throw new Error("FORBIDDEN");
+  }
+}
+/** Recheck scope after composing stored evidence under READ COMMITTED, before returning any rows or bytes. */
+export async function withEvidenceRead<T>(
+  db: PrismaClient,
+  actor: ReadActor,
+  s: { workspaceId: string; siteId: string },
+  access: "read" | "export",
+  credentialScope: ReadScope | undefined,
+  read: (tx: Tx) => Promise<T>,
+) {
+  return withActor(db, actor, s.workspaceId, async (tx) => {
+    async function verify() {
+      if (credentialScope) await requireReadScope(tx, actor, credentialScope);
+      await authorizeSiteIn(tx, actor, s.workspaceId, s.siteId, access);
+    }
+    await verify();
+    // A database error aborts the transaction. Restore its read boundary before
+    // checking current authorization, otherwise 25P02 hides the real failure.
+    await tx.$executeRaw`SAVEPOINT lyraseo_evidence_read`;
+    let value: T;
+    try {
+      value = await read(tx);
+    } catch (error) {
+      try {
+        await tx.$executeRaw`ROLLBACK TO SAVEPOINT lyraseo_evidence_read`;
+        await tx.$executeRaw`RELEASE SAVEPOINT lyraseo_evidence_read`;
+      } catch {
+        // An unusable connection cannot return evidence; retain the original error.
+        throw error;
+      }
+      await verifyActorIn(tx, actor, s.workspaceId);
+      await verify();
+      throw error;
+    }
+    await tx.$executeRaw`RELEASE SAVEPOINT lyraseo_evidence_read`;
+    await verifyActorIn(tx, actor, s.workspaceId);
+    await verify();
+    return value;
+  });
+}
 export async function withActor<T>(
   db: PrismaClient,
-  actor: Actor,
+  actor: ReadActor,
   workspaceId: string,
   work: (tx: Tx) => Promise<T>,
 ): Promise<T> {
   return db.$transaction(
     async (tx) => {
       await tx.$queryRaw`SELECT set_config('app.actor_id',${actor.userId},true),set_config('app.workspace_id',${workspaceId},true)`;
-      const user = await tx.productUser.findUnique({
-        where: { id: actor.userId },
-      });
-      if (
-        !user ||
-        user.suspended ||
-        user.securityVersion !== actor.securityVersion
-      )
-        throw new Error("FORBIDDEN");
+      await verifyActorIn(tx, actor, workspaceId);
       return work(tx);
     },
     { maxWait: 10000, timeout: 15000 },
@@ -34,11 +126,22 @@ export async function withActor<T>(
 }
 export async function authorizeSiteIn(
   tx: Tx,
-  actor: Actor,
+  actor: ReadActor,
   workspaceId: string,
   siteId: string,
   action: "read" | "run" | "edit" | "export",
 ) {
+  if (isTokenActor(actor)) {
+    const token = await tx.apiToken.findUnique({
+      where: { id: actor.tokenId },
+    });
+    if (
+      action !== "read" ||
+      !token?.siteIds.includes(siteId) ||
+      token.workspaceId !== workspaceId
+    )
+      throw new Error("FORBIDDEN");
+  }
   const member = await tx.membership.findUnique({
     where: { workspaceId_userId: { workspaceId, userId: actor.userId } },
   });
@@ -51,6 +154,13 @@ export async function authorizeSiteIn(
     where: { workspaceId_id: { workspaceId, id: siteId } },
   });
   if (!site || site.deletedAt) throw new Error("NOT_FOUND");
+  if (action === "run") {
+    const [row] = await tx.$queryRaw<
+      { allowed: boolean }[]
+    >`SELECT lyraseo_audit.web_can_run(${siteId}::text) AS allowed`;
+    if (!row?.allowed) throw new Error("FORBIDDEN");
+    return site;
+  }
   if (member.role === "OWNER" || member.role === "ADMIN") return site;
   if (member.role === "VIEWER" && !["read", "export"].includes(action))
     throw new Error("FORBIDDEN");

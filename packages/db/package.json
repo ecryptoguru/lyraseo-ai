@@ -16,7 +16,9 @@
   "dependencies": {
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
-    "pg": "8.23.1"
+    "pg": "8.23.1",
+    "@lyraseo/visibility": "workspace:*",
+    "@polar-sh/sdk": "1.0.2"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -24,6 +26,37 @@
     "./accounting": "./src/accounting.ts",
     "./tenants": "./src/tenants.ts",
     "./identity": "./src/identity.ts",
-    "./execution": "./src/execution.ts"
+    "./dispatch": "./src/dispatch.ts",
+    "./execution": "./src/execution.ts",
+    "./audits": "./src/audits.ts",
+    "./sites": "./src/sites.ts",
+    "./gsc": "./src/gsc.ts",
+    "./content": "./src/content.ts",
+    "./visibility": "./src/visibility.ts",
+    "./tokens": "./src/tokens.ts",
+    "./pages": "./src/pages.ts",
+    "./ga4": "./src/ga4.ts",
+    "./observation-artifacts": "./src/observation-artifacts.ts",
+    "./artifact-store": "./src/artifact-store.ts",
+    "./artifact-checkpoint": "./src/artifact-checkpoint.ts",
+    "./artifact-expiry": "./src/artifact-expiry.ts",
+    "./bridge": "./src/bridge.ts",
+    "./handoffs": "./src/handoffs.ts",
+    "./handoff-codecs": "./src/handoff-codecs.ts",
+    "./agency": "./src/agency.ts",
+    "./invitations": "./src/invitations.ts",
+    "./issue-assignments": "./src/issue-assignments.ts",
+    "./branding": "./src/branding.ts",
+    "./agency-batches": "./src/agency-batches.ts",
+    "./provider-ledger": "./src/provider-ledger.ts",
+    "./keywords": "./src/keywords.ts",
+    "./sandbox-billing": "./src/sandbox-billing.ts",
+    "./sandbox-billing-codecs": "./src/sandbox-billing-codecs.ts",
+    "./staff-job-control": "./src/staff-job-control.ts",
+    "./history-retention": "./src/history-retention.ts",
+    "./recovery-journal": "./src/recovery-journal.ts",
+    "./recovery-points": "./src/recovery-points.ts",
+    "./retained-work": "./src/retained-work.ts",
+    "./site-deletion": "./src/site-deletion.ts"
   }
 }

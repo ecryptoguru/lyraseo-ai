@@ -14,7 +14,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 50
     env:
       LYRA_AUTH_ENABLED: "false"
       ALLOW_LOCAL_FIXTURES: "true"
@@ -32,11 +32,54 @@ jobs:
         run: pnpm db:local
       - name: Generate Next.js route and environment types
         run: pnpm --filter @lyraseo/web exec next typegen
+      - name: Generate carrier runtime declarations
+        run: pnpm --filter @lyraseo/worker generate-types && git diff --exit-code -- apps/lyraseo-worker/worker-configuration.d.ts
       - run: pnpm check
       - run: pnpm format:check
       - run: pnpm test:unit
+      - name: Required real HTTP crawler contract matrix
+        run: pnpm test:crawler
       - run: pnpm test:integration
+      - name: Required current-schema backup security catalog gate
+        run: node scripts/test-current-backup-catalog.mjs
+      - name: Required projected backup foreign-key integrity gate
+        run: node scripts/test-backup-integrity.mjs
+      - name: Required isolated baseline encrypted backup and journal replay gate
+        run: pnpm test:full-backup
+      - name: Required legacy visibility retention gate
+        run: pnpm test:legacy-visibility-retention
+      - name: Required legacy inline evidence and authorization gate
+        run: pnpm test:legacy-inline
+      - name: Required legacy report preservation and authorization gates
+        run: |
+          pnpm test:legacy-reports
+          pnpm test:legacy-report-review
+          pnpm test:legacy-report-role-isolation
+      - name: Required private artifact expiry and unsafe-role gate
+        run: pnpm test:private-artifact-expiry
+      - name: Required provider ledger fixture and restricted-role gate
+        run: pnpm test:provider-ledger
+      - name: Required restricted external handoff and uncertainty gate
+        run: pnpm test:handoffs
+      - name: Required handoff dispatch and concurrent recovery gate
+        run: pnpm test:handoff-dispatch
+      - name: Required offline observation adapter and ledger gate
+        run: pnpm test:observation-adapters
+      - name: Required sandbox billing and staff boundary gate
+        run: pnpm test:sandbox-billing
+      - name: Required local retention and deletion recovery gate
+        run: pnpm test:history-retention
+      - name: Real Workers carrier and signed Node bridge
+        run: pnpm test:worker
+      - name: Required signed handoff carrier replay and timeout gate
+        run: pnpm test:handoff-carrier
+      - name: Replay empty and populated database migrations
+        run: pnpm test:migrations
       - run: pnpm build
       - name: Install Chromium
         run: pnpm --filter @lyraseo/web exec playwright install --with-deps chromium
+      - name: Required staff job authority, accounting, race and browser gates
+        run: pnpm test:staff-job-review
+      - name: Actual staff action replay through local API and restricted database
+        run: pnpm test:staff-action-replay
       - run: pnpm test:e2e

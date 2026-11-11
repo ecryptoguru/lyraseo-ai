@@ -1,0 +1,63 @@
+.handoff-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+  min-inline-size: 0;
+}
+.handoff-workspace fieldset {
+  min-inline-size: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+.handoff-workspace label {
+  display: block;
+  margin-block: 0.75rem;
+}
+.handoff-workspace input:not([type="checkbox"]),
+.handoff-workspace select,
+.handoff-workspace textarea {
+  display: block;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 0.75rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+.handoff-workspace button {
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  margin: 0.25rem;
+}
+.handoff-workspace td,
+.handoff-workspace th {
+  padding: 0.75rem;
+  text-align: start;
+  border-block-end: 1px solid var(--border);
+}
+
+.handoff-workspace > section {
+  min-inline-size: 0;
+}
+.handoff-workspace button {
+  min-block-size: 44px;
+  padding: 0.65rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+}
+.handoff-workspace button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.handoff-workspace button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}

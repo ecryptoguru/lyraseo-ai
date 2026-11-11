@@ -1,0 +1,176 @@
+import { capabilityPause } from "@/server/capabilities";
+import { z } from "zod";
+import { database, resolveActor } from "@/server/auth/server";
+import {
+  createContentDraft,
+  previewEditorialAssistance,
+  saveContentDraft,
+  readContentDrafts,
+  setRevisionPin,
+} from "@lyraseo/db/content";
+import {
+  privateBody,
+  privateHeaders,
+  scopeSchema,
+  selectionSchema,
+  editorialFailure,
+} from "@/server/editorial/http";
+const fields = {
+  title: z.string().min(1).max(200),
+  body: z.string().max(100000),
+  assumptions: z.array(z.string().max(1000)).max(50),
+  citations: z
+    .array(
+      z
+        .object({
+          sourceId: z.string().max(256),
+          note: z.string().min(1).max(1000),
+        })
+        .strict(),
+    )
+    .max(100),
+};
+const command = z.discriminatedUnion("action", [
+  scopeSchema
+    .extend({
+      action: z.literal("assist"),
+      kind: z.enum(["brief", "draft"]),
+      ...selectionSchema,
+    })
+    .strict(),
+  scopeSchema
+    .extend({
+      action: z.literal("create"),
+      expectedContextRevisionId: z.string().min(1).max(128).optional(),
+      expectedEvidenceFingerprint: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+      kind: z.enum(["brief", "draft"]),
+      ...fields,
+      ...selectionSchema,
+    })
+    .strict(),
+  scopeSchema
+    .extend({
+      action: z.literal("save"),
+      draftId: z.string().min(1).max(128),
+      expectedRevision: z.number().int().positive(),
+      ...fields,
+    })
+    .strict(),
+  scopeSchema
+    .extend({
+      action: z.literal("pin"),
+      draftId: z.string().min(1).max(128),
+      revision: z.number().int().positive(),
+      pinned: z.boolean(),
+    })
+    .strict(),
+  scopeSchema.extend({ action: z.literal("generate") }).strict(),
+]);
+export async function GET(request: Request) {
+  try {
+    const actor = await resolveActor(),
+      query = new URL(request.url).searchParams;
+    const scope = scopeSchema.parse(Object.fromEntries(query));
+    const cursor = query.get("beforeRevision");
+    if (
+      cursor !== null &&
+      (!query.get("draftId") ||
+        !/^[1-9][0-9]{0,9}$/.test(cursor) ||
+        Number(cursor) > 2147483647)
+    )
+      throw new Error("INVALID_REVISION_CURSOR");
+    return Response.json(
+      await readContentDrafts(
+        database(),
+        actor,
+        scope,
+        query.get("draftId") ?? undefined,
+        cursor === null ? undefined : Number(cursor),
+      ),
+      { headers: privateHeaders },
+    );
+  } catch (e) {
+    return editorialFailure(e);
+  }
+}
+export async function POST(request: Request) {
+  try {
+    const actor = await resolveActor(),
+      input = command.parse(await privateBody(request));
+    const paused = capabilityPause("content");
+    if (paused) return paused;
+
+    if (input.action === "assist")
+      return Response.json(
+        await previewEditorialAssistance(
+          database(),
+          actor,
+          scopeSchema.parse(input),
+          {
+            kind: input.kind,
+            auditIds: input.auditIds,
+            searchSnapshotIds: input.searchSnapshotIds,
+          },
+        ),
+        { headers: privateHeaders },
+      );
+    if (input.action === "generate") {
+      // No provider submission path exists until credentials, verified tariffs, and complete-job quotes are configured.
+      await readContentDrafts(database(), actor, scopeSchema.parse(input));
+      return Response.json(
+        {
+          error:
+            "Generation unavailable: no verified editorial provider tariff and complete-job quote are configured. Manual drafts and evidence reports remain available.",
+        },
+        { status: 503, headers: privateHeaders },
+      );
+    }
+    if (input.action === "pin")
+      return Response.json(
+        await setRevisionPin(
+          database(),
+          actor,
+          scopeSchema.parse(input),
+          input.draftId,
+          input.revision,
+          input.pinned,
+        ),
+        { headers: privateHeaders },
+      );
+    const result =
+      input.action === "create"
+        ? await createContentDraft(
+            database(),
+            actor,
+            scopeSchema.parse(input),
+            {
+              kind: input.kind,
+              expectedContextRevisionId: input.expectedContextRevisionId,
+              expectedEvidenceFingerprint: input.expectedEvidenceFingerprint,
+              title: input.title,
+              body: input.body,
+              assumptions: input.assumptions,
+              citations: input.citations,
+              auditIds: input.auditIds,
+              searchSnapshotIds: input.searchSnapshotIds,
+            },
+          )
+        : await saveContentDraft(database(), actor, scopeSchema.parse(input), {
+            draftId: input.draftId,
+            expectedRevision: input.expectedRevision,
+            title: input.title,
+            body: input.body,
+            assumptions: input.assumptions,
+            citations: input.citations,
+          });
+    return Response.json(result, {
+      status: input.action === "create" ? 201 : 200,
+      headers: privateHeaders,
+    });
+  } catch (e) {
+    return editorialFailure(e);
+  }
+}

@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({
   signInWithOtp: vi.fn(),
   signInWithOAuth: vi.fn(),
   resolveActor: vi.fn(),
+  getUser: vi.fn(),
+  listFactors: vi.fn(),
+  challengeAndVerify: vi.fn(),
 }));
 vi.mock("next/headers", () => ({
   headers: async () => new Headers({ origin: "http://localhost:3000" }),
@@ -26,6 +29,11 @@ vi.mock("@/server/auth/server", () => ({
       verifyOtp: mocks.verifyOtp,
       signInWithOtp: mocks.signInWithOtp,
       signInWithOAuth: mocks.signInWithOAuth,
+      getUser: mocks.getUser,
+      mfa: {
+        listFactors: mocks.listFactors,
+        challengeAndVerify: mocks.challengeAndVerify,
+      },
     },
   }),
   identityDatabase: () => ({}),
@@ -35,6 +43,8 @@ vi.mock("../../packages/db/src/identity", () => ({ throttle: mocks.throttle }));
 import {
   signIn,
   googleSignIn,
+  mfaChoices,
+  verifyMfa,
 } from "../../apps/lyraseo-web/src/app/sign-in/actions";
 beforeEach(() => {
   vi.resetAllMocks();
@@ -80,5 +90,75 @@ it("redirects after successful OAuth without swallowing the framework redirect",
   });
   await expect(googleSignIn()).rejects.toThrow(
     "REDIRECT:https://provider.example/authorize",
+  );
+});
+it("allows a verified backup to complete MFA while refusing a forged or pending factor", async () => {
+  mocks.getUser.mockResolvedValue({
+    data: {
+      user: {
+        id: "provider-user",
+        email: "invited@example.com",
+        email_confirmed_at: "2026-01-01T00:00:00Z",
+      },
+    },
+  });
+  mocks.listFactors.mockResolvedValue({
+    data: {
+      totp: [
+        { id: "primary", status: "verified", friendly_name: "Primary" },
+        {
+          id: "backup",
+          status: "verified",
+          friendly_name: "Backup authenticator",
+        },
+        { id: "pending", status: "unverified", friendly_name: "Pending" },
+      ],
+    },
+    error: null,
+  });
+  expect(await mfaChoices()).toEqual([
+    { id: "primary", name: "Primary" },
+    { id: "backup", name: "Backup authenticator" },
+  ]);
+  const input = new FormData();
+  input.set("mfa", "123456");
+  for (const id of ["pending", "forged"]) {
+    input.set("factorId", id);
+    expect((await verifyMfa({ stage: "mfa", message: "" }, input)).stage).toBe(
+      "mfa",
+    );
+    expect(mocks.challengeAndVerify).not.toHaveBeenCalled();
+  }
+  input.set("factorId", "backup");
+  mocks.challengeAndVerify.mockResolvedValue({ error: null });
+  await expect(verifyMfa({ stage: "mfa", message: "" }, input)).rejects.toThrow(
+    "REDIRECT:/app/workspaces",
+  );
+  expect(mocks.challengeAndVerify).toHaveBeenCalledWith({
+    factorId: "backup",
+    code: "123456",
+  });
+  expect(mocks.resolveActor).toHaveBeenCalledOnce();
+});
+it("does not complete backup sign-in when provider verification or actor revalidation fails", async () => {
+  mocks.getUser.mockResolvedValue({ data: { user: { id: "provider-user" } } });
+  mocks.listFactors.mockResolvedValue({
+    data: { totp: [{ id: "backup", status: "verified" }] },
+    error: null,
+  });
+  const input = new FormData();
+  input.set("mfa", "123456");
+  input.set("factorId", "backup");
+  mocks.challengeAndVerify.mockResolvedValueOnce({
+    error: new Error("invalid"),
+  });
+  expect((await verifyMfa({ stage: "mfa", message: "" }, input)).stage).toBe(
+    "mfa",
+  );
+  expect(mocks.resolveActor).not.toHaveBeenCalled();
+  mocks.challengeAndVerify.mockResolvedValueOnce({ error: null });
+  mocks.resolveActor.mockRejectedValueOnce(new Error("FORBIDDEN"));
+  expect((await verifyMfa({ stage: "mfa", message: "" }, input)).stage).toBe(
+    "mfa",
   );
 });

@@ -5,7 +5,7 @@ import { createDatabase } from "@lyraseo/db";
 import { provisionIdentity, acceptSessionHistory } from "@lyraseo/db/identity";
 import { withActor, type Actor } from "@lyraseo/db/context";
 import { type SessionEvidence } from "./policy";
-import { resolveVerifiedActor } from "./actor";
+import { resolveVerifiedIdentity } from "./actor";
 import { authSettings } from "./settings";
 let product: ReturnType<typeof createDatabase> | undefined,
   identity: ReturnType<typeof createDatabase> | undefined;
@@ -40,11 +40,14 @@ export async function authClient() {
     },
   });
 }
-export async function resolveActor(): Promise<Actor> {
+export async function resolveActorWithVerifiedEmail(): Promise<{
+  actor: Actor;
+  email: string;
+}> {
   const settings = authSettings();
   if (!settings) throw new Error("AUTH_UNAVAILABLE");
   const client = await authClient();
-  return resolveVerifiedActor(
+  return resolveVerifiedIdentity(
     {
       currentUser: async () => {
         const {
@@ -97,4 +100,8 @@ export async function resolveActor(): Promise<Actor> {
     settings.url,
     settings.allowedEmails,
   );
+}
+
+export async function resolveActor(): Promise<Actor> {
+  return (await resolveActorWithVerifiedEmail()).actor;
 }

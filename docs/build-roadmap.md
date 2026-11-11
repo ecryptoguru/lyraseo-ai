@@ -4,19 +4,25 @@ Approved on 2026-11-02. Build the recommended enhancements for the private pilot
 
 ## Current delivery
 
-The initial repository includes the existing synthetic audit UI and private-access foundation plus new server-issued operation quotes, stored executable request input, atomic admission, queue publication/recovery services and authenticated operation polling. These services have local PostgreSQL regressions. The Cloudflare worker still returns unavailable pending guarded acquisition, provider adapters and runtime qualification. The first real audit journey remains open.
+The private-pilot branch now includes durable operation services, session-bound site proof, frozen raw audit manifests and evidence, reviewed business context, stable page workspaces, Search Console imports/opportunities, manual evidence-backed draft revisions, private PDF/CSV reports, versioned AI panels, and scoped read-only MCP credentials. These are local implementations with fixture/database/browser evidence. They are not a hosted pilot release. The Worker HTTP endpoint remains unavailable; its Queue/Cron carrier now has a controlled harness in the local Workers runtime. Provider collection, rendered acquisition and live acceptance remain open.
+
+New audits use the versioned `readiness-v2` contract with reviewed expectations, source-specific completeness, rule evidence references and category coverage. Historical v1 results remain reproducible and unchanged. Comparisons preserve uncertainty and invalidate affected findings when the declared basis changes. The raw profile still cannot supply rendered evidence or a complete readiness score.
+
+Persisted UTC deadlines govern raw evidence and retained results. New drafts and reports use a bounded saved-evidence format; current authored revisions and pins remain available, while legacy report downloads stay withheld pending review. These read boundaries do not perform physical erasure.
+
+The signed Node bridge has a controlled local harness with durable page checkpoints, restart/replay tests and cancellation/revocation checks. It shares audit authorization, validation and lifecycle rules with the browser driver. Stock Next.js rejects the reserved runtime namespace. The local carrier uses signed opaque references, bounded Cron publication, explicit native Queue acknowledgements/retries and a dead-letter queue. Controlled tests cover actual scheduled-to-Queue-to-bridge persistence, duplicate delivery, recovery and distinct-secret rotation. Hosted HTTPS ingress, an autonomous bridge service, deployed Queue delivery and public-site runtime qualification remain open.
 
 | Private-pilot milestone | Implementation state | Acceptance still required |
 | --- | --- | --- |
-| 1. Baseline and private access | Prior 16 tasks inventoried locally; public repository and CI established | Live sign-in, recovery, MFA and private-pilot acceptance |
-| 2. Durable execution and cost | Quote/admission/publisher/recovery/polling services implemented | Trusted provider tariffs, running queue consumers, receipts/reconciliation adapters and operator controls |
-| 3. Real audits and fixture website | Initial deterministic engine and synthetic UI exist | Domain proof, guarded acquisition, frozen manifest, persistent evidence/results, crawler harness, rerun and comparison |
-| 4. Business context and page workspace | Planned | Versioned context, stable page identity, findings, assignments, drafts and history |
-| 5. GSC and opportunity inbox | Planned | Read-only OAuth/imports, comparable windows, actionable page/query evidence |
-| 6. Editorial and private reports | Sample draft/CSV exist | Grounded editable briefs, internal links, private PDF/CSV and WordPress draft handoff |
-| 7. AI observations and competitors | Initial metric helpers exist | Versioned panels, actual surface provenance, retained answers/citations, compatible trends |
-| 8. GA4, keyword enrichment and MCP | Planned | Optional measured-outcome joins, quoted enrichment, read-only authorized agent tools |
-| 9. Integrated private-pilot gate | Planned | Teams/client access, webhooks/tokens, sandbox billing, privacy/deletion, backups and recovery |
+| 1. Baseline and private access | Prior16 tasks inventoried; public repository and CI established; tenant/site authorization tests | Google sign-in setup, SMTP/OTP, MFA/recovery and protected hosted acceptance |
+| 2. Durable execution and cost | Server quotes, atomic admission, restricted dispatch/replay/policy kernel, signed controlled Node audit harness, bounded local Workers Queue/Cron carrier, immutable financial receipts and ledger recovery; legacy publication disabled | Qualified tariffs, hosted bridge/Queue/Cron qualification, provider receipt/reconciliation adapters and staff operator controls |
+| 3. Real audits and fixture website | Locally gated raw acquisition, session-bound site proof, immutable manifests, leased page checkpoints, fixture-site HTTP fix/rerun/comparison and CSV; rendered-head rules remain UNKNOWN | Hosted authenticated journey; deployed worker runtime, rendering and subresource isolation/capacity qualification |
+| 4. Business context and page workspace | Immutable reviewed context; exact URL identities, change journal, self-assignment, linked draft revisions and saved evidence | Broader team assignments, verified alias mapping when needed, hosted reopen/revocation acceptance |
+| 5. GSC and opportunity inbox | Independent read-only OAuth, property selection, bounded cached imports, comparable-window opportunities and scoped UI | Live property reconciliation, refresh/backfill orchestration, explicit corrected-import versioning |
+| 6. Editorial and private reports | Manual editable briefs/drafts, pinned and paged revision history, compact saved evidence, captured context, observed anchor context, immutable private PDF/CSV with explicitly selected frozen before/after audit comparisons | Qualified paid generation/research, legacy artifact review, report templates/branding, WordPress draft handoff and live client journey |
+| 7. AI observations and competitors | Reviewed versioned panels, trusted evidence recorder, actual-profile provenance, deterministic multi-brand metrics and cohort thresholds, evidence UI | Qualified ledger-backed live collectors, persisted semantic adjudication and actual provider receipts |
+| 8. GA4, keyword enrichment and MCP | Revocable scoped read-only credentials and six genuine MCP tools; optional independently connected GA4 with compatible exact landing-page outcomes | Live GA4 outcome reconciliation, quoted keyword enrichment, full hosted authenticated MCP acceptance |
+| 9. Integrated private-pilot gate | Shared authorization/budget foundations, persisted retention clocks and uniform read checks, local recovery regressions | Team/client management, signed webhooks, sandbox billing, lean admin, physical retention/deletion, encrypted backups/restore and integrated live journeys |
 
 ## Phase-two roadmap
 
@@ -39,4 +45,4 @@ Every milestone requires raw lint/typechecks, formatting, unit tests and a produ
 
 The `Verify` GitHub workflow installs the frozen lockfile, prepares disposable PostgreSQL, generates Next.js types, runs checks and tests, builds, then runs Chromium browser tests. It receives no cloud-provider credentials. Local operational evidence stays under ignored `docs/evidence/` and `output/` paths.
 
-The first complete product checkpoint is a private user verifying a controlled site, auditing a frozen manifest, fixing a known defect, rerunning it, and exporting a report showing the resolved issue alongside a deliberately unreadable page. Continue with worker/acquisition and audit persistence toward that checkpoint.
+The first complete product checkpoint remains a private user verifying a controlled site, auditing a frozen manifest, fixing a known defect, rerunning it, and exporting a report showing the resolved issue alongside a deliberately unreadable page. The controlled local fixture demonstrates acquisition, a corrected defect and an unreadable page; the protected authenticated hosted walkthrough remains open.

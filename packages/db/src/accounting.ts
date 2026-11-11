@@ -13,7 +13,8 @@ type Kind =
   | "RESEARCH"
   | "API_OBSERVATION"
   | "CHATGPT_OBSERVATION"
-  | "GEMINI_OBSERVATION";
+  | "GEMINI_OBSERVATION"
+  | "KEYWORD_ENRICHMENT";
 type Admission = {
   workspaceId: string;
   siteId: string;
@@ -182,7 +183,11 @@ async function admitOperationIn(
   if (
     input.kind === "RESEARCH"
       ? input.provider !== "PARALLEL"
-      : ["CHATGPT_OBSERVATION", "GEMINI_OBSERVATION"].includes(input.kind)
+      : [
+            "CHATGPT_OBSERVATION",
+            "GEMINI_OBSERVATION",
+            "KEYWORD_ENRICHMENT",
+          ].includes(input.kind)
         ? input.provider !== "DATAFORSEO"
         : input.provider !== "AZURE"
   )
@@ -269,9 +274,6 @@ async function admitOperationIn(
       reservedCost: cost,
       createdAt: now,
       expiresAt: new Date(now.getTime() + 86400000),
-      outbox: {
-        create: { workspaceId: input.workspaceId, userId: actor.userId },
-      },
     },
   });
 }
@@ -300,7 +302,11 @@ export async function issueOperationQuote(
   const valid =
     input.kind === "RESEARCH"
       ? input.provider === "PARALLEL"
-      : ["CHATGPT_OBSERVATION", "GEMINI_OBSERVATION"].includes(input.kind)
+      : [
+            "CHATGPT_OBSERVATION",
+            "GEMINI_OBSERVATION",
+            "KEYWORD_ENRICHMENT",
+          ].includes(input.kind)
         ? input.provider === "DATAFORSEO"
         : input.provider === "AZURE";
   if (!valid) throw new Error("INVALID_PROVIDER");
@@ -406,30 +412,32 @@ export async function admitQuotedOperation(
   });
 }
 
+/** Read the same per-user UTC allowance used for admission, without reserving. */
+export async function budgetSnapshotIn(tx: Tx, actor: Actor, now: Date) {
+  const period = month(now);
+  const rows = await tx.budgetPeriod.findMany({
+    where: { userId: actor.userId, period },
+  });
+  const stored = new Map(rows.map((row) => [row.bucket, row]));
+  return Object.keys(limits)
+    .sort()
+    .map((bucket) => {
+      const row = stored.get(bucket);
+      return {
+        bucket,
+        period,
+        limit: row?.limit ?? new Prisma.Decimal(limits[bucket]!),
+        spent: row?.spent ?? new Prisma.Decimal(0),
+        reserved: row?.reserved ?? new Prisma.Decimal(0),
+      };
+    });
+}
 export async function budgetSnapshot(
   db: PrismaClient,
   actor: Actor,
   now = new Date(),
 ) {
-  return withActor(db, actor, "", async (tx) => {
-    const period = month(now);
-    const rows = await tx.budgetPeriod.findMany({
-      where: { userId: actor.userId, period },
-    });
-    const stored = new Map(rows.map((row) => [row.bucket, row]));
-    return Object.keys(limits)
-      .sort()
-      .map((bucket) => {
-        const row = stored.get(bucket);
-        return {
-          bucket,
-          period,
-          limit: row?.limit ?? new Prisma.Decimal(limits[bucket]!),
-          spent: row?.spent ?? new Prisma.Decimal(0),
-          reserved: row?.reserved ?? new Prisma.Decimal(0),
-        };
-      });
-  });
+  return withActor(db, actor, "", (tx) => budgetSnapshotIn(tx, actor, now));
 }
 export async function claimOperation(
   db: PrismaClient,
@@ -640,26 +648,7 @@ export async function settleOperation(
       terminal.has(op.status)
     )
       throw new Error("STALE_LEASE");
-    await lockBudget(tx, actor, op.period);
-    for (const entry of reservationEntries(op)) {
-      const isMoney =
-        entry.bucket === op.provider || entry.bucket === "COMBINED";
-      await tx.budgetPeriod.update({
-        where: {
-          userId_period_bucket: {
-            userId: actor.userId,
-            period: op.period,
-            bucket: entry.bucket,
-          },
-        },
-        data: {
-          reserved: { decrement: entry.amount },
-          spent: {
-            increment: isMoney ? amount : receipt.acceptedOutput ? 1 : 0,
-          },
-        },
-      });
-    }
+    await tx.$queryRaw`SELECT lyraseo_ledger.apply_budget_change(${id}::text,${amount.toFixed(9)}::numeric,${receipt.acceptedOutput},true)::text`;
     const saved = await tx.usageReceipt.create({
       data: {
         operationId: id,
@@ -690,45 +679,6 @@ export async function settleOperation(
     return saved;
   });
 }
-/** Internal publisher: send only persisted operation IDs. At-least-once delivery is safe. */
-export async function pendingOutbox(db: PrismaClient, actor: Actor) {
-  return withActor(db, actor, "", (tx) =>
-    tx.outboxEvent.findMany({
-      where: {
-        userId: actor.userId,
-        deliveredAt: null,
-        operation: { status: "QUEUED" },
-      },
-      take: 20,
-      orderBy: { createdAt: "asc" },
-    }),
-  );
-}
-export async function acknowledgeOutbox(
-  db: PrismaClient,
-  actor: Actor,
-  id: string,
-  expectedFence?: number,
-) {
-  return withActor(db, actor, "", async (tx) => {
-    // Match recovery's operation-before-outbox lock order. The following update
-    // reads the fence after this lock, including when recovery was concurrent.
-    if (expectedFence !== undefined)
-      await tx.$queryRaw`SELECT op.id FROM "Operation" op JOIN "OutboxEvent" event ON event."operationId"=op.id WHERE event.id=${id} AND op."userId"=${actor.userId} FOR UPDATE OF op`;
-    return tx.outboxEvent.updateMany({
-      where: {
-        id,
-        userId: actor.userId,
-        deliveredAt: null,
-        ...(expectedFence === undefined
-          ? {}
-          : { operation: { fence: expectedFence, status: "QUEUED" } }),
-      },
-      data: { deliveredAt: new Date(), attempts: { increment: 1 } },
-    });
-  });
-}
-
 /** Internal rejection of definitively invalid, unstarted queued work. Never releases uncertain charges. */
 export async function cancelInvalidQueuedOperation(
   db: PrismaClient,

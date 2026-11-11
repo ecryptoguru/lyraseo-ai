@@ -37,3 +37,21 @@ export function normalizeUrl(input: string): string {
 export function sameOrigin(a: string, b: string): boolean {
   return new URL(normalizeUrl(a)).origin === new URL(normalizeUrl(b)).origin;
 }
+
+/** Freeze normalized, distinct pages from a single admitted origin. */
+export function auditManifest(input: unknown, origin: string): string[] {
+  if (!Array.isArray(input) || !input.length || input.length > 25)
+    throw new Error("INVALID_MANIFEST");
+  try {
+    const pages = input.map(normalizeUrl).sort();
+    if (
+      new Set(pages).size === pages.length &&
+      pages.includes(normalizeUrl(origin + "/")) &&
+      pages.every((url) => new URL(url).origin === origin)
+    )
+      return pages;
+  } catch {
+    /* Return the same public admission error for every invalid URL. */
+  }
+  throw new Error("INVALID_MANIFEST");
+}

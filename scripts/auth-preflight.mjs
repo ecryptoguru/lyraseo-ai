@@ -4,7 +4,26 @@ const require = createRequire(
   new URL("../packages/db/package.json", import.meta.url),
 );
 const { Client } = require("pg");
+const kernelTables = [
+  "WorkDispatch",
+  "InternalRequest",
+  "RuntimePolicy",
+  "RuntimePolicyChange",
+];
 const tables = [
+  ...kernelTables,
+  "WorkspaceAccessEvent",
+  "WorkspaceInvitation",
+  "WorkspaceInvitationSite",
+  "IssueAssignment",
+  "IssueAssignmentEvent",
+  "WorkspaceBrandingRevision",
+  "AgencyBatchQuote",
+  "AgencyBatchItem",
+  "PageIdentity",
+  "PageJournal",
+  "ApiToken",
+  "ApiThrottle",
   "ProductUser",
   "ProviderIdentity",
   "Workspace",
@@ -18,6 +37,24 @@ const tables = [
   "OutboxEvent",
   "UsageReceipt",
   "OperationQuote",
+  "AuditRun",
+  "AuditPage",
+  "IssueAction",
+  "SiteContextRevision",
+  "SiteVerificationChallenge",
+  "AnalyticsOAuthState",
+  "AnalyticsConnection",
+  "AnalyticsImport",
+  "GoogleOAuthState",
+  "GoogleConnection",
+  "SearchSnapshot",
+  "VisibilityPanel",
+  "VisibilityRun",
+  "ContentDraft",
+  "ContentRevision",
+  "ContentRevisionPin",
+  "AuditPageRetention",
+  "EvidenceReport",
   "AuthThrottle",
   "ProductSession",
 ];
@@ -118,6 +155,18 @@ export async function checkDatabase(url, identity) {
         "Product migrations are missing or runtime role owns product tables",
       );
     const scoped = [
+      ...kernelTables,
+      "WorkspaceAccessEvent",
+  "WorkspaceInvitation",
+  "WorkspaceInvitationSite",
+  "IssueAssignment",
+  "IssueAssignmentEvent",
+  "WorkspaceBrandingRevision",
+  "AgencyBatchQuote",
+  "AgencyBatchItem",
+  "PageIdentity",
+      "PageJournal",
+      "ApiToken",
       "Workspace",
       "Membership",
       "Site",
@@ -129,6 +178,24 @@ export async function checkDatabase(url, identity) {
       "OutboxEvent",
       "UsageReceipt",
       "OperationQuote",
+      "AuditRun",
+      "AuditPage",
+      "IssueAction",
+      "SiteContextRevision",
+      "SiteVerificationChallenge",
+      "AnalyticsOAuthState",
+      "AnalyticsConnection",
+      "AnalyticsImport",
+      "GoogleOAuthState",
+      "GoogleConnection",
+      "SearchSnapshot",
+      "VisibilityPanel",
+      "VisibilityRun",
+      "ContentDraft",
+      "ContentRevision",
+      "ContentRevisionPin",
+      "AuditPageRetention",
+      "EvidenceReport",
     ];
     if (
       catalog.some(
@@ -144,6 +211,68 @@ export async function checkDatabase(url, identity) {
     );
     if (browser.length)
       throw new Error("Browser roles have product-table privileges");
+    const {
+      rows: [kernel],
+    } = await client.query(
+      `SELECT
+       has_schema_privilege(current_user,'lyraseo_kernel','USAGE,CREATE')
+       OR EXISTS (SELECT FROM pg_proc WHERE pronamespace='lyraseo_kernel'::regnamespace
+         AND has_function_privilege(current_user,oid,'EXECUTE'))
+       OR EXISTS (SELECT FROM pg_class WHERE relnamespace='public'::regnamespace
+         AND relname=ANY($1) AND (has_any_column_privilege(current_user,oid,'SELECT,INSERT,UPDATE,REFERENCES')
+           OR has_table_privilege(current_user,oid,'DELETE,TRUNCATE,TRIGGER')))
+       OR has_table_privilege(current_user,'public."UsageReceipt"','UPDATE,DELETE,TRUNCATE,TRIGGER')
+       OR has_any_column_privilege(current_user,'public."UsageReceipt"','UPDATE')
+       OR EXISTS (SELECT FROM pg_roles WHERE rolname IN ('lyraseo_kernel_owner','lyraseo_dispatch','lyraseo_operator','lyraseo_expiry_owner','lyraseo_artifact_maintenance')
+         AND pg_has_role(current_user,oid,'MEMBER')) AS excessive`,
+      [[...kernelTables, "OutboxEvent"]],
+    );
+    if (kernel.excessive)
+      throw new Error(
+        "Application role can access protected kernel or receipt state",
+      );
+    const {
+      rows: [expiry],
+    } = await client.query(`SELECT
+      to_regnamespace('lyraseo_expiry') IS NOT NULL AS installed,
+      coalesce(has_schema_privilege(current_user,to_regnamespace('lyraseo_expiry'),'USAGE,CREATE'),false) AS schema_access,
+      EXISTS(SELECT FROM pg_proc WHERE pronamespace=to_regnamespace('lyraseo_expiry')
+        AND has_function_privilege(current_user,oid,'EXECUTE')) AS function_access,
+      EXISTS(SELECT FROM pg_roles r CROSS JOIN pg_proc p
+        WHERE r.rolname IN ('anon','authenticated') AND p.pronamespace=to_regnamespace('lyraseo_expiry')
+        AND has_function_privilege(r.oid,p.oid,'EXECUTE')) AS browser_function_access,
+      EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE (n.nspname='lyraseo_expiry' OR (n.nspname='public' AND c.relname IN
+          ('ArtifactExpiryPlan','ArtifactExpiryItem','ArtifactExpiryEvent')))
+        AND (has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+          OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))) AS table_access,
+      EXISTS(SELECT FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE r.rolname IN ('anon','authenticated') AND (n.nspname='lyraseo_expiry' OR
+          (n.nspname='public' AND c.relname IN ('ArtifactExpiryPlan','ArtifactExpiryItem','ArtifactExpiryEvent')))
+        AND has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE')) AS browser_access`);
+    if (
+      expiry.schema_access ||
+      expiry.function_access ||
+      expiry.browser_function_access ||
+      expiry.table_access ||
+      expiry.browser_access
+    )
+      throw new Error("Application or browser role can access protected expiry state");
+    if (expiry.installed) {
+      const { rows: expiryTables } = await client.query(
+        `SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS owns
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE (n.nspname='lyraseo_expiry' AND c.relname IN ('environment','absence_verifier')) OR
+           (n.nspname='public' AND c.relname IN ('ArtifactExpiryPlan','ArtifactExpiryItem','ArtifactExpiryEvent'))`,
+      );
+      if (
+        expiryTables.length !== 5 ||
+        expiryTables.some(
+          (r) => !r.relrowsecurity || !r.relforcerowsecurity || r.owns,
+        )
+      )
+        throw new Error("Protected expiry tables or row security are incomplete");
+    }
     if (identity) {
       await client.query(
         "SELECT id::text,user_id::text,created_at,refreshed_at,not_after FROM lyraseo_private.session_metadata WHERE false",
@@ -192,15 +321,14 @@ export async function main(env = process.env) {
       `Supabase public settings request failed (${response.status})`,
     );
   const settings = await response.json();
-  if (
-    !settings.external?.email ||
-    !settings.external?.google ||
-    settings.disable_signup !== true ||
-    settings.external?.anonymous === true
-  )
-    throw new Error(
-      "Provider settings must enable email/Google, disable public signup and disable anonymous auth",
-    );
+  const missing = [
+    !settings.external?.email && "enable email sign-in",
+    !settings.external?.google && "enable Google sign-in",
+    settings.disable_signup !== true && "disable public signup",
+    settings.external?.anonymous === true && "disable anonymous auth",
+  ].filter(Boolean);
+  if (missing.length)
+    throw new Error(`Provider setup required: ${missing.join("; ")}.`);
   console.log(
     "PASS: dedicated provider reachable; email/Google enabled; public signup disabled",
   );
@@ -225,11 +353,13 @@ if (
   } catch (error) {
     // Driver messages may contain private connection details. Emit only safe failure categories.
     console.error(
-      error?.code
-        ? `Auth preflight failed (${String(error.code).replace(/[^A-Z0-9_]/g, "")}). Check configuration privately.`
-        : error instanceof Error && !error.message.includes("://")
-          ? error.message
-          : "Auth preflight failed. Check configuration privately.",
+      error?.cause?.code === "ENOTFOUND"
+        ? "Supabase settings host does not resolve. Check the configured project URL and whether the project is paused."
+        : error?.code
+          ? `Auth preflight failed (${String(error.code).replace(/[^A-Z0-9_]/g, "")}). Check configuration privately.`
+          : error instanceof Error && !error.message.includes("://")
+            ? error.message
+            : "Auth preflight failed. Check configuration privately.",
     );
     process.exitCode = 1;
   }

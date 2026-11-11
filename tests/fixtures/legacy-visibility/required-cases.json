@@ -1,0 +1,118 @@
+[
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "transitions a due enrolled producer row once while preserving every other stored value"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "fences ordinary legacy inserts and cascading deletion while leaving another site usable"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "rejects wrong scope and pause before any source mutation"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "blocks a JSON null rather than treating it as an erased answer"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "preview is read-only and plan progress remains scoped and bounded"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "an independently seeded consistent current row needs no historic signature or rights-limit field"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "blocks inconsistent clock and forged maintenance writes without changing source or receipts"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "busy row backoff survives replan and expires against server time"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "maintenance cannot become owner or use caller settings to forge a scope or receipt"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "pause waits for an admitted atomic transition and prevents later mutation"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "rolls back the source and authorization when the receipt insert fails"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "fence waits for an admitted direct insert and rejects its later retry"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "a retained read linearizes before an expiry transition waiting on its lock"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "bounds manifests and pages a backlog larger than one batch without hiding residuals"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "uses the unchanged stored deadline at fixture offset -1 ms"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "uses the unchanged stored deadline at fixture offset +0 ms"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "uses the unchanged stored deadline at fixture offset 1 ms"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "reports an oversized row as blocked without creating an enrollment or receipt"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "requires a prior bounded maintenance timeout and PostgreSQL cancels long statements"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "preserves a copied task string as an explicit undisclosed residual after field clearing"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "a locked site does not stall a legacy writer in another site of the same workspace"
+  },
+  {
+    "file": "tests/legacy-visibility/core.test.ts",
+    "name": "rejects a stale postmaster binding before any plan or source mutation"
+  },
+  {
+    "file": "tests/legacy-visibility/retention.test.ts",
+    "name": "denies direct runtime selection of raw answers while permitting a producer insert"
+  },
+  {
+    "file": "tests/legacy-visibility/retention.test.ts",
+    "name": "does not return expired raw answers when the caller supplies an earlier clock"
+  },
+  {
+    "file": "tests/legacy-visibility/retention.test.ts",
+    "name": "withholds input-derived metadata copies while retaining safe measurement status"
+  },
+  {
+    "file": "tests/legacy-visibility/retention.test.ts",
+    "name": "rechecks the database deadline after waiting for the site lock"
+  },
+  {
+    "file": "tests/legacy-visibility/retention.test.ts",
+    "name": "rechecks a revoked site grant after waiting for the site lock"
+  },
+  {
+    "file": "tests/legacy-visibility/retention.test.ts",
+    "name": "distinguishes an unexplained SQL NULL and malformed stored JSON from an erasure receipt"
+  },
+  {
+    "file": "tests/legacy-visibility/private-fence.test.ts",
+    "name": "a fenced legacy scope still finalizes and reads a private observation"
+  }
+]

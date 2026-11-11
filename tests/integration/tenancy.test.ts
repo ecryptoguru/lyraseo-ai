@@ -1,16 +1,12 @@
-import { resetDatabase } from "../helpers/database";
+import { resetDatabase, adminUrl, runtimeUrl } from "../helpers/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createDatabase,
   withWorkspace,
   authorizeSite,
 } from "../../packages/db/src";
-const admin = createDatabase(
-  "postgresql://postgres:lyraseo_local_only@127.0.0.1:54329/lyraseo_test",
-);
-const runtime = createDatabase(
-  "postgresql://lyraseo_runtime:local_runtime_only@127.0.0.1:54329/lyraseo_test",
-);
+const admin = createDatabase(adminUrl);
+const runtime = createDatabase(runtimeUrl);
 beforeAll(async () => {
   await resetDatabase();
   await admin.productUser.createMany({

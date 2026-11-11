@@ -40,8 +40,24 @@ function source() {
     history: vi.fn(async () => undefined),
   };
 }
-it("resolves provider-verified data to stable product ownership", async () => {
+async function mfaSource() {
   const s = source();
+  s.currentUser.mockResolvedValue({
+    ...(await s.currentUser()),
+    totpEnrolled: true,
+  });
+  const claims = await s.verifiedClaims();
+  s.verifiedClaims.mockResolvedValue({
+    ...claims,
+    aal: "aal2",
+    amr: [...claims.amr, { method: "totp", timestamp: claims.iat }],
+  });
+  s.currentUser.mockClear();
+  s.verifiedClaims.mockClear();
+  return s;
+}
+it("resolves provider-verified data to stable product ownership", async () => {
+  const s = await mfaSource();
   const actor = await resolveVerifiedActor(s, url, ["founder@example.com"]);
   expect(actor.userId).toBe("stable-product-id");
   expect(s.currentUser).toHaveBeenCalledOnce();
@@ -80,6 +96,10 @@ it("denies missing managed session metadata and staff without MFA", async () => 
   await expect(
     resolveVerifiedActor(missing, url, ["founder@example.com"]),
   ).rejects.toThrow("UNAUTHENTICATED");
+  s.currentUser.mockResolvedValue({
+    ...(await s.currentUser()),
+    totpEnrolled: true,
+  });
   s.staff.mockResolvedValue(true);
   await expect(
     resolveVerifiedActor(s, url, ["founder@example.com"]),
@@ -87,7 +107,7 @@ it("denies missing managed session metadata and staff without MFA", async () => 
 });
 it("does not let a newly refreshed provider timestamp bypass expired product-session history", async () => {
   const s = {
-    ...source(),
+    ...(await mfaSource()),
     history: async () => {
       throw new Error("SESSION_EXPIRED");
     },
@@ -95,4 +115,27 @@ it("does not let a newly refreshed provider timestamp bypass expired product-ses
   await expect(
     resolveVerifiedActor(s, url, ["founder@example.com"]),
   ).rejects.toThrow("SESSION_EXPIRED");
+});
+
+it("withholds factorless first-factor access rather than assuming the identity never had MFA", async () => {
+  const s = source();
+  await expect(
+    resolveVerifiedActor(s, url, ["founder@example.com"]),
+  ).rejects.toThrow("AUTH_POLICY_UNVERIFIED");
+  expect(s.account).not.toHaveBeenCalled();
+  expect(s.history).not.toHaveBeenCalled();
+});
+
+it("withholds a factorless identity even when an earlier signed token reports TOTP", async () => {
+  const s = source();
+  const claims = await s.verifiedClaims();
+  s.verifiedClaims.mockResolvedValue({
+    ...claims,
+    aal: "aal2",
+    amr: [...claims.amr, { method: "totp", timestamp: claims.iat }],
+  });
+  await expect(
+    resolveVerifiedActor(s, url, ["founder@example.com"]),
+  ).rejects.toThrow("AUTH_POLICY_UNVERIFIED");
+  expect(s.account).not.toHaveBeenCalled();
 });
